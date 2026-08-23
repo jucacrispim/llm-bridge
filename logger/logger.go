@@ -2,6 +2,7 @@ package logger
 
 import (
 	"errors"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -54,6 +55,16 @@ func SetLogLevelStr(levelstr string) error {
 
 func GetLogLevel() Level {
 	return currentLogLevel
+}
+
+// SetOutput redirects all loggers (trace, debug, info, warning and error) to
+// the given writer. Use io.MultiWriter to keep writing to multiple destinations.
+func SetOutput(w io.Writer) {
+	traceLogger.SetOutput(w)
+	debugLogger.SetOutput(w)
+	infoLogger.SetOutput(w)
+	warningLogger.SetOutput(w)
+	errorLogger.SetOutput(w)
 }
 
 func Tracef(format string, v ...interface{}) {

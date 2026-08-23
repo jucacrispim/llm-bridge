@@ -91,6 +91,34 @@ func TestSetLogLevelStrInvalid(t *testing.T) {
 	}
 }
 
+func TestSetOutput(t *testing.T) {
+	setLevelForTest(t, LevelDebug)
+
+	// Save the original writers so we can restore them afterwards.
+	origTrace := traceLogger.Writer()
+	origDebug := debugLogger.Writer()
+	origInfo := infoLogger.Writer()
+	origWarning := warningLogger.Writer()
+	origError := errorLogger.Writer()
+	t.Cleanup(func() {
+		SetOutput(origTrace)
+		traceLogger.SetOutput(origTrace)
+		debugLogger.SetOutput(origDebug)
+		infoLogger.SetOutput(origInfo)
+		warningLogger.SetOutput(origWarning)
+		errorLogger.SetOutput(origError)
+	})
+
+	var buf bytes.Buffer
+	SetOutput(&buf)
+
+	Debugf("olá")
+	got := strings.TrimSpace(buf.String())
+	if got != "[DEBUG] olá" {
+		t.Fatalf("got %q want %q", got, "[DEBUG] olá")
+	}
+}
+
 func TestSetLogLevelStrValid(t *testing.T) {
 	tests := []struct {
 		name string

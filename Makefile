@@ -12,11 +12,11 @@ SCRIPTS_DIR=./scripts/
 
 .PHONY: build # - Creates the binary under the build/ directory
 build:
-	$(GOBUILD) $(OUTFLAG)
+	$(GOBUILD) $(OUTFLAG) cmd/bridge/main.go
 
 .PHONY: test # - Run all tests
 test:
-	$(GOBUILD)
+	$(GOBUILD) ./...
 	$(GOTEST)
 
 .PHONY: setupenv # - Install needed tools for tests/docs

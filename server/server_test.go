@@ -234,6 +234,26 @@ func TestHandleLineCancel(t *testing.T) {
 	}
 }
 
+func TestHandleLineCancelResetsHistory(t *testing.T) {
+	st := newTestState()
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "primeira"},
+		{Role: llm.RoleUser, Content: "segunda"},
+	}
+	st.historyLenBeforeTurn = 1
+	var w bytes.Buffer
+	resp, _ := handleLine(`{"method":"cancel"}`, st, &w)
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+	if len(st.history) != 1 || st.history[0].Content != "primeira" {
+		t.Fatalf("history not reset correctly: %+v", st.history)
+	}
+	if st.inToolCycle {
+		t.Fatal("inToolCycle should be false after cancel")
+	}
+}
+
 func TestHandleLineStatus(t *testing.T) {
 	st := newTestState()
 	var w bytes.Buffer
@@ -528,5 +548,37 @@ func TestHandleLineToolResultPartialWait(t *testing.T) {
 	}
 	if provider.callCount != 1 {
 		t.Fatalf("expected provider NOT called again, got %d", provider.callCount)
+	}
+}
+
+func TestHandleLineCancelWithStoredCancelFunc(t *testing.T) {
+	st := newTestState()
+	canceled := false
+	st.cancel = func() { canceled = true }
+	var w bytes.Buffer
+	resp, quit := handleLine(`{"method":"cancel"}`, st, &w)
+	if quit {
+		t.Fatal("cancel should not quit")
+	}
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+	if !canceled {
+		t.Fatal("expected stored cancel func to be invoked")
+	}
+}
+
+func TestHandleLinePromptContextCanceled(t *testing.T) {
+	st := &state{provider: &fakeProvider{err: context.Canceled}}
+	var w bytes.Buffer
+	resp, quit := handleLine(`{"method":"prompt","params":{"text":"oi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if resp != "" {
+		t.Fatalf("expected empty response after context canceled, got %q", resp)
+	}
+	if w.Len() != 0 {
+		t.Fatalf("expected no output after context canceled, got %q", w.String())
 	}
 }

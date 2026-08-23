@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -23,6 +24,9 @@ type state struct {
 	pendingToolResults map[string]json.RawMessage
 	history            []llm.Message
 	inToolCycle        bool
+
+	cancel              context.CancelFunc
+	historyLenBeforeTurn int
 }
 
 type setCwdParams struct {
@@ -62,10 +66,21 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if st.inToolCycle {
 			return string(protocol.NewError("cannot send new prompt while awaiting tool results")), false
 		}
+		st.historyLenBeforeTurn = len(st.history)
 		history.AppendUser(&st.history, p.Text)
 		return runToolCycle(st, w)
 
 	case string(protocol.MethodCancel):
+		if st.cancel != nil {
+			st.cancel()
+			st.cancel = nil
+		}
+		if st.historyLenBeforeTurn >= 0 && st.historyLenBeforeTurn <= len(st.history) {
+			st.history = st.history[:st.historyLenBeforeTurn]
+		}
+		st.inToolCycle = false
+		st.pendingToolIDs = nil
+		st.pendingToolResults = nil
 		return string(protocol.NewCancelled()), false
 
 	case string(protocol.MethodStatus):
@@ -125,17 +140,26 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 
 func runToolCycle(st *state, w io.Writer) (string, bool) {
 	for {
+		ctx, cancel := context.WithCancel(context.Background())
+		st.cancel = cancel
 		emittedChunk := false
-		resp, err := st.provider.Chat(context.Background(), llm.ChatRequest{
+		resp, err := st.provider.Chat(ctx, llm.ChatRequest{
 			Messages: st.history,
 			Tools:    tools.All(),
 		}, func(s string) {
 			emittedChunk = true
 			_, _ = fmt.Fprint(w, string(protocol.NewChunk(s))+"\n")
 		})
+		st.cancel = nil
 		if err != nil {
+			cancel()
+			if errors.Is(err, context.Canceled) {
+				// request was cancelled, history already cleared in cancel handler
+				return "", false
+			}
 			return string(protocol.NewError(err.Error())), false
 		}
+		cancel()
 
 		if !emittedChunk && resp.Content != "" {
 			_, _ = fmt.Fprint(w, string(protocol.NewChunk(resp.Content))+"\n")
@@ -163,6 +187,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			st.inToolCycle = false
 			st.pendingToolIDs = nil
 			st.pendingToolResults = nil
+			st.historyLenBeforeTurn = 0
 			return "", false
 		}
 

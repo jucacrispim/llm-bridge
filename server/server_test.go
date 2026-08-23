@@ -259,7 +259,6 @@ func TestHandleLineCancelResetsHistory(t *testing.T) {
 	}
 }
 
-
 func TestHandleLineSetCwd(t *testing.T) {
 	st := newTestState()
 	var w bytes.Buffer

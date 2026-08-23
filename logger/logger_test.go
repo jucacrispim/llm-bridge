@@ -121,9 +121,9 @@ func TestSetOutput(t *testing.T) {
 
 func TestSetLogLevelStrValid(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		level string
-		want Level
+		want  Level
 	}{
 		{"trace", "trace", LevelTrace},
 		{"debug", "debug", LevelDebug},

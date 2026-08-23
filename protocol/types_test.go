@@ -93,7 +93,6 @@ func TestNewCancelled(t *testing.T) {
 	}
 }
 
-
 func TestNewUsageDelta(t *testing.T) {
 	got := string(NewUsageDelta(10, 5, 15))
 	want := `{"event":"usage_delta","input_tokens":10,"output_tokens":5,"total_tokens":15}`

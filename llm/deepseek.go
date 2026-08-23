@@ -59,16 +59,16 @@ type openAIFunctionCall struct {
 }
 
 type openAIMessageToolCall struct {
-	ID       string              `json:"id"`
-	Type     string              `json:"type"`
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
 	Function openAIFunctionCall `json:"function"`
 }
 
 type openAIMessage struct {
-	Role        string                 `json:"role"`
-	Content     string                 `json:"content,omitempty"`
-	ToolCalls   []openAIMessageToolCall `json:"tool_calls,omitempty"`
-	ToolCallID  string                 `json:"tool_call_id,omitempty"`
+	Role       string                  `json:"role"`
+	Content    string                  `json:"content,omitempty"`
+	ToolCalls  []openAIMessageToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string                  `json:"tool_call_id,omitempty"`
 }
 
 type openAIFunction struct {
@@ -103,8 +103,8 @@ type openAIResponse struct {
 }
 
 type openAIToolCallDelta struct {
-	Index int `json:"index"`
-	ID    string `json:"id"`
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
 	Function struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`

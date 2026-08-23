@@ -50,7 +50,6 @@ type Cancelled struct {
 	Event Event `json:"event"`
 }
 
-
 type UsageDelta struct {
 	Event        Event `json:"event"`
 	InputTokens  int   `json:"input_tokens"`
@@ -98,7 +97,6 @@ func NewCancelled() []byte {
 	b, _ := json.Marshal(evt)
 	return b
 }
-
 
 func NewUsageDelta(inputTokens, outputTokens, totalTokens int) []byte {
 	evt := UsageDelta{Event: EventUsageDelta, InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens}

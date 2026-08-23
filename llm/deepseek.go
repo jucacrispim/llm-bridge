@@ -15,43 +15,158 @@ import (
 	"llm-bridge/logger"
 )
 
+// DefaultReasoningEffort is the reasoning_effort value sent to the API when
+// thinking mode is enabled (the user confirmed the API accepts "high").
+const DefaultReasoningEffort = "high"
+
 type DeepSeekProvider struct {
 	apiKey   string
 	endpoint string
 	model    string
-	client   *http.Client
+	thinking bool
+	// explicitModel reports whether model was explicitly configured (via
+	// --model or DEEPSEEK_MODEL). When false, the model is derived from the
+	// thinking mode (deepseek-reasoner / deepseek-chat).
+	explicitModel bool
+	// reasoningEffort is sent as reasoning_effort in the request body when
+	// thinking is enabled. Empty means the parameter is not sent.
+	reasoningEffort string
+	client          *http.Client
 }
 
+// NewDeepSeekProvider creates a provider with thinking mode enabled by default
+// and an explicitly configured model.
 func NewDeepSeekProvider(apiKey, endpoint, model string) *DeepSeekProvider {
+	return NewDeepSeekProviderWithThinking(apiKey, endpoint, model, true)
+}
+
+// NewDeepSeekProviderWithThinking creates a provider with an explicit thinking
+// setting and an explicitly configured model. The model is always respected:
+// the thinking mode only controls whether reasoning_effort is sent and, for
+// auto-model providers, which default model is used.
+func NewDeepSeekProviderWithThinking(apiKey, endpoint, model string, thinking bool) *DeepSeekProvider {
 	return &DeepSeekProvider{
-		apiKey:   apiKey,
-		endpoint: endpoint,
-		model:    model,
-		client:   &http.Client{},
+		apiKey:          apiKey,
+		endpoint:        endpoint,
+		model:           model,
+		thinking:        thinking,
+		explicitModel:   true,
+		reasoningEffort: DefaultReasoningEffort,
+		client:          &http.Client{},
 	}
+}
+
+// NewDeepSeekProviderAutoModel creates a provider without an explicit model;
+// the model is derived from the thinking mode (deepseek-reasoner when thinking
+// is on, deepseek-chat when off).
+func NewDeepSeekProviderAutoModel(apiKey, endpoint string, thinking bool) *DeepSeekProvider {
+	return &DeepSeekProvider{
+		apiKey:          apiKey,
+		endpoint:        endpoint,
+		thinking:        thinking,
+		explicitModel:   false,
+		reasoningEffort: DefaultReasoningEffort,
+		client:          &http.Client{},
+	}
+}
+
+// DefaultModel returns the DeepSeek model that matches the thinking mode:
+// deepseek-reasoner enables thinking, deepseek-chat disables it.
+func DefaultModel(thinking bool) string {
+	if thinking {
+		return "deepseek-reasoner"
+	}
+	return "deepseek-chat"
+}
+
+// parseBoolEnv parses an environment variable as a boolean, falling back to
+// def when the variable is empty or has an unrecognized value.
+func parseBoolEnv(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	}
+	return def
+}
+
+// ThinkingFromEnv reads DEEPSEEK_THINKING (true/false/1/0/yes/no/on/off),
+// returning def when unset or unrecognized. Default thinking mode is true.
+func ThinkingFromEnv(def bool) bool {
+	return parseBoolEnv("DEEPSEEK_THINKING", def)
 }
 
 // NewDeepSeekProviderFromEnv creates a provider reading from environment variables:
 //
-//	DEEPSEEK_API_KEY  (required)
-//	DEEPSEEK_URL      (optional, default https://api.deepseek.com/chat/completions)
-//	DEEPSEEK_MODEL    (optional, default deepseek-chat)
+//	DEEPSEEK_API_KEY           (required)
+//	DEEPSEEK_URL               (optional, default https://api.deepseek.com/chat/completions)
+//	DEEPSEEK_MODEL             (optional, explicit model — always respected)
+//	DEEPSEEK_THINKING          (optional, default true — thinking mode)
+//	DEEPSEEK_REASONING_EFFORT  (optional, default "high" — sent when thinking is on)
 func NewDeepSeekProviderFromEnv() *DeepSeekProvider {
 	apiKey := os.Getenv("DEEPSEEK_API_KEY")
 	endpoint := os.Getenv("DEEPSEEK_URL")
 	if endpoint == "" {
 		endpoint = "https://api.deepseek.com/chat/completions"
 	}
+	thinking := ThinkingFromEnv(true)
 	model := os.Getenv("DEEPSEEK_MODEL")
-	if model == "" {
-		model = "deepseek-chat"
+	if model != "" {
+		return NewDeepSeekProviderWithThinking(apiKey, endpoint, model, thinking)
 	}
-	return NewDeepSeekProvider(apiKey, endpoint, model)
+	return NewDeepSeekProviderAutoModel(apiKey, endpoint, thinking)
 }
 
 func (p *DeepSeekProvider) Name() string { return "deepseek" }
 
-func (p *DeepSeekProvider) Model() string { return p.model }
+// Model returns the model used for requests. An explicitly configured model is
+// always respected; otherwise the model is derived from the thinking mode.
+func (p *DeepSeekProvider) Model() string {
+	if p.explicitModel {
+		return p.model
+	}
+	return DefaultModel(p.thinking)
+}
+
+// Thinking reports whether thinking mode is enabled for this provider.
+func (p *DeepSeekProvider) Thinking() bool { return p.thinking }
+
+// SetThinking updates the thinking mode of the provider. For auto-model
+// providers this also changes the effective model (deepseek-reasoner /
+// deepseek-chat). An explicitly configured model is never touched.
+func (p *DeepSeekProvider) SetThinking(thinking bool) { p.thinking = thinking }
+
+// ReasoningEffort returns the reasoning_effort value sent when thinking is on.
+func (p *DeepSeekProvider) ReasoningEffort() string { return p.reasoningEffort }
+
+// SetReasoningEffort overrides the reasoning_effort value (e.g. "low",
+// "medium", "high"). An empty value disables sending the parameter.
+func (p *DeepSeekProvider) SetReasoningEffort(effort string) { p.reasoningEffort = effort }
+
+// effectiveThinking returns the thinking mode to use for a request, honoring a
+// per-request override over the provider's configured mode.
+func (p *DeepSeekProvider) effectiveThinking(req ChatRequest) bool {
+	if req.Thinking != nil {
+		return *req.Thinking
+	}
+	return p.thinking
+}
+
+// resolveModel returns the model to use for a request, honoring, in order of
+// priority: an explicit per-request model (from a prompt), then an explicitly
+// configured provider model, then the default model derived from the effective
+// thinking mode.
+func (p *DeepSeekProvider) resolveModel(req ChatRequest) string {
+	if req.Model != "" {
+		return req.Model
+	}
+	if p.explicitModel {
+		return p.model
+	}
+	return DefaultModel(p.effectiveThinking(req))
+}
 
 type openAIFunctionCall struct {
 	Name      string `json:"name"`
@@ -65,10 +180,11 @@ type openAIMessageToolCall struct {
 }
 
 type openAIMessage struct {
-	Role       string                  `json:"role"`
-	Content    string                  `json:"content,omitempty"`
-	ToolCalls  []openAIMessageToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string                  `json:"tool_call_id,omitempty"`
+	Role             string                  `json:"role"`
+	Content          string                  `json:"content,omitempty"`
+	ReasoningContent string                  `json:"reasoning_content,omitempty"`
+	ToolCalls        []openAIMessageToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string                  `json:"tool_call_id,omitempty"`
 }
 
 type openAIFunction struct {
@@ -83,16 +199,18 @@ type openAITool struct {
 }
 
 type openAIRequest struct {
-	Model    string          `json:"model"`
-	Messages []openAIMessage `json:"messages"`
-	Stream   bool            `json:"stream"`
-	Tools    []openAITool    `json:"tools,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []openAIMessage `json:"messages"`
+	Stream          bool            `json:"stream"`
+	Tools           []openAITool    `json:"tools,omitempty"`
+	ReasoningEffort *string         `json:"reasoning_effort,omitempty"`
 }
 
 type openAIResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
@@ -114,8 +232,9 @@ type openAIToolCallDelta struct {
 type openAIStreamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string                `json:"content"`
-			ToolCalls []openAIToolCallDelta `json:"tool_calls"`
+			ReasoningContent string                `json:"reasoning_content"`
+			Content          string                `json:"content"`
+			ToolCalls        []openAIToolCallDelta `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -135,6 +254,13 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 			Role:       m.Role,
 			Content:    m.Content,
 			ToolCallID: m.ToolCallID,
+		}
+		// DeepSeek's thinking mode requires the assistant's reasoning_content to
+		// be passed back to the API whenever that message performed tool calls
+		// (otherwise the API returns a 400 error). For final answers without
+		// tool calls it is ignored by the API, so we omit it to save tokens.
+		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
+			msg.ReasoningContent = m.Reasoning
 		}
 		for _, tc := range m.ToolCalls {
 			msg.ToolCalls = append(msg.ToolCalls, openAIMessageToolCall{
@@ -174,11 +300,19 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 		logger.Tracef("  tool type=%s name=%s", t.Type, t.Function.Name)
 	}
 
+	model := p.resolveModel(req)
+
 	payload := openAIRequest{
-		Model:    p.model,
+		Model:    model,
 		Messages: msgs,
 		Stream:   true,
 		Tools:    toolsPayload,
+	}
+	// The API accepts reasoning_effort (e.g. "high") to control the strength of
+	// the thinking/reasoning stage. Send it whenever thinking is enabled.
+	if p.effectiveThinking(req) && p.reasoningEffort != "" {
+		effort := p.reasoningEffort
+		payload.ReasoningEffort = &effort
 	}
 
 	body, err := json.Marshal(payload)
@@ -207,6 +341,7 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 	}
 
 	var fullContent strings.Builder
+	var fullReasoning strings.Builder
 	var usage *Usage
 	stopReason := "END_TURN"
 	toolBuilders := map[int]*toolCallBuilder{}
@@ -230,6 +365,15 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 
 		if len(chunk.Choices) > 0 {
 			choice := chunk.Choices[0]
+
+			// The chain-of-thought (reasoning_content) streams in before the
+			// final content; keep it separate from the visible answer.
+			if choice.Delta.ReasoningContent != "" {
+				fullReasoning.WriteString(choice.Delta.ReasoningContent)
+				if req.OnReasoning != nil {
+					req.OnReasoning(choice.Delta.ReasoningContent)
+				}
+			}
 
 			if choice.Delta.Content != "" {
 				fullContent.WriteString(choice.Delta.Content)
@@ -291,5 +435,7 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 		StopReason: stopReason,
 		Usage:      usage,
 		ToolCalls:  toolCalls,
+		Model:      model,
+		Reasoning:  fullReasoning.String(),
 	}, nil
 }

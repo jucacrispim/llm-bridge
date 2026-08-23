@@ -47,6 +47,7 @@ func AppendAssistant(hist *[]llm.Message, resp *llm.ChatResponse) {
 		Role:      llm.RoleAssistant,
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
+		Reasoning: resp.Reasoning,
 	})
 }
 

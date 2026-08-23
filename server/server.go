@@ -28,6 +28,9 @@ type state struct {
 	inToolCycle        bool
 	firstTurn          bool
 
+	modelOverride    string
+	thinkingOverride *bool
+
 	cancel               context.CancelFunc
 	historyLenBeforeTurn int
 
@@ -79,6 +82,12 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 				history.AppendUser(&st.history, e.Render())
 			}
 			st.firstTurn = false
+		}
+		if p.Model != "" {
+			st.modelOverride = p.Model
+		}
+		if p.Thinking != nil {
+			st.thinkingOverride = p.Thinking
 		}
 		st.historyLenBeforeTurn = len(st.history) // context preserved on cancel
 		history.AppendUser(&st.history, p.Text)
@@ -154,9 +163,18 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		ctx, cancel := context.WithCancel(context.Background())
 		st.cancel = cancel
 		emittedChunk := false
+		emittedReasoning := false
 		resp, err := st.provider.Chat(ctx, llm.ChatRequest{
 			Messages: st.history,
 			Tools:    tools.All(),
+			Model:    st.modelOverride,
+			Thinking: st.thinkingOverride,
+			// The chain-of-thought streams before the content; surface it to the
+			// client as thinking events so it can display the reasoning.
+			OnReasoning: func(s string) {
+				emittedReasoning = true
+				_, _ = fmt.Fprint(w, string(protocol.NewThinking(s))+"\n")
+			},
 		}, func(s string) {
 			emittedChunk = true
 			_, _ = fmt.Fprint(w, string(protocol.NewChunk(s))+"\n")
@@ -187,6 +205,11 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		if !emittedChunk && resp.Content != "" {
 			_, _ = fmt.Fprint(w, string(protocol.NewChunk(resp.Content))+"\n")
 		}
+		// Providers that return the reasoning without streaming it still get the
+		// thinking surfaced to the client, as a single event.
+		if !emittedReasoning && resp.Reasoning != "" {
+			_, _ = fmt.Fprint(w, string(protocol.NewThinking(resp.Reasoning))+"\n")
+		}
 
 		history.AppendAssistant(&st.history, resp)
 
@@ -203,14 +226,17 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 		if len(resp.ToolCalls) == 0 {
 			contextPct := 0.0
+			model := resp.Model
+			if model == "" {
+				model = st.provider.Model()
+			}
 			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
-				st.provider.Model(), inputTokens, outputTokens, totalTokensThisTurn)
+				model, inputTokens, outputTokens, totalTokensThisTurn)
 			_, _ = fmt.Fprint(w, string(newEnd)+"\n")
 
 			newUsage := protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn)
 			_, _ = fmt.Fprint(w, string(newUsage)+"\n")
 			history.Sanitize(&st.history)
-			st.history = st.history
 			st.inToolCycle = false
 			st.pendingToolIDs = nil
 			st.pendingToolResults = nil

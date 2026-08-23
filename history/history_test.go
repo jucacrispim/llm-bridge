@@ -30,6 +30,25 @@ func TestAppendAssistant(t *testing.T) {
 	}
 }
 
+func TestAppendAssistantStoresReasoning(t *testing.T) {
+	var h []llm.Message
+	resp := &llm.ChatResponse{
+		Content:   "answer",
+		Reasoning: "think step by step",
+		ToolCalls: []llm.ToolCall{{ID: "call_1", Name: "read"}},
+	}
+	AppendAssistant(&h, resp)
+	if len(h) != 1 {
+		t.Fatalf("len = %d, want 1", len(h))
+	}
+	if h[0].Reasoning != "think step by step" {
+		t.Fatalf("Reasoning = %q, want %q", h[0].Reasoning, "think step by step")
+	}
+	if len(h[0].ToolCalls) != 1 || h[0].ToolCalls[0].ID != "call_1" {
+		t.Fatalf("tool calls not preserved: %+v", h[0].ToolCalls)
+	}
+}
+
 func TestAppendToolResult(t *testing.T) {
 	var h []llm.Message
 	AppendToolResult(&h, "call_1", `{"ok":true}`)

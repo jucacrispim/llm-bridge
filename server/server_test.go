@@ -20,8 +20,12 @@ type fakeProvider struct {
 	resp      *llm.ChatResponse
 	err       error
 	skipChunk bool
-	callCount int
-	lastReq   llm.ChatRequest
+	// skipReasoning makes Chat return resp.Reasoning without invoking the
+	// OnReasoning callback, simulating providers that don't stream the
+	// chain-of-thought. It exercises the server's non-streaming fallback.
+	skipReasoning bool
+	callCount     int
+	lastReq       llm.ChatRequest
 }
 
 func (f *fakeProvider) Chat(ctx context.Context, req llm.ChatRequest, onChunk func(string)) (*llm.ChatResponse, error) {
@@ -45,6 +49,9 @@ func (f *fakeProvider) Chat(ctx context.Context, req llm.ChatRequest, onChunk fu
 	}
 	if onChunk != nil && !f.skipChunk && r.Content != "" {
 		onChunk(r.Content)
+	}
+	if req.OnReasoning != nil && !f.skipReasoning && r.Reasoning != "" {
+		req.OnReasoning(r.Reasoning)
 	}
 	return r, nil
 }
@@ -750,6 +757,81 @@ func TestNoContextFilesBehavesAsBefore(t *testing.T) {
 	}
 }
 
+func TestHandleLinePromptThinkingOverride(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi","thinking":false}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.Thinking == nil {
+		t.Fatal("expected Thinking override in ChatRequest")
+	}
+	if *fp.lastReq.Thinking {
+		t.Fatal("Thinking = true, want false")
+	}
+	if fp.lastReq.Model != "" {
+		t.Errorf("Model = %q, want empty", fp.lastReq.Model)
+	}
+	// the override persists for subsequent prompts without it
+	fp.lastReq = llm.ChatRequest{}
+	w.Reset()
+	_, quit = handleLine(`{"method":"prompt","params":{"text":"again"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.Thinking == nil || *fp.lastReq.Thinking {
+		t.Fatalf("expected persisted Thinking=false, got %+v", fp.lastReq.Thinking)
+	}
+}
+
+func TestHandleLinePromptModelOverride(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi","model":"deepseek-reasoner"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.Model != "deepseek-reasoner" {
+		t.Errorf("Model = %q, want deepseek-reasoner", fp.lastReq.Model)
+	}
+	if fp.lastReq.Thinking != nil {
+		t.Errorf("Thinking should be nil, got %+v", fp.lastReq.Thinking)
+	}
+}
+
+func TestTurnEndUsesResponseModel(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{
+			Content:    "Hello",
+			StopReason: "END_TURN",
+			Usage:      &llm.Usage{},
+			Model:      "deepseek-reasoner",
+		},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !strings.Contains(w.String(), `"model":"deepseek-reasoner"`) {
+		t.Fatalf("expected resolved model in turn_end, got %q", w.String())
+	}
+}
+
 // writeTestFile creates the file (and parent directories) with the given content.
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
@@ -758,5 +840,68 @@ func writeTestFile(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
+	}
+}
+
+func TestHandleLinePromptEmitsThinkingEvent(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{
+			Content:    "answer",
+			StopReason: "END_TURN",
+			Usage:      &llm.Usage{},
+			Reasoning:  "let me think about this",
+		},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	out := w.String()
+	if !strings.Contains(out, `{"event":"thinking","text":"let me think about this"}`) {
+		t.Fatalf("expected thinking event with reasoning, got %q", out)
+	}
+	// reasoning must also be stored in the history for the next turn
+	if len(st.history) == 0 || st.history[len(st.history)-1].Reasoning != "let me think about this" {
+		t.Fatalf("expected reasoning stored in history, got %+v", st.history)
+	}
+}
+
+// TestHandleLinePromptEmitsThinkingFallback cobre o branch do runToolCycle em que
+// o provedor retorna resp.Reasoning sem streameá-lo (OnReasoning nunca é chamado,
+// via fakeProvider.skipReasoning). Nesse caso o servidor emite um único evento
+// thinking como fallback e ainda persiste o reasoning no histórico.
+func TestHandleLinePromptEmitsThinkingFallback(t *testing.T) {
+	fp := &fakeProvider{
+		name:          "fake",
+		skipReasoning: true,
+		resp: &llm.ChatResponse{
+			Content:    "answer",
+			StopReason: "END_TURN",
+			Usage:      &llm.Usage{},
+			Reasoning:  "think step by step",
+		},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	out := w.String()
+	// exactly ONE thinking event, via fallback (not streaming)
+	if got := strings.Count(out, `"event":"thinking"`); got != 1 {
+		t.Fatalf("expected exactly 1 thinking event (fallback), got %d in %q", got, out)
+	}
+	if !strings.Contains(out, `"text":"think step by step"`) {
+		t.Fatalf("expected fallback thinking event with reasoning text, got %q", out)
+	}
+	// the reasoning is still persisted in the history for the next turn
+	if len(st.history) == 0 || st.history[len(st.history)-1].Reasoning != "think step by step" {
+		t.Fatalf("expected reasoning stored in history, got %+v", st.history)
 	}
 }

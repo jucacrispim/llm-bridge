@@ -24,6 +24,14 @@ type Chunk struct {
 	Text  string `json:"text"`
 }
 
+// Thinking is a streaming fragment of the model's chain-of-thought
+// (reasoning_content), emitted before the content chunks when thinking mode is
+// enabled. The client concatenates the Text fragments, mirroring Chunk.
+type Thinking struct {
+	Event Event  `json:"event"`
+	Text  string `json:"text"`
+}
+
 type ToolCallEvent struct {
 	Event Event           `json:"event"`
 	ID    string          `json:"id"`
@@ -65,6 +73,12 @@ func NewReady() []byte {
 
 func NewChunk(text string) []byte {
 	evt := Chunk{Event: EventChunk, Text: text}
+	b, _ := json.Marshal(evt)
+	return b
+}
+
+func NewThinking(text string) []byte {
+	evt := Thinking{Event: EventThinking, Text: text}
 	b, _ := json.Marshal(evt)
 	return b
 }

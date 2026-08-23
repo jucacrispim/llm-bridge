@@ -16,6 +16,13 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
+	// Reasoning is the model's chain-of-thought (deepseek's reasoning_content)
+	// that accompanied this message, produced only when thinking mode is on.
+	// It is kept in the history and sent back to the API for assistant messages
+	// that performed tool calls (DeepSeek's thinking mode returns a 400 error
+	// otherwise). For final answers without tool calls it is omitted from
+	// requests to save tokens.
+	Reasoning string
 }
 
 type Tool struct {
@@ -28,6 +35,14 @@ type ChatRequest struct {
 	Messages []Message
 	Tools    []Tool
 	Model    string
+	// Thinking optionally overrides the provider's thinking mode for this
+	// request. nil means "use the provider's configured mode"; true/false
+	// switches between deepseek-reasoner and deepseek-chat unless Model is set.
+	Thinking *bool
+	// OnReasoning, when set, is invoked with each streaming chunk of the model's
+	// chain-of-thought (deepseek's reasoning_content), which arrives before the
+	// content chunks. Used to surface the thinking to the client.
+	OnReasoning func(string)
 }
 
 type Usage struct {
@@ -47,6 +62,11 @@ type ChatResponse struct {
 	StopReason string
 	Usage      *Usage
 	ToolCalls  []ToolCall
+	// Model is the model actually used for this response.
+	Model string
+	// Reasoning is the model's full chain-of-thought (deepseek's
+	// reasoning_content) for this response, populated when thinking mode is on.
+	Reasoning string
 }
 
 type LLMProvider interface {

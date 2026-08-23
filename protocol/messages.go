@@ -18,6 +18,7 @@ type Event string
 const (
 	EventReady        Event = "ready"
 	EventChunk        Event = "chunk"
+	EventThinking     Event = "thinking"
 	EventToolCall     Event = "tool_call"
 	EventTurnEnd      Event = "turn_end"
 	EventError        Event = "error"
@@ -35,6 +36,10 @@ type Command struct {
 type PromptParams struct {
 	Text  string `json:"text"`
 	Model string `json:"model"`
+	// Thinking optionally overrides thinking mode for the conversation:
+	// true → deepseek-reasoner, false → deepseek-chat. Omitted keeps the
+	// provider's configured mode.
+	Thinking *bool `json:"thinking,omitempty"`
 }
 
 type ToolResultParams struct {

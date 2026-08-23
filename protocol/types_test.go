@@ -100,3 +100,11 @@ func TestNewUsageDelta(t *testing.T) {
 		t.Errorf("NewUsageDelta() = %s, want %s", got, want)
 	}
 }
+
+func TestNewThinking(t *testing.T) {
+	got := string(NewThinking("reasoning..."))
+	want := `{"event":"thinking","text":"reasoning..."}`
+	if got != want {
+		t.Errorf("NewThinking() = %s, want %s", got, want)
+	}
+}

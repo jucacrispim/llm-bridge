@@ -19,6 +19,8 @@ const defaultLogFile = "/tmp/llm-bridge.log"
 func main() {
 	providerName := flag.String("provider", "deepseek", "LLM provider (only 'deepseek' supported)")
 	modelName := flag.String("model", "", "model to use (overrides DEEPSEEK_MODEL)")
+	thinking := flag.Bool("thinking", llm.ThinkingFromEnv(true), "enable thinking mode (uses deepseek-reasoner when no explicit model); pass -thinking=false to use deepseek-chat")
+	reasoningEffort := flag.String("reasoning-effort", "", "reasoning_effort sent when thinking is on (e.g. low/medium/high; default \"high\")")
 	debug := flag.Bool("debug", false, "enable debug logging to a file")
 	logFile := flag.String("logfile", defaultLogFile, "path of the log file used in debug mode")
 	flag.Parse()
@@ -35,16 +37,39 @@ func main() {
 		}
 	}
 
+	// Resolve the model: an explicit --model flag wins, then DEEPSEEK_MODEL.
+	// When no explicit model is configured, the provider derives the model from
+	// the thinking mode (the --thinking flag, which defaults to
+	// DEEPSEEK_THINKING or true), so a thinking override never discards an
+	// explicitly configured model.
+	apiKey := os.Getenv("DEEPSEEK_API_KEY")
+	endpoint := os.Getenv("DEEPSEEK_URL")
+	if endpoint == "" {
+		endpoint = "https://api.deepseek.com/chat/completions"
+	}
+	model := *modelName
+	if model == "" {
+		model = os.Getenv("DEEPSEEK_MODEL")
+	}
+
 	var provider llm.LLMProvider
-	if *modelName != "" {
-		apiKey := os.Getenv("DEEPSEEK_API_KEY")
-		endpoint := os.Getenv("DEEPSEEK_URL")
-		if endpoint == "" {
-			endpoint = "https://api.deepseek.com/chat/completions"
-		}
-		provider = llm.NewDeepSeekProvider(apiKey, endpoint, *modelName)
+	if model != "" {
+		provider = llm.NewDeepSeekProviderWithThinking(apiKey, endpoint, model, *thinking)
 	} else {
-		provider = llm.NewDeepSeekProviderFromEnv()
+		provider = llm.NewDeepSeekProviderAutoModel(apiKey, endpoint, *thinking)
+	}
+
+	// Reasoning effort: the --reasoning-effort flag wins, then
+	// DEEPSEEK_REASONING_EFFORT, then the "high" default. Only used when
+	// thinking is enabled.
+	if dp, ok := provider.(*llm.DeepSeekProvider); ok {
+		effort := *reasoningEffort
+		if effort == "" {
+			effort = os.Getenv("DEEPSEEK_REASONING_EFFORT")
+		}
+		if effort != "" {
+			dp.SetReasoningEffort(effort)
+		}
 	}
 
 	if err := server.Run(os.Stdin, os.Stdout, provider); err != nil {

@@ -9,11 +9,11 @@ import (
 	"io"
 	"strings"
 
-	"llm-bridge/internal/history"
-	"llm-bridge/internal/llm"
-	"llm-bridge/internal/logger"
-	"llm-bridge/internal/protocol"
-	"llm-bridge/internal/tools"
+	"llm-bridge/history"
+	"llm-bridge/llm"
+	"llm-bridge/logger"
+	"llm-bridge/protocol"
+	"llm-bridge/tools"
 )
 
 type state struct {

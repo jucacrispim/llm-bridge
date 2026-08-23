@@ -3,7 +3,7 @@ package history
 import (
 	"strings"
 
-	"llm-bridge/internal/llm"
+	"llm-bridge/llm"
 )
 
 const (

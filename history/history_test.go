@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"llm-bridge/internal/llm"
+	"llm-bridge/llm"
 )
 
 func TestAppendUser(t *testing.T) {

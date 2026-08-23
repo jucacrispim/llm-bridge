@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"llm-bridge/internal/llm"
+	"llm-bridge/llm"
 )
 
 type fakeProvider struct {

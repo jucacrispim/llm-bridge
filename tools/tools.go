@@ -3,7 +3,7 @@ package tools
 import (
 	"encoding/json"
 
-	"llm-bridge/internal/llm"
+	"llm-bridge/llm"
 )
 
 // All returns the six tools that the bridge exposes to the LLM.

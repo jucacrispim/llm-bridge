@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"llm-bridge/internal/logger"
+	"llm-bridge/logger"
 )
 
 type DeepSeekProvider struct {

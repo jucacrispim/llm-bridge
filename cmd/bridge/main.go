@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	"llm-bridge/internal/llm"
+	"llm-bridge/llm"
 	"llm-bridge/server"
 )
 

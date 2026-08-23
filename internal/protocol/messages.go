@@ -38,9 +38,9 @@ type PromptParams struct {
 }
 
 type ToolResultParams struct {
-	ID     string `json:"id"`
-	Output string `json:"output"`
-	Status string `json:"status"`
+	ID     string          `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Status string          `json:"status"`
 }
 
 type ToolCallResult struct {

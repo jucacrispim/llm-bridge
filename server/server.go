@@ -25,8 +25,12 @@ type state struct {
 	history            []llm.Message
 	inToolCycle        bool
 
-	cancel              context.CancelFunc
+	cancel               context.CancelFunc
 	historyLenBeforeTurn int
+
+	totalTokens           int
+	totalPromptTokens     int
+	totalCompletionTokens int
 }
 
 type setCwdParams struct {
@@ -82,9 +86,6 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		st.pendingToolIDs = nil
 		st.pendingToolResults = nil
 		return string(protocol.NewCancelled()), false
-
-	case string(protocol.MethodStatus):
-		return string(protocol.NewStatus(protocol.Usage{}, nil)), false
 
 	case string(protocol.MethodSetCwd):
 		var p setCwdParams
@@ -161,6 +162,17 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		}
 		cancel()
 
+		inputTokens := 0
+		outputTokens := 0
+		if resp.Usage != nil {
+			inputTokens = resp.Usage.PromptTokens
+			outputTokens = resp.Usage.CompletionTokens
+		}
+		totalTokensThisTurn := inputTokens + outputTokens
+		st.totalTokens += totalTokensThisTurn
+		st.totalPromptTokens += inputTokens
+		st.totalCompletionTokens += outputTokens
+
 		if !emittedChunk && resp.Content != "" {
 			_, _ = fmt.Fprint(w, string(protocol.NewChunk(resp.Content))+"\n")
 		}
@@ -180,8 +192,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 		if len(resp.ToolCalls) == 0 {
 			contextPct := 0.0
-			metering := map[string]any{"credits": 0.0}
-			_, _ = fmt.Fprint(w, string(protocol.NewTurnEnd(resp.StopReason, &contextPct, metering, st.provider.Model()))+"\n")
+			_, _ = fmt.Fprint(w, string(protocol.NewTurnEnd(resp.StopReason, &contextPct, st.provider.Model(), inputTokens, outputTokens, totalTokensThisTurn))+"\n")
+			_, _ = fmt.Fprint(w, string(protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn))+"\n")
 			history.Sanitize(&st.history)
 			st.history = st.history
 			st.inToolCycle = false
@@ -211,6 +223,7 @@ func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 			return nil
 		}
 		if resp != "" {
+			// notest
 			if _, err := fmt.Fprintln(w, resp); err != nil {
 				return err
 			}

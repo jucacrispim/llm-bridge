@@ -32,11 +32,13 @@ type ToolCallEvent struct {
 }
 
 type TurnEnd struct {
-	Event      Event    `json:"event"`
-	StopReason string   `json:"stop_reason"`
-	ContextPct *float64 `json:"context_pct"`
-	Metering   any      `json:"metering,omitempty"`
-	Model      string   `json:"model,omitempty"`
+	Event        Event    `json:"event"`
+	StopReason   string   `json:"stop_reason"`
+	ContextPct   *float64 `json:"context_pct"`
+	Model        string   `json:"model,omitempty"`
+	InputTokens  int      `json:"input_tokens"`
+	OutputTokens int      `json:"output_tokens"`
+	TotalTokens  int      `json:"total_tokens"`
 }
 
 type ErrorEvent struct {
@@ -48,16 +50,12 @@ type Cancelled struct {
 	Event Event `json:"event"`
 }
 
-type Usage struct {
-	Current        int     `json:"current"`
-	Limit          int     `json:"limit"`
-	CurrentPrecise float64 `json:"current_precise"`
-}
 
-type Status struct {
-	Event      Event    `json:"event"`
-	Usage      Usage    `json:"usage"`
-	ContextPct *float64 `json:"context_pct"`
+type UsageDelta struct {
+	Event        Event `json:"event"`
+	InputTokens  int   `json:"input_tokens"`
+	OutputTokens int   `json:"output_tokens"`
+	TotalTokens  int   `json:"total_tokens"`
 }
 
 func NewReady() []byte {
@@ -81,9 +79,10 @@ func NewToolCall(id, name string, input any) ([]byte, error) {
 	return json.Marshal(evt)
 }
 
-func NewTurnEnd(stopReason string, contextPct *float64, metering any, model string) []byte {
+func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens int) []byte {
 	evt := TurnEnd{Event: EventTurnEnd, StopReason: stopReason,
-		ContextPct: contextPct, Metering: metering, Model: model}
+		ContextPct: contextPct, Model: model,
+		InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens}
 	b, _ := json.Marshal(evt)
 	return b
 }
@@ -100,8 +99,9 @@ func NewCancelled() []byte {
 	return b
 }
 
-func NewStatus(usage Usage, contextPct *float64) []byte {
-	evt := Status{Event: EventStatus, Usage: usage, ContextPct: contextPct}
+
+func NewUsageDelta(inputTokens, outputTokens, totalTokens int) []byte {
+	evt := UsageDelta{Event: EventUsageDelta, InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens}
 	b, _ := json.Marshal(evt)
 	return b
 }

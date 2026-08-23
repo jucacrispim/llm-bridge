@@ -62,16 +62,16 @@ func TestNewToolCallMarshalError(t *testing.T) {
 
 func TestNewTurnEnd(t *testing.T) {
 	ctx := 2.5
-	got := string(NewTurnEnd("END_TURN", &ctx, map[string]any{"credits": 0.08}, "model-x"))
-	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":2.5,"metering":{"credits":0.08},"model":"model-x"}`
+	got := string(NewTurnEnd("END_TURN", &ctx, "model-x", 10, 5, 15))
+	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":2.5,"model":"model-x","input_tokens":10,"output_tokens":5,"total_tokens":15}`
 	if got != want {
 		t.Errorf("NewTurnEnd() = %s, want %s", got, want)
 	}
 }
 
 func TestNewTurnEndNilContext(t *testing.T) {
-	got := string(NewTurnEnd("END_TURN", nil, nil, ""))
-	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null}`
+	got := string(NewTurnEnd("END_TURN", nil, "", 0, 0, 0))
+	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"input_tokens":0,"output_tokens":0,"total_tokens":0}`
 	if got != want {
 		t.Errorf("NewTurnEnd(nil) = %s, want %s", got, want)
 	}
@@ -93,21 +93,11 @@ func TestNewCancelled(t *testing.T) {
 	}
 }
 
-func TestNewStatus(t *testing.T) {
-	usage := Usage{Current: 1, Limit: 2, CurrentPrecise: 1.5}
-	ctx := 3.5
-	got := string(NewStatus(usage, &ctx))
-	want := `{"event":"status","usage":{"current":1,"limit":2,"current_precise":1.5},"context_pct":3.5}`
-	if got != want {
-		t.Errorf("NewStatus() = %s, want %s", got, want)
-	}
-}
 
-func TestNewStatusNilContext(t *testing.T) {
-	usage := Usage{Current: 0, Limit: 0, CurrentPrecise: 0}
-	got := string(NewStatus(usage, nil))
-	want := `{"event":"status","usage":{"current":0,"limit":0,"current_precise":0},"context_pct":null}`
+func TestNewUsageDelta(t *testing.T) {
+	got := string(NewUsageDelta(10, 5, 15))
+	want := `{"event":"usage_delta","input_tokens":10,"output_tokens":5,"total_tokens":15}`
 	if got != want {
-		t.Errorf("NewStatus(nil) = %s, want %s", got, want)
+		t.Errorf("NewUsageDelta() = %s, want %s", got, want)
 	}
 }

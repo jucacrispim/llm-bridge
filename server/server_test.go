@@ -96,7 +96,7 @@ func TestHandleLinePromptSuccess(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"metering":{"credits":0},"model":"fake"}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
@@ -146,7 +146,7 @@ func TestHandleLinePromptNoChunk(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"metering":{"credits":0},"model":"fake"}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
@@ -254,18 +254,6 @@ func TestHandleLineCancelResetsHistory(t *testing.T) {
 	}
 }
 
-func TestHandleLineStatus(t *testing.T) {
-	st := newTestState()
-	var w bytes.Buffer
-	resp, quit := handleLine(`{"method":"status"}`, st, &w)
-	if quit {
-		t.Fatal("status should not quit")
-	}
-	expected := `{"event":"status","usage":{"current":0,"limit":0,"current_precise":0},"context_pct":null}`
-	if resp != expected {
-		t.Errorf("status response mismatch:\n got  %s\n want %s", resp, expected)
-	}
-}
 
 func TestHandleLineSetCwd(t *testing.T) {
 	st := newTestState()
@@ -355,7 +343,6 @@ func TestHandleLineUnknown(t *testing.T) {
 
 func TestRunWithProviderBasic(t *testing.T) {
 	input := `{"method":"set_cwd","params":{"cwd":"/home/user"}}
-{"method":"status"}
 {"method":"prompt","params":{"text":"oi"}}
 {"method":"quit"}
 `
@@ -371,9 +358,9 @@ func TestRunWithProviderBasic(t *testing.T) {
 
 	got := out.String()
 	expected := `{"event":"ready"}` + "\n" +
-		`{"event":"status","usage":{"current":0,"limit":0,"current_precise":0},"context_pct":null}` + "\n" +
 		`{"event":"chunk","text":"Hi"}` + "\n" +
-		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"metering":{"credits":0},"model":"fake"}` + "\n"
+		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n" +
+		`{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if got != expected {
 		t.Errorf("runWithProvider output:\n got: %q\nwant: %q", got, expected)
 	}

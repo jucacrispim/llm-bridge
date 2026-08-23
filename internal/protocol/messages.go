@@ -7,7 +7,6 @@ type Method string
 const (
 	MethodPrompt            Method = "prompt"
 	MethodCancel            Method = "cancel"
-	MethodStatus            Method = "status"
 	MethodSetCwd            Method = "set_cwd"
 	MethodSetKnowledgeBases Method = "set_knowledge_bases"
 	MethodToolResult        Method = "tool_result"
@@ -23,7 +22,6 @@ const (
 	EventTurnEnd      Event = "turn_end"
 	EventError        Event = "error"
 	EventCancelled    Event = "cancelled"
-	EventStatus       Event = "status"
 	EventUsageDelta   Event = "usage_delta"
 	EventFilesChanged Event = "files_changed"
 	EventHookAction   Event = "hook_action"
@@ -57,9 +55,8 @@ type ChunkEvent struct {
 }
 
 type TurnEndEvent struct {
-	Event      Event       `json:"event"`
-	StopReason string      `json:"stop_reason"`
-	ContextPct *float64    `json:"context_pct"`
-	Metering   interface{} `json:"metering"`
-	Model      string      `json:"model"`
+	Event      Event    `json:"event"`
+	StopReason string   `json:"stop_reason"`
+	ContextPct *float64 `json:"context_pct"`
+	Model      string   `json:"model"`
 }

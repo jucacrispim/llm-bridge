@@ -90,7 +90,7 @@ func TestHandleLinePromptSuccess(t *testing.T) {
 	st := newTestState()
 	st.history = nil
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"oi"}}`
+	line := `{"method":"prompt","params":{"text":"hi"}}`
 	_, quit := handleLine(line, st, &w)
 	if quit {
 		t.Fatal("prompt should not quit")
@@ -108,7 +108,7 @@ func TestHandleLinePromptSuccess(t *testing.T) {
 func TestHandleLinePromptProviderError(t *testing.T) {
 	st := &state{provider: &fakeProvider{err: errors.New("boom")}}
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"oi"}}`
+	line := `{"method":"prompt","params":{"text":"hi"}}`
 	resp, _ := handleLine(line, st, &w)
 	want := `{"event":"error","message":"boom"}`
 	if resp != want {
@@ -119,7 +119,7 @@ func TestHandleLinePromptProviderError(t *testing.T) {
 func TestHandleLinePromptNoProvider(t *testing.T) {
 	st := &state{}
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"oi"}}`
+	line := `{"method":"prompt","params":{"text":"hi"}}`
 	resp, _ := handleLine(line, st, &w)
 	want := `{"event":"error","message":"no LLM provider configured"}`
 	if resp != want {
@@ -140,7 +140,7 @@ func TestHandleLinePromptNoChunk(t *testing.T) {
 		},
 	}
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"oi"}}`
+	line := `{"method":"prompt","params":{"text":"hi"}}`
 	_, quit := handleLine(line, st, &w)
 	if quit {
 		t.Fatal("prompt should not quit")
@@ -165,7 +165,7 @@ func TestHandleLinePromptToolCall(t *testing.T) {
 		},
 	}}
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"oi"}}`
+	line := `{"method":"prompt","params":{"text":"hi"}}`
 	resp, quit := handleLine(line, st, &w)
 	if quit {
 		t.Fatal("prompt should not quit")
@@ -195,7 +195,7 @@ func TestHandleLinePromptToolCallNoArgs(t *testing.T) {
 		},
 	}}
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"oi"}}`
+	line := `{"method":"prompt","params":{"text":"hi"}}`
 	resp, quit := handleLine(line, st, &w)
 	if quit {
 		t.Fatal("prompt should not quit")
@@ -237,8 +237,8 @@ func TestHandleLineCancel(t *testing.T) {
 func TestHandleLineCancelResetsHistory(t *testing.T) {
 	st := newTestState()
 	st.history = []llm.Message{
-		{Role: llm.RoleUser, Content: "primeira"},
-		{Role: llm.RoleUser, Content: "segunda"},
+		{Role: llm.RoleUser, Content: "first"},
+		{Role: llm.RoleUser, Content: "second"},
 	}
 	st.historyLenBeforeTurn = 1
 	var w bytes.Buffer
@@ -246,7 +246,7 @@ func TestHandleLineCancelResetsHistory(t *testing.T) {
 	if resp != `{"event":"cancelled"}` {
 		t.Fatalf("expected cancelled, got %q", resp)
 	}
-	if len(st.history) != 1 || st.history[0].Content != "primeira" {
+	if len(st.history) != 1 || st.history[0].Content != "first" {
 		t.Fatalf("history not reset correctly: %+v", st.history)
 	}
 	if st.inToolCycle {
@@ -343,7 +343,7 @@ func TestHandleLineUnknown(t *testing.T) {
 
 func TestRunWithProviderBasic(t *testing.T) {
 	input := `{"method":"set_cwd","params":{"cwd":"/home/user"}}
-{"method":"prompt","params":{"text":"oi"}}
+{"method":"prompt","params":{"text":"hi"}}
 {"method":"quit"}
 `
 	var out bytes.Buffer
@@ -385,7 +385,7 @@ func TestHandleLinePromptToolCallThenResult(t *testing.T) {
 	}
 	st := &state{provider: provider}
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"oi"}}`
+	line := `{"method":"prompt","params":{"text":"hi"}}`
 	resp, quit := handleLine(line, st, &w)
 	if quit {
 		t.Fatal("should not quit")
@@ -512,7 +512,7 @@ func TestHandleLineToolResultPartialWait(t *testing.T) {
 	}
 	st := &state{provider: provider}
 	var w bytes.Buffer
-	resp, quit := handleLine(`{"method":"prompt","params":{"text":"oi"}}`, st, &w)
+	resp, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
 	if quit {
 		t.Fatal("prompt should not quit")
 	}
@@ -558,7 +558,7 @@ func TestHandleLineCancelWithStoredCancelFunc(t *testing.T) {
 func TestHandleLinePromptContextCanceled(t *testing.T) {
 	st := &state{provider: &fakeProvider{err: context.Canceled}}
 	var w bytes.Buffer
-	resp, quit := handleLine(`{"method":"prompt","params":{"text":"oi"}}`, st, &w)
+	resp, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
 	if quit {
 		t.Fatal("prompt should not quit")
 	}

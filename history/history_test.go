@@ -42,8 +42,8 @@ func TestAppendToolResult(t *testing.T) {
 }
 
 func TestMarkEphemeral(t *testing.T) {
-	got := MarkEphemeral("olá")
-	if !strings.Contains(got, "olá") ||
+	got := MarkEphemeral("hello")
+	if !strings.Contains(got, "hello") ||
 		!strings.Contains(got, "<!-- ephemeral -->") ||
 		!strings.Contains(got, "<!-- /ephemeral -->") {
 		t.Fatalf("MarkEphemeral() = %q, should contain content and both markers", got)
@@ -68,17 +68,17 @@ func TestSanitizeRemovesEphemeral(t *testing.T) {
 }
 
 func TestStripEphemeral(t *testing.T) {
-	in := "antes <!-- ephemeral --> segredo <!-- /ephemeral --> depois"
+	in := "before <!-- ephemeral --> secret <!-- /ephemeral --> after"
 	got := StripEphemeral(in)
-	if got != "antes  depois" {
-		t.Fatalf("StripEphemeral() = %q, want %q", got, "antes  depois")
+	if got != "before  after" {
+		t.Fatalf("StripEphemeral() = %q, want %q", got, "before  after")
 	}
 }
 
 func TestStripEphemeralUnclosed(t *testing.T) {
-	in := "início <!-- ephemeral --> resto"
+	in := "start <!-- ephemeral --> rest"
 	got := StripEphemeral(in)
-	expected := "início  resto"
+	expected := "start  rest"
 	if got != expected {
 		t.Fatalf("StripEphemeral() = %q, want %q", got, expected)
 	}

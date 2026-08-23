@@ -22,10 +22,10 @@ func TestTracef(t *testing.T) {
 	traceLogger.SetOutput(&buf)
 	defer func() { traceLogger.SetOutput(oldWriter) }()
 
-	Tracef("olá")
+	Tracef("hello")
 	got := strings.TrimSpace(buf.String())
-	if got != "[TRACE] olá" {
-		t.Fatalf("got %q want %q", got, "[TRACE] olá")
+	if got != "[TRACE] hello" {
+		t.Fatalf("got %q want %q", got, "[TRACE] hello")
 	}
 }
 
@@ -36,10 +36,10 @@ func TestDebugf(t *testing.T) {
 	debugLogger.SetOutput(&buf)
 	defer func() { debugLogger.SetOutput(oldWriter) }()
 
-	Debugf("olá")
+	Debugf("hello")
 	got := strings.TrimSpace(buf.String())
-	if got != "[DEBUG] olá" {
-		t.Fatalf("got %q want %q", got, "[DEBUG] olá")
+	if got != "[DEBUG] hello" {
+		t.Fatalf("got %q want %q", got, "[DEBUG] hello")
 	}
 }
 
@@ -50,10 +50,10 @@ func TestInfof(t *testing.T) {
 	infoLogger.SetOutput(&buf)
 	defer func() { infoLogger.SetOutput(oldWriter) }()
 
-	Infof("olá")
+	Infof("hello")
 	got := strings.TrimSpace(buf.String())
-	if got != "[INFO] olá" {
-		t.Fatalf("got %q want %q", got, "[INFO] olá")
+	if got != "[INFO] hello" {
+		t.Fatalf("got %q want %q", got, "[INFO] hello")
 	}
 }
 
@@ -64,10 +64,10 @@ func TestWarningf(t *testing.T) {
 	warningLogger.SetOutput(&buf)
 	defer func() { warningLogger.SetOutput(oldWriter) }()
 
-	Warningf("olá")
+	Warningf("hello")
 	got := strings.TrimSpace(buf.String())
-	if got != "[WARNING] olá" {
-		t.Fatalf("got %q want %q", got, "[WARNING] olá")
+	if got != "[WARNING] hello" {
+		t.Fatalf("got %q want %q", got, "[WARNING] hello")
 	}
 }
 
@@ -78,10 +78,10 @@ func TestErrorf(t *testing.T) {
 	errorLogger.SetOutput(&buf)
 	defer func() { errorLogger.SetOutput(oldWriter) }()
 
-	Errorf("olá")
+	Errorf("hello")
 	got := strings.TrimSpace(buf.String())
-	if got != "[ERROR] olá" {
-		t.Fatalf("got %q want %q", got, "[ERROR] olá")
+	if got != "[ERROR] hello" {
+		t.Fatalf("got %q want %q", got, "[ERROR] hello")
 	}
 }
 
@@ -112,10 +112,10 @@ func TestSetOutput(t *testing.T) {
 	var buf bytes.Buffer
 	SetOutput(&buf)
 
-	Debugf("olá")
+	Debugf("hello")
 	got := strings.TrimSpace(buf.String())
-	if got != "[DEBUG] olá" {
-		t.Fatalf("got %q want %q", got, "[DEBUG] olá")
+	if got != "[DEBUG] hello" {
+		t.Fatalf("got %q want %q", got, "[DEBUG] hello")
 	}
 }
 

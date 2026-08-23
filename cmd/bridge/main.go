@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"llm-bridge/llm"
@@ -21,8 +22,8 @@ func main() {
 	modelName := flag.String("model", "", "model to use (overrides DEEPSEEK_MODEL)")
 	thinking := flag.Bool("thinking", llm.ThinkingFromEnv(true), "enable thinking mode (uses deepseek-reasoner when no explicit model); pass -thinking=false to use deepseek-chat")
 	reasoningEffort := flag.String("reasoning-effort", "", "reasoning_effort sent when thinking is on (e.g. low/medium/high; default \"high\")")
-	debug := flag.Bool("debug", false, "enable debug logging to a file")
-	logFile := flag.String("logfile", defaultLogFile, "path of the log file used in debug mode")
+	debug := flag.Bool("debug", false, "enable debug logging to the default log file (kept for compatibility)")
+	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
 	flag.Parse()
 
 	if *providerName != "deepseek" {
@@ -30,11 +31,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *debug {
-		if err := setupDebugLogging(*logFile); err != nil {
-			fmt.Fprintf(os.Stderr, "debug logging setup failed: %v\n", err)
+	// Logging: if a log file is given, redirect all logs there. The -debug flag
+	// (kept for compatibility, e.g. the llmcheck client) falls back to the
+	// default log file. Otherwise no logs are emitted at all, so stdout stays
+	// reserved for the JSON-lines protocol (no pollution for clients).
+	switch {
+	case *logFile != "":
+		if err := setupFileLogging(*logFile); err != nil {
+			fmt.Fprintf(os.Stderr, "logging setup failed: %v\n", err)
 			os.Exit(1)
 		}
+	case *debug:
+		if err := setupFileLogging(defaultLogFile); err != nil {
+			fmt.Fprintf(os.Stderr, "logging setup failed: %v\n", err)
+			os.Exit(1)
+		}
+	default:
+		logger.SetOutput(io.Discard)
 	}
 
 	// Resolve the model: an explicit --model flag wins, then DEEPSEEK_MODEL.
@@ -77,10 +90,10 @@ func main() {
 	}
 }
 
-// setupDebugLogging redirects all logger output to logFile and enables the
-// debug level, so the bridge starts dumping detailed logs to disk without
+// setupFileLogging redirects all logger output to logFile and enables the
+// trace level, so the bridge starts dumping detailed logs to disk without
 // polluting the JSON-lines protocol stream on stdout.
-func setupDebugLogging(logFile string) error {
+func setupFileLogging(logFile string) error {
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err

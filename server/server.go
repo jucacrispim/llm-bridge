@@ -9,6 +9,7 @@ import (
 	"io"
 	"strings"
 
+	appcontext "llm-bridge/context"
 	"llm-bridge/history"
 	"llm-bridge/llm"
 	"llm-bridge/logger"
@@ -25,6 +26,7 @@ type state struct {
 	pendingToolResults map[string]json.RawMessage
 	history            []llm.Message
 	inToolCycle        bool
+	firstTurn          bool
 
 	cancel               context.CancelFunc
 	historyLenBeforeTurn int
@@ -71,7 +73,14 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if st.inToolCycle {
 			return string(protocol.NewError("cannot send new prompt while awaiting tool results")), false
 		}
-		st.historyLenBeforeTurn = len(st.history)
+		if st.firstTurn {
+			entries, _ := appcontext.Load(st.cwd)
+			for _, e := range entries {
+				history.AppendUser(&st.history, e.Render())
+			}
+			st.firstTurn = false
+		}
+		st.historyLenBeforeTurn = len(st.history) // context preserved on cancel
 		history.AppendUser(&st.history, p.Text)
 		return runToolCycle(st, w)
 
@@ -225,7 +234,7 @@ func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	}
 	fmt.Fprintln(w, string(protocol.NewReady()))
 	logger.Debugf("ready sent")
-	st := &state{provider: provider}
+	st := &state{provider: provider, firstTurn: true}
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()

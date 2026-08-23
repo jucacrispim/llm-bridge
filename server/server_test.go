@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,9 +21,11 @@ type fakeProvider struct {
 	err       error
 	skipChunk bool
 	callCount int
+	lastReq   llm.ChatRequest
 }
 
 func (f *fakeProvider) Chat(ctx context.Context, req llm.ChatRequest, onChunk func(string)) (*llm.ChatResponse, error) {
+	f.lastReq = req
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -56,6 +60,7 @@ func (f *fakeProvider) Model() string {
 
 func newTestState() *state {
 	return &state{
+		firstTurn: true,
 		provider: &fakeProvider{
 			name: "fake",
 			resp: &llm.ChatResponse{
@@ -567,5 +572,192 @@ func TestHandleLinePromptContextCanceled(t *testing.T) {
 	}
 	if w.Len() != 0 {
 		t.Fatalf("expected no output after context canceled, got %q", w.String())
+	}
+}
+
+// FASE 3 — integration tests for context injection
+
+func TestFirstPromptInjectsContextInOrder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	// general context and local context
+	writeTestFile(t, filepath.Join(home, ".llm-bridge", "a.md"), "GENERAL")
+	writeTestFile(t, filepath.Join(cwd, ".llm-bridge", "b.md"), "LOCAL")
+
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp, cwd: cwd, firstTurn: true}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+
+	msgs := fp.lastReq.Messages
+	if len(msgs) != 3 {
+		t.Fatalf("len = %d, want 3 (general, local, prompt)", len(msgs))
+	}
+	// general before local, prompt last
+	if !strings.Contains(msgs[0].Content, "GENERAL") {
+		t.Errorf("msgs[0] should contain general context, got %q", msgs[0].Content)
+	}
+	if !strings.Contains(msgs[1].Content, "LOCAL") {
+		t.Errorf("msgs[1] should contain local context, got %q", msgs[1].Content)
+	}
+	if msgs[2].Role != llm.RoleUser || msgs[2].Content != "hi" {
+		t.Errorf("msgs[2] should be the user prompt, got %+v", msgs[2])
+	}
+}
+
+func TestContextPersistsOnSecondTurn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	writeTestFile(t, filepath.Join(home, ".llm-bridge", "a.md"), "GENERAL")
+	writeTestFile(t, filepath.Join(cwd, ".llm-bridge", "b.md"), "LOCAL")
+
+	fp := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
+			{Content: "Again", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	st := &state{provider: fp, cwd: cwd, firstTurn: true}
+	var w bytes.Buffer
+
+	// first prompt
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"first"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	firstMsgs := fp.lastReq.Messages
+	if len(firstMsgs) != 3 {
+		t.Fatalf("first request len = %d, want 3", len(firstMsgs))
+	}
+
+	w.Reset()
+	// second prompt
+	_, quit = handleLine(`{"method":"prompt","params":{"text":"second"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	secondMsgs := fp.lastReq.Messages
+	if len(secondMsgs) != 5 {
+		t.Fatalf("second request len = %d, want 5 (general, local, first, assistant, second)", len(secondMsgs))
+	}
+	// context is still present at the start (not ephemeral)
+	if !strings.Contains(secondMsgs[0].Content, "GENERAL") {
+		t.Errorf("second request msgs[0] should contain general context, got %q", secondMsgs[0].Content)
+	}
+	if !strings.Contains(secondMsgs[1].Content, "LOCAL") {
+		t.Errorf("second request msgs[1] should contain local context, got %q", secondMsgs[1].Content)
+	}
+	last := secondMsgs[len(secondMsgs)-1]
+	if last.Role != llm.RoleUser || last.Content != "second" {
+		t.Errorf("last message should be the second prompt, got %+v", last)
+	}
+}
+
+func TestCancelPreservesContext(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	writeTestFile(t, filepath.Join(home, ".llm-bridge", "a.md"), "GENERAL")
+	writeTestFile(t, filepath.Join(cwd, ".llm-bridge", "b.md"), "LOCAL")
+
+	// provider returns a tool call so the turn stays in progress and the
+	// historyLenBeforeTurn marker is not reset by a completed turn
+	st := &state{
+		firstTurn: true,
+		provider: &fakeProvider{
+			name: "fake",
+			resp: &llm.ChatResponse{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`},
+				},
+			},
+		},
+	}
+	st.cwd = cwd
+	var w bytes.Buffer
+
+	// prompt injects context and enters the tool cycle: 2 context + 1 prompt
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle after prompt with tool calls")
+	}
+	if len(st.history) != 4 {
+		t.Fatalf("history len before cancel = %d, want 4 (2 context + 1 prompt + 1 assistant)", len(st.history))
+	}
+
+	// cancel while awaiting the tool result
+	resp, quit := handleLine(`{"method":"cancel"}`, st, &w)
+	if quit {
+		t.Fatal("cancel should not quit")
+	}
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+
+	// context preserved, user prompt of that turn removed
+	if len(st.history) != 2 {
+		t.Fatalf("history len after cancel = %d, want 2 (context only)", len(st.history))
+	}
+	if !strings.Contains(st.history[0].Content, "GENERAL") {
+		t.Errorf("history[0] should contain general context, got %q", st.history[0].Content)
+	}
+	if !strings.Contains(st.history[1].Content, "LOCAL") {
+		t.Errorf("history[1] should contain local context, got %q", st.history[1].Content)
+	}
+}
+
+func TestNoContextFilesBehavesAsBefore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+
+	// no .llm-bridge files in HOME or cwd
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp, cwd: cwd, firstTurn: true}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+
+	msgs := fp.lastReq.Messages
+	if len(msgs) != 1 {
+		t.Fatalf("len = %d, want 1 (prompt only)", len(msgs))
+	}
+	if msgs[0].Role != llm.RoleUser || msgs[0].Content != "hi" {
+		t.Fatalf("unexpected message: %+v", msgs[0])
+	}
+}
+
+// writeTestFile creates the file (and parent directories) with the given content.
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 }

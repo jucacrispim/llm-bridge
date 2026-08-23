@@ -12,9 +12,9 @@ const (
 )
 
 type Message struct {
-	Role    string
-	Content string
-	ToolCalls []ToolCall
+	Role       string
+	Content    string
+	ToolCalls  []ToolCall
 	ToolCallID string
 }
 

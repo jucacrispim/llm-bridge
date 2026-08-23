@@ -11,6 +11,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"llm-bridge/internal/logger"
 )
 
 type DeepSeekProvider struct {
@@ -147,6 +149,14 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 		msgs = append(msgs, msg)
 	}
 
+	logger.Tracef("DeepSeek request messages (model=%s):", p.model)
+	for _, msg := range msgs {
+		logger.Tracef("  role=%s content=%q tool_calls=%d tool_call_id=%q", msg.Role, msg.Content, len(msg.ToolCalls), msg.ToolCallID)
+		for _, tc := range msg.ToolCalls {
+			logger.Tracef("    tool_call id=%s name=%s arguments=%s", tc.ID, tc.Function.Name, tc.Function.Arguments)
+		}
+	}
+
 	toolsPayload := make([]openAITool, 0, len(req.Tools))
 	for _, t := range req.Tools {
 		toolsPayload = append(toolsPayload, openAITool{
@@ -157,6 +167,11 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 				Parameters:  t.Parameters,
 			},
 		})
+	}
+
+	logger.Tracef("DeepSeek request tools: %d", len(toolsPayload))
+	for _, t := range toolsPayload {
+		logger.Tracef("  tool type=%s name=%s", t.Type, t.Function.Name)
 	}
 
 	payload := openAIRequest{
@@ -180,12 +195,14 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
+		logger.Errorf("deepseek request failed: %v", err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		logger.Errorf("deepseek HTTP %d: %s", resp.StatusCode, string(respBody))
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 

@@ -11,6 +11,7 @@ import (
 
 	"llm-bridge/internal/history"
 	"llm-bridge/internal/llm"
+	"llm-bridge/internal/logger"
 	"llm-bridge/internal/protocol"
 	"llm-bridge/internal/tools"
 )
@@ -158,6 +159,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 				// request was cancelled, history already cleared in cancel handler
 				return "", false
 			}
+			logger.Errorf("provider error: %v", err)
 			return string(protocol.NewError(err.Error())), false
 		}
 		cancel()
@@ -192,8 +194,12 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 		if len(resp.ToolCalls) == 0 {
 			contextPct := 0.0
-			_, _ = fmt.Fprint(w, string(protocol.NewTurnEnd(resp.StopReason, &contextPct, st.provider.Model(), inputTokens, outputTokens, totalTokensThisTurn))+"\n")
-			_, _ = fmt.Fprint(w, string(protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn))+"\n")
+			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
+				st.provider.Model(), inputTokens, outputTokens, totalTokensThisTurn)
+			_, _ = fmt.Fprint(w, string(newEnd)+"\n")
+
+			newUsage := protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn)
+			_, _ = fmt.Fprint(w, string(newUsage)+"\n")
 			history.Sanitize(&st.history)
 			st.history = st.history
 			st.inToolCycle = false
@@ -214,24 +220,35 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 }
 
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
+	if provider != nil {
+		logger.Infof("starting bridge with provider %s", provider.Name())
+	}
 	fmt.Fprintln(w, string(protocol.NewReady()))
+	logger.Debugf("ready sent")
 	st := &state{provider: provider}
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		resp, quit := handleLine(scanner.Text(), st, w)
+		line := scanner.Text()
+		logger.Debugf("received: %s", line)
+		resp, quit := handleLine(line, st, w)
 		if quit {
+			logger.Infof("quit requested")
 			return nil
 		}
 		if resp != "" {
 			// notest
+			logger.Debugf("sending response: %s", resp)
 			if _, err := fmt.Fprintln(w, resp); err != nil {
+				logger.Errorf("error writing response: %v", err)
 				return err
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		logger.Errorf("scanner error: %v", err)
 		return err
 	}
+	logger.Infof("bridge finished")
 	return nil
 }
 

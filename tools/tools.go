@@ -6,7 +6,7 @@ import (
 	"llm-bridge/llm"
 )
 
-// All returns the six tools that the bridge exposes to the LLM.
+// All returns the seven tools that the bridge exposes to the LLM.
 func All() []llm.Tool {
 	return []llm.Tool{
 		{
@@ -38,6 +38,11 @@ func All() []llm.Tool {
 			Name:        "code",
 			Description: "Provide a code snippet or execute code",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}`),
+		},
+		{
+			Name:        "search_replace",
+			Description: "Search for an exact string in a file and replace the first occurrence with a new string",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"search":{"type":"string"},"replace":{"type":"string"}},"required":["path","search","replace"]}`),
 		},
 	}
 }

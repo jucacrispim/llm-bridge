@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	appcontext "llm-bridge/context"
 	"llm-bridge/history"
@@ -28,8 +29,9 @@ type state struct {
 	inToolCycle        bool
 	firstTurn          bool
 
-	modelOverride    string
-	thinkingOverride *bool
+	modelOverride         string
+	thinkingOverride      *bool
+	reasoningEffortOverride *string
 
 	cancel               context.CancelFunc
 	historyLenBeforeTurn int
@@ -37,6 +39,55 @@ type state struct {
 	totalTokens           int
 	totalPromptTokens     int
 	totalCompletionTokens int
+
+	// cancelMut guards the `cancel` field. It is read/written concurrently by
+	// the reader goroutine (which handles `cancel` immediately) and by
+	// runToolCycle while a Chat is streaming.
+	cancelMut sync.Mutex
+	// writeMut serializes all writes to the bridge's stdout so that the reader
+	// goroutine's `cancelled` event never interleaves with the chunks the
+	// provider's streaming callbacks are writing.
+	writeMut sync.Mutex
+}
+
+// write serializes a write to w (the bridge's stdout). All event output goes
+// through here so that a `cancelled` event written by the reader goroutine
+// cannot interleave with streaming chunk/thinking events.
+func (st *state) write(w io.Writer, s string) error {
+	st.writeMut.Lock()
+	defer st.writeMut.Unlock()
+	_, err := fmt.Fprint(w, s)
+	return err
+}
+
+// setCancel stores the active Chat cancel func (nil when no Chat is running).
+func (st *state) setCancel(c context.CancelFunc) {
+	st.cancelMut.Lock()
+	st.cancel = c
+	st.cancelMut.Unlock()
+}
+
+// cancelActive invokes and clears the active Chat cancel func, if any.
+func (st *state) cancelActive() {
+	st.cancelMut.Lock()
+	if st.cancel != nil {
+		st.cancel()
+		st.cancel = nil
+	}
+	st.cancelMut.Unlock()
+}
+
+// cancelTurn rolls back the in-flight turn and resets its state, without
+// emitting any event. It is the shared core of both the `cancel` command
+// handler and the reader goroutine's immediate-cancel path.
+func (st *state) cancelTurn() {
+	st.cancelActive()
+	if st.historyLenBeforeTurn >= 0 && st.historyLenBeforeTurn <= len(st.history) {
+		st.history = st.history[:st.historyLenBeforeTurn]
+	}
+	st.inToolCycle = false
+	st.pendingToolIDs = nil
+	st.pendingToolResults = nil
 }
 
 type setCwdParams struct {
@@ -89,21 +140,15 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if p.Thinking != nil {
 			st.thinkingOverride = p.Thinking
 		}
+		if p.ReasoningEffort != nil {
+			st.reasoningEffortOverride = p.ReasoningEffort
+		}
 		st.historyLenBeforeTurn = len(st.history) // context preserved on cancel
 		history.AppendUser(&st.history, p.Text)
 		return runToolCycle(st, w)
 
 	case string(protocol.MethodCancel):
-		if st.cancel != nil {
-			st.cancel()
-			st.cancel = nil
-		}
-		if st.historyLenBeforeTurn >= 0 && st.historyLenBeforeTurn <= len(st.history) {
-			st.history = st.history[:st.historyLenBeforeTurn]
-		}
-		st.inToolCycle = false
-		st.pendingToolIDs = nil
-		st.pendingToolResults = nil
+		st.cancelTurn()
 		return string(protocol.NewCancelled()), false
 
 	case string(protocol.MethodSetCwd):
@@ -161,29 +206,33 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 func runToolCycle(st *state, w io.Writer) (string, bool) {
 	for {
 		ctx, cancel := context.WithCancel(context.Background())
-		st.cancel = cancel
+		// Publish the cancel func so the reader goroutine can interrupt this
+		// Chat immediately when a `cancel` command arrives mid-stream.
+		st.setCancel(cancel)
 		emittedChunk := false
 		emittedReasoning := false
 		resp, err := st.provider.Chat(ctx, llm.ChatRequest{
 			Messages: st.history,
 			Tools:    tools.All(),
-			Model:    st.modelOverride,
-			Thinking: st.thinkingOverride,
+			Model:            st.modelOverride,
+			Thinking:         st.thinkingOverride,
+			ReasoningEffort:  st.reasoningEffortOverride,
 			// The chain-of-thought streams before the content; surface it to the
 			// client as thinking events so it can display the reasoning.
 			OnReasoning: func(s string) {
 				emittedReasoning = true
-				_, _ = fmt.Fprint(w, string(protocol.NewThinking(s))+"\n")
+				_ = st.write(w, string(protocol.NewThinking(s))+"\n")
 			},
 		}, func(s string) {
 			emittedChunk = true
-			_, _ = fmt.Fprint(w, string(protocol.NewChunk(s))+"\n")
+			_ = st.write(w, string(protocol.NewChunk(s))+"\n")
 		})
-		st.cancel = nil
+		st.setCancel(nil)
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
-				// request was cancelled, history already cleared in cancel handler
+				// The request was cancelled; the reader goroutine already rolled
+				// back the history and emitted the `cancelled` event.
 				return "", false
 			}
 			logger.Errorf("provider error: %v", err)
@@ -203,12 +252,12 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		st.totalCompletionTokens += outputTokens
 
 		if !emittedChunk && resp.Content != "" {
-			_, _ = fmt.Fprint(w, string(protocol.NewChunk(resp.Content))+"\n")
+			_ = st.write(w, string(protocol.NewChunk(resp.Content))+"\n")
 		}
 		// Providers that return the reasoning without streaming it still get the
 		// thinking surfaced to the client, as a single event.
 		if !emittedReasoning && resp.Reasoning != "" {
-			_, _ = fmt.Fprint(w, string(protocol.NewThinking(resp.Reasoning))+"\n")
+			_ = st.write(w, string(protocol.NewThinking(resp.Reasoning))+"\n")
 		}
 
 		history.AppendAssistant(&st.history, resp)
@@ -220,7 +269,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			}
 			evt, err := protocol.NewToolCall(tc.ID, tc.Name, input)
 			if err == nil {
-				_, _ = fmt.Fprint(w, string(evt)+"\n")
+				_ = st.write(w, string(evt)+"\n")
 			}
 		}
 
@@ -232,10 +281,10 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			}
 			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
 				model, inputTokens, outputTokens, totalTokensThisTurn)
-			_, _ = fmt.Fprint(w, string(newEnd)+"\n")
+			_ = st.write(w, string(newEnd)+"\n")
 
 			newUsage := protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn)
-			_, _ = fmt.Fprint(w, string(newUsage)+"\n")
+			_ = st.write(w, string(newUsage)+"\n")
 			history.Sanitize(&st.history)
 			st.inToolCycle = false
 			st.pendingToolIDs = nil
@@ -254,18 +303,53 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 	}
 }
 
+// inboundLine carries either a raw command line or the reader's terminal error.
+type inboundLine struct {
+	line string
+	err  error
+}
+
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		logger.Infof("starting bridge with provider %s", provider.Name())
 	}
-	fmt.Fprintln(w, string(protocol.NewReady()))
-	logger.Debugf("ready sent")
 	st := &state{provider: provider, firstTurn: true}
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		line := scanner.Text()
-		logger.Debugf("received: %s", line)
-		resp, quit := handleLine(line, st, w)
+	_ = st.write(w, string(protocol.NewReady())+"\n")
+	logger.Debugf("ready sent")
+
+	// A reader goroutine keeps consuming stdin while the main loop is blocked
+	// inside a streaming Chat. A `cancel` command is handled right here, so it
+	// interrupts the in-flight request immediately instead of waiting for the
+	// model to stop talking (the previous synchronous loop could not even read
+	// the cancel until Chat returned). All other commands are forwarded to the
+	// main loop, which processes them serially.
+	cmdCh := make(chan inboundLine, 16)
+	go func() {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			line := scanner.Text()
+			logger.Debugf("received: %s", line)
+			var cmd protocol.InboundCommand
+			if err := json.Unmarshal([]byte(line), &cmd); err == nil && cmd.Method == string(protocol.MethodCancel) {
+				// Cancel in flight: stop the streaming request and reply at once.
+				st.cancelTurn()
+				_ = st.write(w, string(protocol.NewCancelled())+"\n")
+				continue
+			}
+			cmdCh <- inboundLine{line: line}
+		}
+		if err := scanner.Err(); err != nil {
+			cmdCh <- inboundLine{err: err}
+		}
+		close(cmdCh)
+	}()
+
+	for item := range cmdCh {
+		if item.err != nil {
+			logger.Errorf("scanner error: %v", item.err)
+			return item.err
+		}
+		resp, quit := handleLine(item.line, st, w)
 		if quit {
 			logger.Infof("quit requested")
 			return nil
@@ -273,15 +357,11 @@ func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 		if resp != "" {
 			// notest
 			logger.Debugf("sending response: %s", resp)
-			if _, err := fmt.Fprintln(w, resp); err != nil {
+			if err := st.write(w, resp+"\n"); err != nil {
 				logger.Errorf("error writing response: %v", err)
 				return err
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		logger.Errorf("scanner error: %v", err)
-		return err
 	}
 	logger.Infof("bridge finished")
 	return nil

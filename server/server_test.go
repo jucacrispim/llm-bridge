@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"llm-bridge/llm"
 )
@@ -810,6 +814,39 @@ func TestHandleLinePromptModelOverride(t *testing.T) {
 	}
 }
 
+func TestHandleLinePromptReasoningEffortOverride(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi","reasoning_effort":"low"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.ReasoningEffort == nil {
+		t.Fatal("expected ReasoningEffort override in ChatRequest")
+	}
+	if *fp.lastReq.ReasoningEffort != "low" {
+		t.Fatalf("ReasoningEffort = %q, want low", *fp.lastReq.ReasoningEffort)
+	}
+	if fp.lastReq.Thinking != nil {
+		t.Errorf("Thinking should be nil, got %+v", fp.lastReq.Thinking)
+	}
+	// the override persists for subsequent prompts without it
+	fp.lastReq = llm.ChatRequest{}
+	w.Reset()
+	_, quit = handleLine(`{"method":"prompt","params":{"text":"again"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.ReasoningEffort == nil || *fp.lastReq.ReasoningEffort != "low" {
+		t.Fatalf("expected persisted ReasoningEffort=low, got %+v", fp.lastReq.ReasoningEffort)
+	}
+}
+
 func TestTurnEndUsesResponseModel(t *testing.T) {
 	fp := &fakeProvider{
 		name: "fake",
@@ -904,4 +941,90 @@ func TestHandleLinePromptEmitsThinkingFallback(t *testing.T) {
 	if len(st.history) == 0 || st.history[len(st.history)-1].Reasoning != "think step by step" {
 		t.Fatalf("expected reasoning stored in history, got %+v", st.history)
 	}
+}
+
+// blockingProvider simulates a long-running streaming model: Chat blocks until
+// the request context is cancelled, exactly like a real stream that has not
+// finished speaking yet.
+type blockingProvider struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingProvider) Chat(ctx context.Context, _ llm.ChatRequest, _ func(string)) (*llm.ChatResponse, error) {
+	b.once.Do(func() { close(b.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingProvider) Name() string  { return "block" }
+func (b *blockingProvider) Model() string { return "block" }
+
+// syncBuffer is a bytes.Buffer safe for concurrent read/write, so the test can
+// poll the server's output while the reader goroutine is writing to it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestCancelInterruptsStreamingChat verifies that a `cancel` command is honored
+// immediately while a prompt's Chat is still streaming, instead of only after
+// the model finishes. The blocking provider never returns on its own, so if the
+// server waited for the stream to end the `cancelled` event would never appear
+// and this test would time out.
+func TestCancelInterruptsStreamingChat(t *testing.T) {
+	provider := &blockingProvider{started: make(chan struct{})}
+	pr, pw := io.Pipe()
+	out := &syncBuffer{}
+	done := make(chan error, 1)
+	go func() { done <- runWithProvider(pr, out, provider) }()
+
+	// start a prompt; the provider blocks in Chat until cancelled
+	if _, err := fmt.Fprintln(pw, `{"method":"prompt","params":{"text":"hi"}}`); err != nil {
+		t.Fatalf("write prompt: %v", err)
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt never started Chat")
+	}
+
+	// cancel now: must interrupt the streaming Chat promptly
+	if _, err := fmt.Fprintln(pw, `{"method":"cancel"}`); err != nil {
+		t.Fatalf("write cancel: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if strings.Contains(out.String(), `{"event":"cancelled"}`) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("cancel was not honored while Chat was streaming; output=%q", out.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	// shut down: closing the write end signals EOF so the reader goroutine
+	// finishes cleanly (no more commands are expected after the cancel).
+	_ = pw.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runWithProvider did not return after cancel")
+	}
+	_ = pr.Close()
 }

@@ -40,6 +40,10 @@ type PromptParams struct {
 	// true → deepseek-reasoner, false → deepseek-chat. Omitted keeps the
 	// provider's configured mode.
 	Thinking *bool `json:"thinking,omitempty"`
+	// ReasoningEffort optionally overrides reasoning_effort when thinking is
+	// on (e.g. "low", "medium", "high"). An empty string disables sending the
+	// parameter. Omitted keeps the provider's configured value.
+	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 }
 
 type ToolResultParams struct {

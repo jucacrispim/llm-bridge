@@ -168,6 +168,17 @@ func (p *DeepSeekProvider) resolveModel(req ChatRequest) string {
 	return DefaultModel(p.effectiveThinking(req))
 }
 
+// effectiveReasoningEffort returns the reasoning_effort value to use for a
+// request and whether it should be sent, honoring a per-request override over
+// the provider's configured value. An empty value disables sending the
+// parameter (both for a per-request override and the provider default).
+func (p *DeepSeekProvider) effectiveReasoningEffort(req ChatRequest) (string, bool) {
+	if req.ReasoningEffort != nil {
+		return *req.ReasoningEffort, *req.ReasoningEffort != ""
+	}
+	return p.reasoningEffort, p.reasoningEffort != ""
+}
+
 type openAIFunctionCall struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
@@ -198,12 +209,21 @@ type openAITool struct {
 	Function openAIFunction `json:"function"`
 }
 
+// ThinkingOptions is the structured `thinking` parameter accepted by the
+// DeepSeek API (v3 and v4 models). `type` is required: "disabled" turns the
+// model's built-in reasoning off even for models that default to it
+// (deepseek-v4-flash); "enabled" is the explicit way to turn it on.
+type ThinkingOptions struct {
+	Type string `json:"type"`
+}
+
 type openAIRequest struct {
-	Model           string          `json:"model"`
-	Messages        []openAIMessage `json:"messages"`
-	Stream          bool            `json:"stream"`
-	Tools           []openAITool    `json:"tools,omitempty"`
-	ReasoningEffort *string         `json:"reasoning_effort,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []openAIMessage  `json:"messages"`
+	Stream          bool             `json:"stream"`
+	Tools           []openAITool     `json:"tools,omitempty"`
+	Thinking        *ThinkingOptions `json:"thinking,omitempty"`
+	ReasoningEffort *string          `json:"reasoning_effort,omitempty"`
 }
 
 type openAIResponse struct {
@@ -308,11 +328,22 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 		Stream:   true,
 		Tools:    toolsPayload,
 	}
-	// The API accepts reasoning_effort (e.g. "high") to control the strength of
-	// the thinking/reasoning stage. Send it whenever thinking is enabled.
-	if p.effectiveThinking(req) && p.reasoningEffort != "" {
-		effort := p.reasoningEffort
-		payload.ReasoningEffort = &effort
+	// Thinking mode is sent explicitly via the structured `thinking` parameter
+	// (accepted by v3 and v4 models):
+	//   - thinking off → `thinking: {"type":"disabled"}`. This is required for
+	//     models like deepseek-v4-flash that reason BY DEFAULT even without any
+	//     parameter (just omitting reasoning_effort is not enough to stop them).
+	//   - thinking on  → `thinking: {"type":"enabled"}` plus the top-level
+	//     reasoning_effort (e.g. "high") that controls the strength of the
+	//     thinking/reasoning stage. A per-request override wins over the
+	//     provider's configured value.
+	if p.effectiveThinking(req) {
+		payload.Thinking = &ThinkingOptions{Type: "enabled"}
+		if effort, ok := p.effectiveReasoningEffort(req); ok {
+			payload.ReasoningEffort = &effort
+		}
+	} else {
+		payload.Thinking = &ThinkingOptions{Type: "disabled"}
 	}
 
 	body, err := json.Marshal(payload)

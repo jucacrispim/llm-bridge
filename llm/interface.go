@@ -39,6 +39,11 @@ type ChatRequest struct {
 	// request. nil means "use the provider's configured mode"; true/false
 	// switches between deepseek-reasoner and deepseek-chat unless Model is set.
 	Thinking *bool
+	// ReasoningEffort optionally overrides the provider's reasoning_effort
+	// when thinking is on. nil means "use the provider's configured value";
+	// non-nil wins over the provider (an empty string disables sending the
+	// parameter). Ignored when thinking is off.
+	ReasoningEffort *string
 	// OnReasoning, when set, is invoked with each streaming chunk of the model's
 	// chain-of-thought (deepseek's reasoning_content), which arrives before the
 	// content chunks. Used to surface the thinking to the client.

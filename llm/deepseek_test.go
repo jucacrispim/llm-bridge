@@ -305,6 +305,66 @@ func TestChatOmitsReasoningEffortWhenThinkingOff(t *testing.T) {
 	if strings.Contains(gotBody, "reasoning_effort") {
 		t.Fatalf("expected NO reasoning_effort in request body when thinking is off, got %s", gotBody)
 	}
+	// v4 models reason by default; with thinking off the structured
+	// `thinking: {"type":"disabled"}` must be sent so they stop reasoning.
+	if !strings.Contains(gotBody, `"thinking":{"type":"disabled"}`) {
+		t.Fatalf("expected thinking disabled in request body when thinking is off, got %s", gotBody)
+	}
+}
+
+func TestChatSendsThinkingEnabledWhenThinkingOn(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewDeepSeekProvider("key", server.URL, "deepseek-v4-flash")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// thinking on: explicit enabled struct + reasoning_effort (default high)
+	if !strings.Contains(gotBody, `"thinking":{"type":"enabled"}`) {
+		t.Fatalf("expected thinking enabled in request body, got %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"reasoning_effort":"high"`) {
+		t.Fatalf("expected reasoning_effort=high in request body, got %s", gotBody)
+	}
+}
+
+func TestChatSendsThinkingDisabledPerRequestOverride(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	// provider default is thinking ON, but a per-request override to off must
+	// win and send the disabled struct (and drop reasoning_effort).
+	p := NewDeepSeekProvider("key", server.URL, "deepseek-v4-flash")
+	thinking := false
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+		Thinking: &thinking,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotBody, `"thinking":{"type":"disabled"}`) {
+		t.Fatalf("expected thinking disabled (per-request) in request body, got %s", gotBody)
+	}
+	if strings.Contains(gotBody, "reasoning_effort") {
+		t.Fatalf("expected NO reasoning_effort when thinking off (per-request), got %s", gotBody)
+	}
 }
 
 func TestSetReasoningEffort(t *testing.T) {
@@ -345,6 +405,86 @@ func TestSetReasoningEffort(t *testing.T) {
 	}
 	if strings.Contains(gotBody, "reasoning_effort") {
 		t.Fatalf("expected NO reasoning_effort after SetReasoningEffort(\"\"), got %s", gotBody)
+	}
+}
+
+func TestChatReasoningEffortPerRequestWins(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	// provider global is "high"; a per-request "low" must win
+	p := NewDeepSeekProvider("key", server.URL, "deepseek-reasoner")
+	if p.ReasoningEffort() != DefaultReasoningEffort {
+		t.Fatalf("ReasoningEffort() = %q, want default %q", p.ReasoningEffort(), DefaultReasoningEffort)
+	}
+	effort := "low"
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages:        []Message{{Role: RoleUser, Content: "hello"}},
+		ReasoningEffort: &effort,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotBody, `"reasoning_effort":"low"`) {
+		t.Fatalf("expected per-request reasoning_effort=low in request body, got %s", gotBody)
+	}
+	if strings.Contains(gotBody, `"reasoning_effort":"high"`) {
+		t.Fatalf("provider global reasoning_effort=high leaked through, got %s", gotBody)
+	}
+}
+
+func TestChatReasoningEffortPerRequestEmptyDisables(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	// provider global is "high"; a per-request empty string must disable it
+	p := NewDeepSeekProvider("key", server.URL, "deepseek-reasoner")
+	effort := ""
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages:        []Message{{Role: RoleUser, Content: "hello"}},
+		ReasoningEffort: &effort,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotBody, "reasoning_effort") {
+		t.Fatalf("expected NO reasoning_effort with per-request empty override, got %s", gotBody)
+	}
+}
+
+func TestChatReasoningEffortPerRequestIgnoredWhenThinkingOff(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewDeepSeekProviderWithThinking("key", server.URL, "deepseek-chat", false)
+	effort := "low"
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages:        []Message{{Role: RoleUser, Content: "hello"}},
+		ReasoningEffort: &effort,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotBody, "reasoning_effort") {
+		t.Fatalf("expected NO reasoning_effort when thinking is off, got %s", gotBody)
 	}
 }
 

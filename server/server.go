@@ -48,6 +48,57 @@ type state struct {
 	// goroutine's `cancelled` event never interleaves with the chunks the
 	// provider's streaming callbacks are writing.
 	writeMut sync.Mutex
+	// historyMut guards the `history` slice. It is accessed concurrently by the
+	// reader goroutine (cancelTurn → history.Sanitize) and by runToolCycle
+	// (AppendAssistant once the cancelled Chat returns), so every read/write of
+	// the shared history must go through the locked helpers below.
+	historyMut sync.Mutex
+}
+
+// appendUser appends a user message to the shared conversation history.
+func (st *state) appendUser(content string) {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+	history.AppendUser(&st.history, content)
+}
+
+// appendAssistant appends an assistant message to the shared conversation
+// history, preserving any partial thinking/content collected from a stream.
+func (st *state) appendAssistant(resp *llm.ChatResponse) {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+	history.AppendAssistant(&st.history, resp)
+}
+
+// appendToolResult appends a tool response to the shared conversation history.
+func (st *state) appendToolResult(id, content string) {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+	history.AppendToolResult(&st.history, id, content)
+}
+
+// sanitizeHistory strips ephemeral blocks and orphaned tool_calls messages.
+func (st *state) sanitizeHistory() {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+	history.Sanitize(&st.history)
+}
+
+// historySnapshot returns a copy of the conversation history, safe to hand to
+// a provider while the reader goroutine may concurrently sanitize it.
+func (st *state) historySnapshot() []llm.Message {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+	out := make([]llm.Message, len(st.history))
+	copy(out, st.history)
+	return out
+}
+
+// historyLen returns the current length of the shared conversation history.
+func (st *state) historyLen() int {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+	return len(st.history)
 }
 
 // write serializes a write to w (the bridge's stdout). All event output goes
@@ -77,17 +128,31 @@ func (st *state) cancelActive() {
 	st.cancelMut.Unlock()
 }
 
-// cancelTurn rolls back the in-flight turn and resets its state, without
+// cancelTurn interrupts the in-flight turn and resets its state, without
 // emitting any event. It is the shared core of both the `cancel` command
 // handler and the reader goroutine's immediate-cancel path.
+//
+// Unlike a rollback, cancellation deliberately KEEPS the turn's history: the
+// user's prompt (appended when the turn started) and any partial thinking /
+// content the model already produced (persisted to the history by
+// runToolCycle once the streaming Chat returns with context.Canceled) stay in
+// the conversation so the user keeps the context of what was asked and what
+// was in progress.
 func (st *state) cancelTurn() {
 	st.cancelActive()
-	if st.historyLenBeforeTurn >= 0 && st.historyLenBeforeTurn <= len(st.history) {
-		st.history = st.history[:st.historyLenBeforeTurn]
-	}
 	st.inToolCycle = false
 	st.pendingToolIDs = nil
 	st.pendingToolResults = nil
+	// Drop any orphaned assistant message with tool_calls that never received
+	// a tool result. Cancelling mid-tool-cycle leaves such a message in the
+	// history (runToolCycle appended it before waiting for the results); if it
+	// were kept, the next prompt would send it to the API without the required
+	// corresponding "tool" messages (an assistant tool_calls message must be
+	// followed by tool responses for each tool_call_id), which the provider
+	// rejects with HTTP 400. Sanitize strips those orphans while preserving the
+	// user prompt and any partial assistant content, keeping the cancelled
+	// turn's context.
+	st.sanitizeHistory()
 }
 
 type setCwdParams struct {
@@ -130,7 +195,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if st.firstTurn {
 			entries, _ := appcontext.Load(st.cwd)
 			for _, e := range entries {
-				history.AppendUser(&st.history, e.Render())
+				st.appendUser(e.Render())
 			}
 			st.firstTurn = false
 		}
@@ -143,8 +208,8 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if p.ReasoningEffort != nil {
 			st.reasoningEffortOverride = p.ReasoningEffort
 		}
-		st.historyLenBeforeTurn = len(st.history) // context preserved on cancel
-		history.AppendUser(&st.history, p.Text)
+		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
+		st.appendUser(p.Text)
 		return runToolCycle(st, w)
 
 	case string(protocol.MethodCancel):
@@ -179,7 +244,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			return string(protocol.NewError("duplicate tool_result for id " + p.ID)), false
 		}
 		st.pendingToolResults[p.ID] = p.Result
-		history.AppendToolResult(&st.history, p.ID, string(p.Result))
+		st.appendToolResult(p.ID, string(p.Result))
 		allDone := true
 		for _, id := range st.pendingToolIDs {
 			if _, ok := st.pendingToolResults[id]; !ok {
@@ -211,8 +276,13 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		st.setCancel(cancel)
 		emittedChunk := false
 		emittedReasoning := false
+		// Accumulate the streamed thinking/content locally so that, if the
+		// turn is cancelled mid-stream, the partial output is still preserved
+		// in the history below instead of being lost.
+		var partialContent strings.Builder
+		var partialReasoning strings.Builder
 		resp, err := st.provider.Chat(ctx, llm.ChatRequest{
-			Messages: st.history,
+			Messages: st.historySnapshot(),
 			Tools:    tools.All(),
 			Model:            st.modelOverride,
 			Thinking:         st.thinkingOverride,
@@ -220,10 +290,12 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			// The chain-of-thought streams before the content; surface it to the
 			// client as thinking events so it can display the reasoning.
 			OnReasoning: func(s string) {
+				partialReasoning.WriteString(s)
 				emittedReasoning = true
 				_ = st.write(w, string(protocol.NewThinking(s))+"\n")
 			},
 		}, func(s string) {
+			partialContent.WriteString(s)
 			emittedChunk = true
 			_ = st.write(w, string(protocol.NewChunk(s))+"\n")
 		})
@@ -231,8 +303,16 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
-				// The request was cancelled; the reader goroutine already rolled
-				// back the history and emitted the `cancelled` event.
+				// The turn was cancelled. The user's prompt is already in the
+				// history (cancelTurn no longer rolls it back); persist whatever
+				// thinking/content the model produced before being interrupted so
+				// the cancelled turn's context is kept for the next prompt.
+				if partialContent.Len() > 0 || partialReasoning.Len() > 0 {
+					st.appendAssistant(&llm.ChatResponse{
+						Content:   partialContent.String(),
+						Reasoning: partialReasoning.String(),
+					})
+				}
 				return "", false
 			}
 			logger.Errorf("provider error: %v", err)
@@ -260,7 +340,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			_ = st.write(w, string(protocol.NewThinking(resp.Reasoning))+"\n")
 		}
 
-		history.AppendAssistant(&st.history, resp)
+		st.appendAssistant(resp)
 
 		for _, tc := range resp.ToolCalls {
 			var input any = map[string]any{}
@@ -285,7 +365,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 			newUsage := protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn)
 			_ = st.write(w, string(newUsage)+"\n")
-			history.Sanitize(&st.history)
+			st.sanitizeHistory()
 			st.inToolCycle = false
 			st.pendingToolIDs = nil
 			st.pendingToolResults = nil

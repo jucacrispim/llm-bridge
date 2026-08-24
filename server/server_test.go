@@ -250,7 +250,11 @@ func TestHandleLineCancel(t *testing.T) {
 	}
 }
 
-func TestHandleLineCancelResetsHistory(t *testing.T) {
+// TestHandleLineCancelPreservesHistory verifies that cancelling does NOT roll
+// back the conversation: the user prompt of the in-flight turn (and any partial
+// model output) stays in the history so the user keeps the context of what was
+// asked and what was in progress.
+func TestHandleLineCancelPreservesHistory(t *testing.T) {
 	st := newTestState()
 	st.history = []llm.Message{
 		{Role: llm.RoleUser, Content: "first"},
@@ -262,8 +266,12 @@ func TestHandleLineCancelResetsHistory(t *testing.T) {
 	if resp != `{"event":"cancelled"}` {
 		t.Fatalf("expected cancelled, got %q", resp)
 	}
-	if len(st.history) != 1 || st.history[0].Content != "first" {
-		t.Fatalf("history not reset correctly: %+v", st.history)
+	// history is preserved (both the pre-turn messages and the in-flight
+	// prompt "second" that was appended at turn start).
+	if len(st.history) != 2 ||
+		st.history[0].Content != "first" ||
+		st.history[1].Content != "second" {
+		t.Fatalf("history should be preserved on cancel, got: %+v", st.history)
 	}
 	if st.inToolCycle {
 		t.Fatal("inToolCycle should be false after cancel")
@@ -723,15 +731,85 @@ func TestCancelPreservesContext(t *testing.T) {
 		t.Fatalf("expected cancelled, got %q", resp)
 	}
 
-	// context preserved, user prompt of that turn removed
-	if len(st.history) != 2 {
-		t.Fatalf("history len after cancel = %d, want 2 (context only)", len(st.history))
+	// context AND the in-flight user prompt are preserved on cancel, but the
+	// orphaned assistant message with tool_calls (which never received its tool
+	// result) is sanitized so the next request is not rejected by the API.
+	if len(st.history) != 3 {
+		t.Fatalf("history len after cancel = %d, want 3 (2 context + 1 prompt; orphan tool_calls dropped)", len(st.history))
 	}
 	if !strings.Contains(st.history[0].Content, "GENERAL") {
 		t.Errorf("history[0] should contain general context, got %q", st.history[0].Content)
 	}
 	if !strings.Contains(st.history[1].Content, "LOCAL") {
 		t.Errorf("history[1] should contain local context, got %q", st.history[1].Content)
+	}
+	last := st.history[len(st.history)-1]
+	if last.Role != llm.RoleUser || last.Content != "hi" {
+		t.Errorf("last message should be the original user prompt, got %+v", last)
+	}
+	for _, m := range st.history {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("orphaned assistant tool_calls message should be removed on cancel, got %+v", m)
+		}
+	}
+}
+
+// TestPromptAfterCancelDuringToolCycle verifies the fix for the HTTP 400 the
+// API returns when an assistant message with tool_calls is sent back without the
+// corresponding tool messages. After cancelling a prompt that was awaiting a
+// tool result, a new prompt must be sent WITHOUT the orphaned tool_calls
+// message; otherwise the provider rejects the request (the exact error the user
+// hit after a stuck process left an incomplete tool cycle).
+func TestPromptAfterCancelDuringToolCycle(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+			},
+			{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	st := &state{provider: provider}
+	var w bytes.Buffer
+
+	// first prompt enters the tool cycle and leaves the assistant tool_calls
+	// pending (no tool_result delivered yet)
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"first"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle")
+	}
+
+	// cancel mid-tool-cycle (the user's stuck process scenario)
+	resp, _ := handleLine(`{"method":"cancel"}`, st, &w)
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+
+	// the orphaned assistant tool_calls message must have been sanitized away
+	for _, m := range st.history {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("orphaned tool_calls left in history after cancel: %+v", m)
+		}
+	}
+
+	// a new prompt must reach the provider WITHOUT any orphaned tool_calls
+	provider.callCount = 0
+	w.Reset()
+	_, quit = handleLine(`{"method":"prompt","params":{"text":"second"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	for _, m := range provider.lastReq.Messages {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("new prompt sent orphaned tool_calls to provider: %+v", m)
+		}
 	}
 }
 
@@ -959,6 +1037,111 @@ func (b *blockingProvider) Chat(ctx context.Context, _ llm.ChatRequest, _ func(s
 
 func (b *blockingProvider) Name() string  { return "block" }
 func (b *blockingProvider) Model() string { return "block" }
+
+// partialStreamProvider streams some thinking/content and then blocks until the
+// request context is cancelled, simulating a real model interrupted mid-answer.
+// This lets tests assert that the partial output is preserved on cancel.
+type partialStreamProvider struct {
+	started   chan struct{}
+	onChunk   func(string)
+	once      sync.Once
+	cancelled chan struct{}
+}
+
+func (p *partialStreamProvider) Chat(ctx context.Context, req llm.ChatRequest, onChunk func(string)) (*llm.ChatResponse, error) {
+	p.once.Do(func() { close(p.started) })
+	p.onChunk = onChunk
+	// Stream a thinking event via the server's OnReasoning callback (the real
+	// chain-of-thought streaming path), then a content chunk, and finally block
+	// until the request context is cancelled.
+	if req.OnReasoning != nil {
+		req.OnReasoning("thinking about it")
+	}
+	onChunk("partial answer")
+	<-ctx.Done()
+	close(p.cancelled)
+	return nil, ctx.Err()
+}
+
+func (p *partialStreamProvider) Name() string  { return "partial" }
+func (p *partialStreamProvider) Model() string { return "partial" }
+
+// TestCancelPreservesPartialOutput verifies that when a turn is cancelled, the
+// user prompt AND the partial thinking/content the model produced before being
+// interrupted are kept in the history, so the next prompt retains the context
+// of what was asked and what was in progress.
+func TestCancelPreservesPartialOutput(t *testing.T) {
+	provider := &partialStreamProvider{
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+	}
+	st := &state{provider: provider}
+	var w bytes.Buffer
+
+	// The provider's Chat streams a thinking event + one content chunk and then
+	// blocks until the request context is cancelled. Start the prompt in a
+	// goroutine: it must NOT return until we cancel the in-flight turn.
+	promptDone := make(chan struct{})
+	go func() {
+		defer close(promptDone)
+		if _, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w); quit {
+			t.Error("prompt should not quit")
+		}
+	}()
+
+	// Wait until the provider is streaming (Chat has delivered partial output
+	// and is now blocked).
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt never started Chat")
+	}
+
+	// Cancel the in-flight turn now.
+	resp, quit := handleLine(`{"method":"cancel"}`, st, &w)
+	if quit {
+		t.Fatal("cancel should not quit")
+	}
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+
+	// The prompt turn must unwind once the stream is cancelled.
+	select {
+	case <-promptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt handleLine never returned after cancel")
+	}
+
+	// The partial thinking + content the model streamed in real time before the
+	// cancel were surfaced to the client as normal events (the `cancelled` ack
+	// was written by the cancel handler, not by the prompt turn).
+	out := w.String()
+	if !strings.Contains(out, `{"event":"thinking","text":"thinking about it"}`) {
+		t.Fatalf("expected streamed thinking event before cancel, got %q", out)
+	}
+	if !strings.Contains(out, `{"event":"chunk","text":"partial answer"}`) {
+		t.Fatalf("expected streamed chunk event before cancel, got %q", out)
+	}
+
+	// the user prompt and the partial assistant (thinking + content) are kept
+	if len(st.history) != 2 {
+		t.Fatalf("history len = %d, want 2 (prompt + partial assistant)", len(st.history))
+	}
+	if st.history[0].Role != llm.RoleUser || st.history[0].Content != "hi" {
+		t.Fatalf("history[0] should be the user prompt, got %+v", st.history[0])
+	}
+	last := st.history[1]
+	if last.Role != llm.RoleAssistant {
+		t.Fatalf("history[1] should be the partial assistant message, got %+v", last)
+	}
+	if last.Content != "partial answer" {
+		t.Fatalf("partial content not preserved, got %q", last.Content)
+	}
+	if last.Reasoning != "thinking about it" {
+		t.Fatalf("partial reasoning not preserved, got %q", last.Reasoning)
+	}
+}
 
 // syncBuffer is a bytes.Buffer safe for concurrent read/write, so the test can
 // poll the server's output while the reader goroutine is writing to it.

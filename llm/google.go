@@ -353,6 +353,39 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 	logger.Tracef("Google request model=%s contents=%d tools=%d thinkingBudget=%d",
 		model, len(gContents), len(tools), gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
 
+	if gReq.SystemInstruction != nil {
+		logger.Tracef("Google system instruction parts: %d", len(gReq.SystemInstruction.Parts))
+		for _, sp := range gReq.SystemInstruction.Parts {
+			logger.Tracef("  system part text=%q", sp.Text)
+		}
+	}
+
+	logger.Tracef("Google request contents (history):")
+	for _, c := range gContents {
+		logger.Tracef("  role=%s parts=%d", c.Role, len(c.Parts))
+		for _, part := range c.Parts {
+			switch {
+			case part.Text != "":
+				logger.Tracef("    text=%q", part.Text)
+			case part.FunctionCall != nil:
+				logger.Tracef("    function_call name=%s args=%s thought_signature=%s", part.FunctionCall.Name, string(part.FunctionCall.Args), part.ThoughtSignature)
+			case part.FunctionResponse != nil:
+				logger.Tracef("    function_response name=%s response=%s", part.FunctionResponse.Name, string(part.FunctionResponse.Response))
+			case part.Thought:
+				logger.Tracef("    thought text=%q", part.Text)
+			}
+		}
+	}
+
+	if len(gReq.Tools) > 0 {
+		logger.Tracef("Google request tools: %d", len(gReq.Tools))
+		for _, t := range gReq.Tools {
+			for _, decl := range t.FunctionDeclarations {
+				logger.Tracef("  tool name=%s description=%q", decl.Name, decl.Description)
+			}
+		}
+	}
+
 	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse&key=%s", p.endpoint, model, p.apiKey)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

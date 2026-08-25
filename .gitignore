@@ -15,6 +15,7 @@ pip-log.txt
 
 dist/
 build/
+server/system_prompt.md
 *.egg-info/
 _trial_temp
 *.egg

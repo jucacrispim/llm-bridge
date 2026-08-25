@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,18 +20,16 @@ import (
 	"llm-bridge/tools"
 )
 
-// defaultSystemPrompt guides the model's behavior. The bridge always exposes
-// tools to the model, and agentic models (notably Gemini) will happily call a
-// tool even for a plain greeting ("oi" → "git status"). The system prompt
-// makes explicit that tools are only for actually inspecting/modifying the
-// project or running a command, and that casual conversation must be answered
-// with plain text. It is sent fresh on every request (not persisted in the
-// history).
-const defaultSystemPrompt = `You are a helpful coding assistant working in the user's terminal on their software projects. You have access to tools to read, write, search and replace files, and run shell commands.
+//go:embed system_prompt.md
+var systemPromptFS embed.FS
 
-Use tools ONLY when the user's request requires inspecting or modifying the project, or running a command. For casual conversation, greetings, or general questions that do not need the project's files, respond with plain text and do NOT call a tool. When you do use a tool, prefer the smallest, most targeted action and run only what the user asked for.
-
-When facing an implementation task, before starting writing code, give the user a concise explanation and ask for permition to go ahead.`
+var defaultSystemPrompt = func() string {
+	b, err := systemPromptFS.ReadFile("system_prompt.md")
+	if err != nil {
+		panic(fmt.Sprintf("failed to read embedded system_prompt.md: %v", err))
+	}
+	return strings.TrimSpace(string(b))
+}()
 
 type state struct {
 	cwd            string

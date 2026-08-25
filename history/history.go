@@ -43,6 +43,15 @@ func AppendUser(hist *[]llm.Message, content string) {
 }
 
 func AppendAssistant(hist *[]llm.Message, resp *llm.ChatResponse) {
+	// An assistant message must carry either content or tool_calls; the
+	// OpenAI-compatible API rejects an empty one (both unset) with HTTP 400.
+	// A partial turn cancelled mid-stream can leave a ChatResponse with only
+	// reasoning and no content, and that reasoning is stripped below for
+	// messages without tool calls — so dropping it here prevents an empty
+	// assistant message from ever reaching the history.
+	if resp.Content == "" && len(resp.ToolCalls) == 0 {
+		return
+	}
 	// Reasoning (chain-of-thought) is never sent back to a provider for an
 	// assistant message without tool calls: DeepSeek omits reasoning_content
 	// for those (only re-sends it when the message performed tool calls, to

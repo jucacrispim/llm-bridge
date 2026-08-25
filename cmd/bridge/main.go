@@ -24,6 +24,7 @@ func main() {
 	reasoningEffort := flag.String("reasoning-effort", "", "reasoning_effort sent when thinking is on for deepseek (e.g. low/medium/high; default \"high\"); for google, a numeric thinkingConfig.thinkingBudget")
 	debug := flag.Bool("debug", false, "enable debug logging to the default log file (kept for compatibility)")
 	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
+	systemPromptFlag := flag.String("system-prompt", "", "path to a file containing the system prompt (or literal system prompt string)")
 	flag.Parse()
 
 	if *providerName != "deepseek" && *providerName != "google" {
@@ -125,7 +126,21 @@ func main() {
 		providers["google"] = gp
 	}
 
-	if err := server.RunWithProviders(os.Stdin, os.Stdout, providers, *providerName); err != nil {
+	systemPrompt := ""
+	if *systemPromptFlag != "" {
+		if info, err := os.Stat(*systemPromptFlag); err == nil && !info.IsDir() {
+			data, err := os.ReadFile(*systemPromptFlag)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to read system prompt file %s: %v\n", *systemPromptFlag, err)
+				os.Exit(1)
+			}
+			systemPrompt = string(data)
+		} else {
+			systemPrompt = *systemPromptFlag
+		}
+	}
+
+	if err := server.RunWithSystemPrompt(os.Stdin, os.Stdout, providers, *providerName, systemPrompt); err != nil {
 		os.Exit(1)
 	}
 }

@@ -49,6 +49,11 @@ type PromptParams struct {
 	// on (e.g. "low", "medium", "high"). An empty string disables sending the
 	// parameter. Omitted keeps the provider's configured value.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+	// System optionally overrides the system prompt for this and subsequent
+	// prompts. Like Model/Provider, the override persists between prompts.
+	System string `json:"system,omitempty"`
+	// SystemPrompt is an alias for System.
+	SystemPrompt string `json:"system_prompt,omitempty"`
 }
 
 type ToolResultParams struct {

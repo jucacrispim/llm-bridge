@@ -28,7 +28,9 @@ import (
 // history).
 const defaultSystemPrompt = `You are a helpful coding assistant working in the user's terminal on their software projects. You have access to tools to read, write, search and replace files, and run shell commands.
 
-Use tools ONLY when the user's request requires inspecting or modifying the project, or running a command. For casual conversation, greetings, or general questions that do not need the project's files, respond with plain text and do NOT call a tool. When you do use a tool, prefer the smallest, most targeted action and run only what the user asked for.`
+Use tools ONLY when the user's request requires inspecting or modifying the project, or running a command. For casual conversation, greetings, or general questions that do not need the project's files, respond with plain text and do NOT call a tool. When you do use a tool, prefer the smallest, most targeted action and run only what the user asked for.
+
+When facing an implementation task, before starting writing code, give the user a concise explanation and ask for permition to go ahead.`
 
 type state struct {
 	cwd            string
@@ -52,8 +54,10 @@ type state struct {
 	modelOverride           string
 	thinkingOverride        *bool
 	reasoningEffortOverride *string
+	systemOverride          string
+	systemPrompt            string
 
-	cancel               context.CancelFunc
+	cancel context.CancelFunc
 	// cancelled reports whether the current turn was cancelled (as opposed to
 	// having completed). It is set by cancelTurn and cleared when a new prompt
 	// starts. A tool_result that arrives for an already-cancelled turn is
@@ -98,6 +102,18 @@ func (st *state) activeProvider() llm.LLMProvider {
 		}
 	}
 	return st.provider
+}
+
+// effectiveSystem returns the system prompt to use for the current request,
+// resolving per-request override, global server system prompt, and default.
+func (st *state) effectiveSystem() string {
+	if st.systemOverride != "" {
+		return st.systemOverride
+	}
+	if st.systemPrompt != "" {
+		return st.systemPrompt
+	}
+	return defaultSystemPrompt
 }
 
 // appendUser appends a user message to the shared conversation history.
@@ -282,6 +298,13 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if p.ReasoningEffort != nil {
 			st.reasoningEffortOverride = p.ReasoningEffort
 		}
+		sys := p.System
+		if sys == "" {
+			sys = p.SystemPrompt
+		}
+		if sys != "" {
+			st.systemOverride = sys
+		}
 		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
 		st.appendUser(p.Text)
 		return runToolCycle(st, w)
@@ -367,7 +390,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		resp, err := st.activeProvider().Chat(ctx, llm.ChatRequest{
 			Messages:        st.historySnapshot(),
 			Tools:           tools.All(),
-			System:          defaultSystemPrompt,
+			System:          st.effectiveSystem(),
 			Model:           st.modelOverride,
 			Thinking:        st.thinkingOverride,
 			ReasoningEffort: st.reasoningEffortOverride,
@@ -487,7 +510,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	if len(providers) > 0 {
 		if defaultName == "" {
 			for name := range providers {
@@ -497,7 +520,7 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 		}
 		logger.Infof("starting bridge with providers %v (default %s)", providerNames(providers), defaultName)
 	}
-	st := &state{providers: providers, providerName: defaultName, firstTurn: true}
+	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true}
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
 
@@ -556,9 +579,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name())
+		return run(r, w, providers, provider.Name(), "")
 	}
-	return run(r, w, nil, "")
+	return run(r, w, nil, "", "")
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -572,5 +595,12 @@ func Run(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 // selects the initial active provider.
 func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string) error {
 	// notest
-	return run(r, w, providers, defaultName)
+	return RunWithSystemPrompt(r, w, providers, defaultName, "")
+}
+
+// RunWithSystemPrompt starts the server loop with a registry of named providers
+// and an initial global system prompt.
+func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
+	// notest
+	return run(r, w, providers, defaultName, systemPrompt)
 }

@@ -1414,3 +1414,49 @@ func TestCancelInterruptsStreamingChat(t *testing.T) {
 	}
 	_ = pr.Close()
 }
+
+func TestHandleLinePromptSystemOverride(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi","system":"custom system prompt"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.System != "custom system prompt" {
+		t.Errorf("System = %q, want custom system prompt", fp.lastReq.System)
+	}
+
+	// override persists for subsequent prompts without it
+	fp.lastReq = llm.ChatRequest{}
+	w.Reset()
+	_, quit = handleLine(`{"method":"prompt","params":{"text":"again"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.System != "custom system prompt" {
+		t.Errorf("persisted System = %q, want custom system prompt", fp.lastReq.System)
+	}
+}
+
+func TestRunWithSystemPromptGlobal(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	var out bytes.Buffer
+	input := `{"method":"prompt","params":{"text":"hi"}}
+{"method":"quit"}
+`
+	err := RunWithSystemPrompt(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "global system prompt")
+	if err != nil {
+		t.Fatalf("RunWithSystemPrompt error: %v", err)
+	}
+	if fp.lastReq.System != "global system prompt" {
+		t.Errorf("System = %q, want global system prompt", fp.lastReq.System)
+	}
+}

@@ -1182,9 +1182,11 @@ func TestHandleLinePromptEmitsThinkingEvent(t *testing.T) {
 	if !strings.Contains(out, `{"event":"thinking","text":"let me think about this"}`) {
 		t.Fatalf("expected thinking event with reasoning, got %q", out)
 	}
-	// reasoning must also be stored in the history for the next turn
-	if len(st.history) == 0 || st.history[len(st.history)-1].Reasoning != "let me think about this" {
-		t.Fatalf("expected reasoning stored in history, got %+v", st.history)
+	// reasoning is NOT kept in the history for a message without tool calls (it
+	// is never sent back to the provider in that case, so storing it would be
+	// dead weight).
+	if len(st.history) == 0 || st.history[len(st.history)-1].Reasoning != "" {
+		t.Fatalf("expected reasoning dropped from non-tool-call history message, got %+v", st.history)
 	}
 }
 
@@ -1218,9 +1220,10 @@ func TestHandleLinePromptEmitsThinkingFallback(t *testing.T) {
 	if !strings.Contains(out, `"text":"think step by step"`) {
 		t.Fatalf("expected fallback thinking event with reasoning text, got %q", out)
 	}
-	// the reasoning is still persisted in the history for the next turn
-	if len(st.history) == 0 || st.history[len(st.history)-1].Reasoning != "think step by step" {
-		t.Fatalf("expected reasoning stored in history, got %+v", st.history)
+	// the reasoning is NOT persisted for a message without tool calls (it is
+	// never re-sent to the provider in that case).
+	if len(st.history) == 0 || st.history[len(st.history)-1].Reasoning != "" {
+		t.Fatalf("expected reasoning dropped from non-tool-call history message, got %+v", st.history)
 	}
 }
 
@@ -1341,8 +1344,11 @@ func TestCancelPreservesPartialOutput(t *testing.T) {
 	if last.Content != "partial answer" {
 		t.Fatalf("partial content not preserved, got %q", last.Content)
 	}
-	if last.Reasoning != "thinking about it" {
-		t.Fatalf("partial reasoning not preserved, got %q", last.Reasoning)
+	// the partial reasoning (no tool calls) is NOT kept in the history: it is
+	// never re-sent to the provider for a non-tool-call message, so storing it
+	// would be dead weight.
+	if last.Reasoning != "" {
+		t.Fatalf("expected partial reasoning dropped from non-tool-call history message, got %q", last.Reasoning)
 	}
 }
 
@@ -1440,6 +1446,132 @@ func TestHandleLinePromptSystemOverride(t *testing.T) {
 	}
 	if fp.lastReq.System != "custom system prompt" {
 		t.Errorf("persisted System = %q, want custom system prompt", fp.lastReq.System)
+	}
+}
+
+// TestAggressivePruneCollapsesToolTurn verifies that with aggressive prune
+// enabled, a completed tool-calling turn collapses to just the user prompt +
+// the final assistant answer, dropping the intermediate tool_calls and tool
+// results. The prefix (context + prior turns) is preserved byte-identically.
+func TestAggressivePruneCollapsesToolTurn(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{},
+				Reasoning:  "thinking that is never re-sent",
+			},
+		},
+	}
+	st := &state{provider: provider, aggressivePrune: true}
+	// Seed a prior turn (a plain user->assistant pair) that must be preserved.
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "earlier"},
+		{Role: llm.RoleAssistant, Content: "previous answer"},
+	}
+	var w bytes.Buffer
+
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle")
+	}
+	w.Reset()
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+
+	// history is now [earlier, previous answer, hi(user), final answer(done)]
+	// — the intermediate assistant(tool_calls) and the tool result are gone.
+	if len(st.history) != 4 {
+		t.Fatalf("history len = %d, want 4 (2 prior + user prompt + final answer), got %+v", len(st.history), st.history)
+	}
+	if st.history[0].Content != "earlier" || st.history[1].Content != "previous answer" {
+		t.Fatalf("prior turns should be preserved untouched, got %+v", st.history[:2])
+	}
+	if st.history[2].Role != llm.RoleUser || st.history[2].Content != "hi" {
+		t.Fatalf("history[2] should be the user prompt, got %+v", st.history[2])
+	}
+	last := st.history[3]
+	if last.Role != llm.RoleAssistant || last.Content != "done" {
+		t.Fatalf("history[3] should be the final answer, got %+v", last)
+	}
+	for _, m := range st.history {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("collapsed history should contain no tool_calls, got %+v", m)
+		}
+	}
+}
+
+// TestAggressivePruneKeepsConversationTurns verifies that aggressive prune does
+// NOT touch plain conversational turns (no tools): the user prompt and the
+// assistant answer are kept as-is, so nothing is lost or reordered.
+func TestAggressivePruneKeepsConversationTurns(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp, aggressivePrune: true}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if len(st.history) != 2 {
+		t.Fatalf("history len = %d, want 2 (prompt + answer)", len(st.history))
+	}
+	if st.history[0].Role != llm.RoleUser || st.history[0].Content != "hi" {
+		t.Fatalf("history[0] should be the user prompt, got %+v", st.history[0])
+	}
+	if st.history[1].Role != llm.RoleAssistant || st.history[1].Content != "Hello" {
+		t.Fatalf("history[1] should be the assistant answer, got %+v", st.history[1])
+	}
+}
+
+// TestAggressivePruneDefaultOff verifies that WITHOUT the flag the interleaved
+// history (assistant tool_calls + tool result) is preserved across the turn,
+// matching the previous behavior.
+func TestAggressivePruneDefaultOff(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	st := &state{provider: provider} // aggressivePrune defaults to false
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	w.Reset()
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	// [user, assistant(tool_calls), tool, assistant(final)] — nothing collapsed.
+	if len(st.history) != 4 {
+		t.Fatalf("history len = %d, want 4 (interleaved, prune off), got %+v", len(st.history), st.history)
+	}
+	if len(st.history[1].ToolCalls) != 1 || st.history[2].Role != "tool" {
+		t.Fatalf("interleaved tool history should be preserved without prune, got %+v", st.history)
 	}
 }
 

@@ -340,7 +340,10 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 	//     reasoning_effort (e.g. "high") that controls the strength of the
 	//     thinking/reasoning stage. A per-request override wins over the
 	//     provider's configured value.
-	if p.effectiveThinking(req) {
+	thinking := p.effectiveThinking(req)
+	effort, _ := p.effectiveReasoningEffort(req)
+	logger.Tracef("DeepSeek request reasoning: thinking=%v reasoning_effort=%q", thinking, effort)
+	if thinking {
 		payload.Thinking = &ThinkingOptions{Type: "enabled"}
 		if effort, ok := p.effectiveReasoningEffort(req); ok {
 			payload.ReasoningEffort = &effort

@@ -56,6 +56,12 @@ type state struct {
 	systemOverride          string
 	systemPrompt            string
 
+	// aggressivePrune, when enabled, collapses each completed tool-calling turn
+	// into just the user prompt + the final assistant answer, dropping the
+	// intermediate tool_calls, tool results, and their chain-of-thought. Off by
+	// default; enabled via the -aggressive-prune flag.
+	aggressivePrune bool
+
 	cancel context.CancelFunc
 	// cancelled reports whether the current turn was cancelled (as opposed to
 	// having completed). It is set by cancelTurn and cleared when a new prompt
@@ -159,6 +165,45 @@ func (st *state) historyLen() int {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
 	return len(st.history)
+}
+
+// collapseTurn compresses a completed tool-calling turn into just the user
+// prompt that opened it plus the final assistant answer, dropping everything in
+// between: the intermediate assistant tool_calls messages, the tool results,
+// and their chain-of-thought. The prefix (context + prior turns) is kept
+// byte-identical, so the provider's context/prefix cache stays reusable across
+// turns while the history stays small.
+//
+// Only turns that actually exercised tools are collapsed (a turn is more than
+// prompt + one assistant answer). Conversation-only turns are left untouched.
+// Cancelled turns never reach here (collapse runs only on successful
+// completion), so their preserved partial context is not affected.
+func (st *state) collapseTurn() {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+
+	start := st.historyLenBeforeTurn
+	if start < 0 || start >= len(st.history) {
+		return
+	}
+	last := st.history[len(st.history)-1]
+	// No final plain assistant answer → nothing to collapse cleanly.
+	if last.Role != llm.RoleAssistant || len(last.ToolCalls) > 0 {
+		return
+	}
+	// A turn with no intermediate tool activity is already prompt + answer.
+	if len(st.history)-start <= 2 {
+		return
+	}
+
+	collapsed := make([]llm.Message, 0, start+2)
+	collapsed = append(collapsed, st.history[:start]...)
+	collapsed = append(collapsed, st.history[start]) // the user prompt of this turn
+	collapsed = append(collapsed, llm.Message{
+		Role:    llm.RoleAssistant,
+		Content: last.Content,
+	})
+	st.history = collapsed
 }
 
 // write serializes a write to w (the bridge's stdout). All event output goes
@@ -471,6 +516,13 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 			newUsage := protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn)
 			_ = st.write(w, string(newUsage)+"\n")
+			// Aggressive prune: collapse a tool-calling turn into just its user
+			// prompt + final answer, keeping the history small and its prefix
+			// byte-stable for provider caching. Runs before historyLenBeforeTurn
+			// is reset, since it needs the turn's start marker.
+			if st.aggressivePrune {
+				st.collapseTurn()
+			}
 			st.sanitizeHistory()
 			st.inToolCycle = false
 			st.pendingToolIDs = nil
@@ -509,7 +561,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool) error {
 	if len(providers) > 0 {
 		if defaultName == "" {
 			for name := range providers {
@@ -519,7 +571,10 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 		}
 		logger.Infof("starting bridge with providers %v (default %s)", providerNames(providers), defaultName)
 	}
-	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true}
+	if aggressivePrune {
+		logger.Infof("aggressive prune enabled: collapsing tool-calling turns")
+	}
+	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune}
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
 
@@ -578,9 +633,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name(), "")
+		return run(r, w, providers, provider.Name(), "", false)
 	}
-	return run(r, w, nil, "", "")
+	return run(r, w, nil, "", "", false)
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -601,5 +656,12 @@ func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProv
 // and an initial global system prompt.
 func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt)
+	return run(r, w, providers, defaultName, systemPrompt, false)
+}
+
+// RunWithOptions starts the server loop with a registry of named providers, an
+// initial global system prompt, and the aggressive-prune option (see state).
+func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool) error {
+	// notest
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune)
 }

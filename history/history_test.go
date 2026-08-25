@@ -49,6 +49,22 @@ func TestAppendAssistantStoresReasoning(t *testing.T) {
 	}
 }
 
+// TestAppendAssistantDropsReasoningWithoutToolCalls verifies that reasoning
+// (chain-of-thought) is NOT kept in the history for an assistant message that
+// performed no tool calls, since it is never re-sent to a provider in that
+// case (DeepSeek omits reasoning_content, Gemini has no input channel for it).
+func TestAppendAssistantDropsReasoningWithoutToolCalls(t *testing.T) {
+	var h []llm.Message
+	resp := &llm.ChatResponse{Content: "answer", Reasoning: "think step by step"}
+	AppendAssistant(&h, resp)
+	if len(h) != 1 {
+		t.Fatalf("len = %d, want 1", len(h))
+	}
+	if h[0].Reasoning != "" {
+		t.Fatalf("Reasoning = %q, want empty (no tool calls)", h[0].Reasoning)
+	}
+}
+
 func TestAppendToolResult(t *testing.T) {
 	var h []llm.Message
 	AppendToolResult(&h, "call_1", `{"ok":true}`)

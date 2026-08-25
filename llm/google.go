@@ -350,6 +350,8 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 		return nil, err
 	}
 
+	logger.Tracef("Google request reasoning: thinking=%v thinking_budget=%d",
+		p.effectiveThinking(req), gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
 	logger.Tracef("Google request model=%s contents=%d tools=%d thinkingBudget=%d",
 		model, len(gContents), len(tools), gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
 

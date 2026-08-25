@@ -25,6 +25,7 @@ func main() {
 	debug := flag.Bool("debug", false, "enable debug logging to the default log file (kept for compatibility)")
 	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
 	systemPromptFlag := flag.String("system-prompt", "", "path to a file containing the system prompt (or literal system prompt string)")
+	aggressivePrune := flag.Bool("aggressive-prune", false, "collapse each completed tool-calling turn into just the user prompt + final answer, dropping the intermediate tool calls, tool results, and chain-of-thought from the history to save tokens and keep the prefix cacheable. Off by default.")
 	flag.Parse()
 
 	if *providerName != "deepseek" && *providerName != "google" {
@@ -140,7 +141,7 @@ func main() {
 		}
 	}
 
-	if err := server.RunWithSystemPrompt(os.Stdin, os.Stdout, providers, *providerName, systemPrompt); err != nil {
+	if err := server.RunWithOptions(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune); err != nil {
 		os.Exit(1)
 	}
 }

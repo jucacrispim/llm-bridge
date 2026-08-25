@@ -18,16 +18,16 @@ import (
 const defaultLogFile = "/tmp/llm-bridge.log"
 
 func main() {
-	providerName := flag.String("provider", "deepseek", "LLM provider (only 'deepseek' supported)")
-	modelName := flag.String("model", "", "model to use (overrides DEEPSEEK_MODEL)")
-	thinking := flag.Bool("thinking", llm.ThinkingFromEnv(true), "enable thinking mode (uses deepseek-reasoner when no explicit model); pass -thinking=false to use deepseek-chat")
-	reasoningEffort := flag.String("reasoning-effort", "", "reasoning_effort sent when thinking is on (e.g. low/medium/high; default \"high\")")
+	providerName := flag.String("provider", "deepseek", "LLM provider: 'deepseek' or 'google' (Gemini AI Studio)")
+	modelName := flag.String("model", "", "model to use (overrides DEEPSEEK_MODEL / GOOGLE_MODEL)")
+	thinking := flag.Bool("thinking", true, "enable thinking mode (uses deepseek-reasoner when no explicit model and provider deepseek; pass -thinking=false to disable). For deepseek defaults to DEEPSEEK_THINKING, for google GOOGLE_THINKING")
+	reasoningEffort := flag.String("reasoning-effort", "", "reasoning_effort sent when thinking is on for deepseek (e.g. low/medium/high; default \"high\"); for google, a numeric thinkingConfig.thinkingBudget")
 	debug := flag.Bool("debug", false, "enable debug logging to the default log file (kept for compatibility)")
 	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
 	flag.Parse()
 
-	if *providerName != "deepseek" {
-		fmt.Fprintf(os.Stderr, "unsupported provider: %s\n", *providerName)
+	if *providerName != "deepseek" && *providerName != "google" {
+		fmt.Fprintf(os.Stderr, "unsupported provider: %s (supported: deepseek, google)\n", *providerName)
 		os.Exit(1)
 	}
 
@@ -50,42 +50,82 @@ func main() {
 		logger.SetOutput(io.Discard)
 	}
 
-	// Resolve the model: an explicit --model flag wins, then DEEPSEEK_MODEL.
-	// When no explicit model is configured, the provider derives the model from
-	// the thinking mode (the --thinking flag, which defaults to
-	// DEEPSEEK_THINKING or true), so a thinking override never discards an
-	// explicitly configured model.
-	apiKey := os.Getenv("DEEPSEEK_API_KEY")
-	endpoint := os.Getenv("DEEPSEEK_URL")
-	if endpoint == "" {
-		endpoint = "https://api.deepseek.com/chat/completions"
-	}
-	model := *modelName
-	if model == "" {
-		model = os.Getenv("DEEPSEEK_MODEL")
-	}
+	// Build a registry of BOTH providers so the bridge can switch provider per
+	// request via the prompt's `provider` field (e.g. deepseek → google and
+	// back). The --provider flag only selects the default/initial active one.
+	providers := make(map[string]llm.LLMProvider)
 
-	var provider llm.LLMProvider
-	if model != "" {
-		provider = llm.NewDeepSeekProviderWithThinking(apiKey, endpoint, model, *thinking)
-	} else {
-		provider = llm.NewDeepSeekProviderAutoModel(apiKey, endpoint, *thinking)
-	}
-
-	// Reasoning effort: the --reasoning-effort flag wins, then
-	// DEEPSEEK_REASONING_EFFORT, then the "high" default. Only used when
-	// thinking is enabled.
-	if dp, ok := provider.(*llm.DeepSeekProvider); ok {
+	// deepseek provider.
+	{
+		// Resolve the model: an explicit --model flag (when deepseek is the
+		// default) wins, then DEEPSEEK_MODEL. When no explicit model is
+		// configured, the provider derives the model from the thinking mode
+		// (deepseek-reasoner / deepseek-chat).
+		apiKey := os.Getenv("DEEPSEEK_API_KEY")
+		endpoint := os.Getenv("DEEPSEEK_URL")
+		if endpoint == "" {
+			endpoint = "https://api.deepseek.com/chat/completions"
+		}
+		model := ""
+		if *providerName == "deepseek" {
+			model = *modelName
+		}
+		if model == "" {
+			model = os.Getenv("DEEPSEEK_MODEL")
+		}
+		var ds llm.LLMProvider
+		if model != "" {
+			ds = llm.NewDeepSeekProviderWithThinking(apiKey, endpoint, model, *thinking)
+		} else {
+			ds = llm.NewDeepSeekProviderAutoModel(apiKey, endpoint, *thinking)
+		}
+		// Reasoning effort: the --reasoning-effort flag wins, then
+		// DEEPSEEK_REASONING_EFFORT, then the "high" default.
 		effort := *reasoningEffort
 		if effort == "" {
 			effort = os.Getenv("DEEPSEEK_REASONING_EFFORT")
 		}
 		if effort != "" {
-			dp.SetReasoningEffort(effort)
+			ds.(*llm.DeepSeekProvider).SetReasoningEffort(effort)
 		}
+		providers["deepseek"] = ds
 	}
 
-	if err := server.Run(os.Stdin, os.Stdout, provider); err != nil {
+	// google provider (Gemini AI Studio).
+	{
+		// Resolve the model: an explicit --model flag (when google is the
+		// default) wins, then GOOGLE_MODEL / GEMINI_MODEL, then the gemini
+		// default. Thinking is honored by GOOGLE_THINKING (or the --thinking
+		// flag) and the budget by GOOGLE_THINKING_BUDGET / the numeric
+		// --reasoning-effort.
+		apiKey := os.Getenv("GOOGLE_API_KEY")
+		if apiKey == "" {
+			apiKey = os.Getenv("GEMINI_API_KEY")
+		}
+		endpoint := os.Getenv("GOOGLE_URL")
+		model := ""
+		if *providerName == "google" {
+			model = *modelName
+		}
+		if model == "" {
+			model = os.Getenv("GOOGLE_MODEL")
+		}
+		if model == "" {
+			model = os.Getenv("GEMINI_MODEL")
+		}
+		gp := llm.NewGoogleProviderWithThinking(apiKey, endpoint, model, *thinking)
+		if !*thinking {
+			gp.SetThinkingBudget(0)
+		}
+		if budget := *reasoningEffort; budget != "" {
+			gp.SetThinkingBudget(llm.ParseBudget(budget, gp.ThinkingBudget()))
+		} else if env := os.Getenv("GOOGLE_THINKING_BUDGET"); env != "" {
+			gp.SetThinkingBudget(llm.ParseBudget(env, gp.ThinkingBudget()))
+		}
+		providers["google"] = gp
+	}
+
+	if err := server.RunWithProviders(os.Stdin, os.Stdout, providers, *providerName); err != nil {
 		os.Exit(1)
 	}
 }

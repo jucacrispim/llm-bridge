@@ -340,6 +340,108 @@ func TestHandleLineToolResult(t *testing.T) {
 	}
 }
 
+// TestHandleLineToolResultAfterCancelIgnored verifies that a tool_result that
+// arrives for a turn that was already cancelled is silently ignored instead of
+// erroring. Some clients (e.g. when a user denies a tool) queue a tool_result
+// right before their own cancel, and the reader goroutine may process the
+// cancel before the main loop reaches the queued tool_result — erroring there
+// would surface a confusing "tool_result without pending tool call".
+func TestHandleLineToolResultAfterCancelIgnored(t *testing.T) {
+	st := newTestState()
+	// simulate an in-flight tool cycle awaiting a tool result
+	st.inToolCycle = true
+	st.pendingToolIDs = []string{"shell"}
+	st.pendingToolResults = map[string]json.RawMessage{}
+
+	// cancel clears the tool cycle and marks the turn cancelled
+	var w bytes.Buffer
+	resp, quit := handleLine(`{"method":"cancel"}`, st, &w)
+	if quit {
+		t.Fatal("cancel should not quit")
+	}
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+	if st.inToolCycle || len(st.pendingToolIDs) != 0 {
+		t.Fatal("cancel should clear the pending tool cycle")
+	}
+
+	// a tool_result for the cancelled turn is silently ignored (no error)
+	w.Reset()
+	resp, quit = handleLine(`{"method":"tool_result","params":{"id":"shell","result":"user denied execution"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	if resp != "" {
+		t.Fatalf("expected tool_result after cancel to be ignored, got %q", resp)
+	}
+	if w.Len() != 0 {
+		t.Fatalf("expected no output for ignored tool_result, got %q", w.String())
+	}
+}
+
+// TestPromptSendsSystemPrompt verifies that every request carries the bridge's
+// system prompt, which tells the model not to call tools for casual
+// conversation (the fix for the "oi → git status" behavior on agentic models).
+func TestPromptSendsSystemPrompt(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"oi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.System == "" {
+		t.Fatal("expected system prompt in ChatRequest")
+	}
+	if !strings.Contains(fp.lastReq.System, "do NOT call a tool") {
+		t.Errorf("system prompt should instruct not to call tools for conversation, got %q", fp.lastReq.System)
+	}
+}
+
+// TestRunWithProviderNil covers the `runWithProvider` branch that starts the
+// server with no provider at all (provider == nil): it still emits the
+// `ready` event and returns cleanly on EOF.
+func TestRunWithProviderNil(t *testing.T) {
+	var out bytes.Buffer
+	err := runWithProvider(strings.NewReader(""), &out, nil)
+	if err != nil {
+		t.Fatalf("runWithProvider(nil): %v", err)
+	}
+	want := `{"event":"ready"}` + "\n"
+	if out.String() != want {
+		t.Errorf("runWithProvider(nil) output:\n got: %q\nwant: %q", out.String(), want)
+	}
+}
+
+// TestActiveProviderFallsBackToAnyRegistered covers the fallback branch of
+// `activeProvider`: when a provider registry is set but the current
+// providerName does not match any registered key, it falls back to returning
+// one of the registered providers (instead of returning nil).
+func TestActiveProviderFallsBackToAnyRegistered(t *testing.T) {
+	ds := &fakeProvider{name: "deepseek"}
+	gl := &fakeProvider{name: "google"}
+	st := &state{
+		providers:    map[string]llm.LLMProvider{"deepseek": ds, "google": gl},
+		providerName: "missing", // not in the registry → fall back to any
+	}
+	got := st.activeProvider()
+	if got != ds && got != gl {
+		t.Fatalf("activeProvider() = %v, want one of the registered providers (deepseek/google)", got)
+	}
+	// with a single-provider registry the fallback is deterministic
+	st2 := &state{
+		providers:    map[string]llm.LLMProvider{"deepseek": ds},
+		providerName: "missing",
+	}
+	if st2.activeProvider() != ds {
+		t.Fatalf("activeProvider() single-registry fallback = %v, want deepseek", st2.activeProvider())
+	}
+}
+
 func TestHandleLineQuit(t *testing.T) {
 	st := newTestState()
 	var w bytes.Buffer
@@ -922,6 +1024,107 @@ func TestHandleLinePromptReasoningEffortOverride(t *testing.T) {
 	}
 	if fp.lastReq.ReasoningEffort == nil || *fp.lastReq.ReasoningEffort != "low" {
 		t.Fatalf("expected persisted ReasoningEffort=low, got %+v", fp.lastReq.ReasoningEffort)
+	}
+}
+
+// TestHandleLinePromptProviderOverride verifies that a prompt can switch the
+// active provider via the `provider` field, that the switch persists for
+// subsequent prompts without it, and that unknown providers are rejected.
+func TestHandleLinePromptProviderOverride(t *testing.T) {
+	ds := &fakeProvider{
+		name:      "deepseek",
+		responses: []*llm.ChatResponse{{Content: "ds", StopReason: "END_TURN", Usage: &llm.Usage{}}},
+	}
+	gl := &fakeProvider{
+		name:      "google",
+		responses: []*llm.ChatResponse{{Content: "gl", StopReason: "END_TURN", Usage: &llm.Usage{}}},
+	}
+	st := &state{
+		providers:    map[string]llm.LLMProvider{"deepseek": ds, "google": gl},
+		providerName: "deepseek",
+	}
+	var w bytes.Buffer
+
+	// switch to google with a model override
+	line := `{"method":"prompt","params":{"text":"hi","provider":"google","model":"gemini-x"}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if gl.callCount != 1 {
+		t.Fatalf("google provider callCount = %d, want 1", gl.callCount)
+	}
+	if ds.callCount != 0 {
+		t.Fatalf("deepseek provider callCount = %d, want 0", ds.callCount)
+	}
+	if gl.lastReq.Model != "gemini-x" {
+		t.Errorf("google Model = %q, want gemini-x", gl.lastReq.Model)
+	}
+	if !strings.Contains(w.String(), `"text":"gl"`) {
+		t.Errorf("expected google chunk in output, got %q", w.String())
+	}
+
+	// the provider switch persists for the next prompt without a provider field
+	gl.callCount = 0
+	ds.callCount = 0
+	w.Reset()
+	_, quit = handleLine(`{"method":"prompt","params":{"text":"again"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if gl.callCount != 1 || ds.callCount != 0 {
+		t.Fatalf("expected persisted google provider (gl=%d ds=%d)", gl.callCount, ds.callCount)
+	}
+
+	// switching back to deepseek works too
+	gl.callCount = 0
+	ds.callCount = 0
+	w.Reset()
+	_, quit = handleLine(`{"method":"prompt","params":{"text":"back","provider":"deepseek"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if ds.callCount != 1 || gl.callCount != 0 {
+		t.Fatalf("expected switch back to deepseek (gl=%d ds=%d)", gl.callCount, ds.callCount)
+	}
+}
+
+// TestHandleLinePromptProviderUnknown verifies that a prompt asking for an
+// unknown provider is rejected before any provider is called.
+func TestHandleLinePromptProviderUnknown(t *testing.T) {
+	ds := &fakeProvider{
+		name: "deepseek",
+		resp: &llm.ChatResponse{Content: "ds", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{
+		providers:    map[string]llm.LLMProvider{"deepseek": ds},
+		providerName: "deepseek",
+	}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi","provider":"anthropic"}}`
+	resp, _ := handleLine(line, st, &w)
+	if !strings.Contains(resp, `"event":"error"`) || !strings.Contains(resp, "unknown provider: anthropic") {
+		t.Fatalf("expected unknown provider error, got %q", resp)
+	}
+	if ds.callCount != 0 {
+		t.Fatalf("provider should not be called for unknown provider, got %d calls", ds.callCount)
+	}
+}
+
+// TestHandleLinePromptProviderNotAvailable verifies that asking to switch
+// provider on a server started with a single fixed provider is rejected.
+func TestHandleLinePromptProviderNotAvailable(t *testing.T) {
+	st := &state{
+		provider: &fakeProvider{
+			name: "deepseek",
+			resp: &llm.ChatResponse{Content: "ds", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"hi","provider":"google"}}`
+	resp, _ := handleLine(line, st, &w)
+	if !strings.Contains(resp, `"event":"error"`) || !strings.Contains(resp, "provider switching not available: google") {
+		t.Fatalf("expected provider switching not available error, got %q", resp)
 	}
 }
 

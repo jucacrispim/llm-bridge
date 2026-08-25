@@ -680,6 +680,29 @@ func TestChatScannerError(t *testing.T) {
 	}
 }
 
+func TestChatSendsSystemPrompt(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewDeepSeekProvider("key", server.URL, "deepseek-chat")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		System:   "You are a coding assistant. Do not call tools for greetings.",
+		Messages: []Message{{Role: RoleUser, Content: "oi"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotBody, `{"role":"system","content":"You are a coding assistant. Do not call tools for greetings."}`) {
+		t.Fatalf("expected system message in request body, got %s", gotBody)
+	}
+}
+
 func TestChatWithTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

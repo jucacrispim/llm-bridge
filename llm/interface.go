@@ -34,7 +34,12 @@ type Tool struct {
 type ChatRequest struct {
 	Messages []Message
 	Tools    []Tool
-	Model    string
+	// System is an optional system prompt sent to the model (as a system
+	// message for OpenAI-compatible providers, as system_instruction for
+	// Gemini). It is not persisted in the conversation history, so it is sent
+	// fresh on every request.
+	System string
+	Model  string
 	// Thinking optionally overrides the provider's thinking mode for this
 	// request. nil means "use the provider's configured mode"; true/false
 	// switches between deepseek-reasoner and deepseek-chat unless Model is set.

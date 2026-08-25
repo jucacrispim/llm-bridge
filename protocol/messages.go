@@ -36,6 +36,11 @@ type Command struct {
 type PromptParams struct {
 	Text  string `json:"text"`
 	Model string `json:"model"`
+	// Provider optionally switches the LLM provider for this and subsequent
+	// prompts (e.g. "deepseek" or "google"). Omitted keeps the current
+	// provider. Like Model/Thinking/ReasoningEffort, the override persists
+	// between prompts.
+	Provider string `json:"provider,omitempty"`
 	// Thinking optionally overrides thinking mode for the conversation:
 	// true → deepseek-reasoner, false → deepseek-chat. Omitted keeps the
 	// provider's configured mode.

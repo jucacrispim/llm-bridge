@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 
@@ -18,10 +19,29 @@ import (
 	"llm-bridge/tools"
 )
 
+// defaultSystemPrompt guides the model's behavior. The bridge always exposes
+// tools to the model, and agentic models (notably Gemini) will happily call a
+// tool even for a plain greeting ("oi" → "git status"). The system prompt
+// makes explicit that tools are only for actually inspecting/modifying the
+// project or running a command, and that casual conversation must be answered
+// with plain text. It is sent fresh on every request (not persisted in the
+// history).
+const defaultSystemPrompt = `You are a helpful coding assistant working in the user's terminal on their software projects. You have access to tools to read, write, search and replace files, and run shell commands.
+
+Use tools ONLY when the user's request requires inspecting or modifying the project, or running a command. For casual conversation, greetings, or general questions that do not need the project's files, respond with plain text and do NOT call a tool. When you do use a tool, prefer the smallest, most targeted action and run only what the user asked for.`
+
 type state struct {
 	cwd            string
 	knowledgeBases []json.RawMessage
-	provider       llm.LLMProvider
+	// provider is the single fixed provider used when no registry is set
+	// (kept for the runWithProvider/Run entry points and existing tests).
+	provider llm.LLMProvider
+	// providers is an optional registry of named providers that can be
+	// switched per request via the prompt's `provider` field. When non-empty it
+	// takes precedence over `provider`.
+	providers map[string]llm.LLMProvider
+	// providerName is the currently active provider in the registry.
+	providerName string
 
 	pendingToolIDs     []string
 	pendingToolResults map[string]json.RawMessage
@@ -29,11 +49,20 @@ type state struct {
 	inToolCycle        bool
 	firstTurn          bool
 
-	modelOverride         string
-	thinkingOverride      *bool
+	modelOverride           string
+	thinkingOverride        *bool
 	reasoningEffortOverride *string
 
 	cancel               context.CancelFunc
+	// cancelled reports whether the current turn was cancelled (as opposed to
+	// having completed). It is set by cancelTurn and cleared when a new prompt
+	// starts. A tool_result that arrives for an already-cancelled turn is
+	// silently ignored instead of erroring with "tool_result without pending
+	// tool call", because some clients queue a tool_result right before their
+	// own cancel (e.g. when a user denies a tool), and the reader goroutine may
+	// process the cancel before the main loop gets to the queued tool_result.
+	cancelled bool
+
 	historyLenBeforeTurn int
 
 	totalTokens           int
@@ -53,6 +82,22 @@ type state struct {
 	// (AppendAssistant once the cancelled Chat returns), so every read/write of
 	// the shared history must go through the locked helpers below.
 	historyMut sync.Mutex
+}
+
+// activeProvider returns the provider to use for the current request. When a
+// provider registry is set it resolves the active provider by name (falling back
+// to any registered provider if the name is missing); otherwise it returns the
+// single fixed provider.
+func (st *state) activeProvider() llm.LLMProvider {
+	if len(st.providers) > 0 {
+		if p, ok := st.providers[st.providerName]; ok {
+			return p
+		}
+		for _, p := range st.providers {
+			return p
+		}
+	}
+	return st.provider
 }
 
 // appendUser appends a user message to the shared conversation history.
@@ -128,6 +173,22 @@ func (st *state) cancelActive() {
 	st.cancelMut.Unlock()
 }
 
+// setCancelled records whether the current turn was cancelled. Guarded by
+// cancelMut because the reader goroutine (cancel handler) writes it while the
+// main loop (tool_result handler) may read it.
+func (st *state) setCancelled(v bool) {
+	st.cancelMut.Lock()
+	st.cancelled = v
+	st.cancelMut.Unlock()
+}
+
+// isCancelled reports whether the current turn was cancelled.
+func (st *state) isCancelled() bool {
+	st.cancelMut.Lock()
+	defer st.cancelMut.Unlock()
+	return st.cancelled
+}
+
 // cancelTurn interrupts the in-flight turn and resets its state, without
 // emitting any event. It is the shared core of both the `cancel` command
 // handler and the reader goroutine's immediate-cancel path.
@@ -140,6 +201,7 @@ func (st *state) cancelActive() {
 // was in progress.
 func (st *state) cancelTurn() {
 	st.cancelActive()
+	st.setCancelled(true)
 	st.inToolCycle = false
 	st.pendingToolIDs = nil
 	st.pendingToolResults = nil
@@ -181,7 +243,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 
 	switch cmd.Method {
 	case string(protocol.MethodPrompt):
-		if st.provider == nil {
+		if st.activeProvider() == nil {
 			return string(protocol.NewError("no LLM provider configured")), false
 		}
 		var p protocol.PromptParams
@@ -192,12 +254,24 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if st.inToolCycle {
 			return string(protocol.NewError("cannot send new prompt while awaiting tool results")), false
 		}
+		// A new prompt starts a fresh turn: reset the cancelled flag so a
+		// stale tool_result from a previous cancelled turn is not swallowed.
+		st.setCancelled(false)
 		if st.firstTurn {
 			entries, _ := appcontext.Load(st.cwd)
 			for _, e := range entries {
 				st.appendUser(e.Render())
 			}
 			st.firstTurn = false
+		}
+		if p.Provider != "" {
+			if len(st.providers) == 0 {
+				return string(protocol.NewError("provider switching not available: " + p.Provider)), false
+			}
+			if _, ok := st.providers[p.Provider]; !ok {
+				return string(protocol.NewError("unknown provider: " + p.Provider)), false
+			}
+			st.providerName = p.Provider
 		}
 		if p.Model != "" {
 			st.modelOverride = p.Model
@@ -234,6 +308,15 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 
 	case string(protocol.MethodToolResult):
 		if !st.inToolCycle || len(st.pendingToolIDs) == 0 {
+			// A tool_result that arrives after the turn was cancelled is
+			// silently ignored: some clients (e.g. when the user denies a tool)
+			// queue a tool_result right before their own cancel, and the reader
+			// goroutine may have already processed the cancel by the time the
+			// main loop reaches this tool_result. Erroring here is confusing
+			// and useless, since the cancelled turn is not going to continue.
+			if st.isCancelled() {
+				return "", false
+			}
 			return string(protocol.NewError("tool_result without pending tool call")), false
 		}
 		var p toolResultParams
@@ -281,12 +364,13 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		// in the history below instead of being lost.
 		var partialContent strings.Builder
 		var partialReasoning strings.Builder
-		resp, err := st.provider.Chat(ctx, llm.ChatRequest{
-			Messages: st.historySnapshot(),
-			Tools:    tools.All(),
-			Model:            st.modelOverride,
-			Thinking:         st.thinkingOverride,
-			ReasoningEffort:  st.reasoningEffortOverride,
+		resp, err := st.activeProvider().Chat(ctx, llm.ChatRequest{
+			Messages:        st.historySnapshot(),
+			Tools:           tools.All(),
+			System:          defaultSystemPrompt,
+			Model:           st.modelOverride,
+			Thinking:        st.thinkingOverride,
+			ReasoningEffort: st.reasoningEffortOverride,
 			// The chain-of-thought streams before the content; surface it to the
 			// client as thinking events so it can display the reasoning.
 			OnReasoning: func(s string) {
@@ -357,7 +441,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			contextPct := 0.0
 			model := resp.Model
 			if model == "" {
-				model = st.provider.Model()
+				model = st.activeProvider().Model()
 			}
 			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
 				model, inputTokens, outputTokens, totalTokensThisTurn)
@@ -389,11 +473,31 @@ type inboundLine struct {
 	err  error
 }
 
-func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
-	if provider != nil {
-		logger.Infof("starting bridge with provider %s", provider.Name())
+// providerNames returns the sorted keys of the provider registry for logging.
+func providerNames(providers map[string]llm.LLMProvider) []string {
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
 	}
-	st := &state{provider: provider, firstTurn: true}
+	sort.Strings(names)
+	return names
+}
+
+// run starts the server loop. It accepts either a single fixed provider (via
+// runWithProvider) or a named provider registry that can be switched per request
+// (via RunWithProviders). When providers is non-empty it takes precedence over
+// the single provider.
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string) error {
+	if len(providers) > 0 {
+		if defaultName == "" {
+			for name := range providers {
+				defaultName = name
+				break
+			}
+		}
+		logger.Infof("starting bridge with providers %v (default %s)", providerNames(providers), defaultName)
+	}
+	st := &state{providers: providers, providerName: defaultName, firstTurn: true}
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
 
@@ -410,7 +514,8 @@ func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 			line := scanner.Text()
 			logger.Debugf("received: %s", line)
 			var cmd protocol.InboundCommand
-			if err := json.Unmarshal([]byte(line), &cmd); err == nil && cmd.Method == string(protocol.MethodCancel) {
+			if err := json.Unmarshal([]byte(line), &cmd); err == nil &&
+				cmd.Method == string(protocol.MethodCancel) {
 				// Cancel in flight: stop the streaming request and reply at once.
 				st.cancelTurn()
 				_ = st.write(w, string(protocol.NewCancelled())+"\n")
@@ -447,8 +552,25 @@ func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	return nil
 }
 
+// runWithProvider starts the server loop with a single fixed provider.
+func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
+	if provider != nil {
+		providers := map[string]llm.LLMProvider{provider.Name(): provider}
+		return run(r, w, providers, provider.Name())
+	}
+	return run(r, w, nil, "")
+}
+
 // Run starts the server loop reading from r and writing to w.
 func Run(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	// notest
 	return runWithProvider(r, w, provider)
+}
+
+// RunWithProviders starts the server loop with a registry of named providers
+// that can be switched per request via the prompt's `provider` field. defaultName
+// selects the initial active provider.
+func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string) error {
+	// notest
+	return run(r, w, providers, defaultName)
 }

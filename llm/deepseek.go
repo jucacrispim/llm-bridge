@@ -268,7 +268,10 @@ type toolCallBuilder struct {
 }
 
 func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk func(string)) (*ChatResponse, error) {
-	msgs := make([]openAIMessage, 0, len(req.Messages))
+	msgs := make([]openAIMessage, 0, len(req.Messages)+1)
+	if req.System != "" {
+		msgs = append(msgs, openAIMessage{Role: RoleSystem, Content: req.System})
+	}
 	for _, m := range req.Messages {
 		msg := openAIMessage{
 			Role:       m.Role,

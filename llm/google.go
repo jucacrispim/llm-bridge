@@ -157,7 +157,10 @@ func (p *GoogleProvider) effectiveThinkingBudget(req ChatRequest) int {
 }
 
 // googleFunctionCall is Gemini's function-call part payload. The model uses
-// `args` (an object), unlike OpenAI's JSON-string `arguments`.
+// `args` (an object), unlike OpenAI's JSON-string `arguments`. The
+// thought_signature is NOT a field of this object: when thinking mode is on,
+// Gemini emits it as a SIBLING field of the part (googlePart.ThoughtSignature)
+// and requires it to be echoed back the same way.
 type googleFunctionCall struct {
 	Name string          `json:"name"`
 	Args json.RawMessage `json:"args,omitempty"`
@@ -176,6 +179,11 @@ type googlePart struct {
 	Thought          bool                    `json:"thought,omitempty"`
 	FunctionCall     *googleFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *googleFunctionResponse `json:"functionResponse,omitempty"`
+	// ThoughtSignature is Gemini's base64 thought_signature. When thinking mode
+	// is on, Gemini emits it as a SIBLING field of the functionCall part (not
+	// inside functionCall) and it MUST be echoed back on the same part in the
+	// next request (e.g. when re-sending history after a tool result).
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 }
 
 type googleContent struct {
@@ -264,7 +272,14 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 					args = json.RawMessage("{}")
 				}
 				parts = append(parts, googlePart{
-					FunctionCall: &googleFunctionCall{Name: tc.Name, Args: args},
+					FunctionCall: &googleFunctionCall{
+						Name: tc.Name,
+						Args: args,
+					},
+					// Echo the thought_signature back as a sibling part field,
+					// exactly where Gemini emitted it (required when thinking
+					// mode is enabled).
+					ThoughtSignature: tc.ThoughtSignature,
 				})
 			}
 			gContents = append(gContents, googleContent{Role: role, Parts: parts})
@@ -409,9 +424,12 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 					// function name. The server's pending-tool bookkeeping and
 					// the history's tool-result matching both key off this id.
 					toolCalls = append(toolCalls, ToolCall{
-						ID:        part.FunctionCall.Name,
-						Name:      part.FunctionCall.Name,
-						Arguments: string(part.FunctionCall.Args),
+						ID:               part.FunctionCall.Name,
+						Name:             part.FunctionCall.Name,
+						Arguments:        string(part.FunctionCall.Args),
+						// The thought_signature arrives as a sibling field of
+						// the part, not inside the functionCall object.
+						ThoughtSignature: part.ThoughtSignature,
 					})
 				case part.Thought:
 					if part.Text != "" {
@@ -448,15 +466,26 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 	}, nil
 }
 
-// toolResultAsJSON converts a stored tool result (a JSON string) into a JSON
-// object suitable for Gemini's functionResponse.response field, which must be an
-// object. If the content already parses as JSON it is used as-is; otherwise it
-// is wrapped in {"result": ...}.
+// toolResultAsJSON converts a stored tool result into a JSON object suitable
+// for Gemini's functionResponse.response field, which MUST be an object (a
+// protobuf Struct). A tool result is stored in the history as raw JSON: text
+// output ends up as a JSON *string*, while structured output is already an
+// object. A plain string/array/number/bool would be rejected by the API with
+// HTTP 400 ("Invalid value at ... function_response.response"), so only an
+// object is passed through as-is; anything else is wrapped in {"result": ...}.
 func toolResultAsJSON(content string) json.RawMessage {
 	var raw json.RawMessage
 	if json.Unmarshal([]byte(content), &raw) == nil {
-		return raw
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(raw, &obj) == nil && obj != nil {
+			return raw
+		}
+		// The content is valid JSON but not an object (string, number, array,
+		// bool, null). Wrap the parsed value so response stays an object.
+		wrapped, _ := json.Marshal(map[string]json.RawMessage{"result": raw})
+		return wrapped
 	}
+	// Not valid JSON at all — wrap the raw text in an object.
 	wrapped, _ := json.Marshal(map[string]string{"result": content})
 	return wrapped
 }

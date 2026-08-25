@@ -289,6 +289,57 @@ func TestGoogleChatThinkingAndToolCalls(t *testing.T) {
 	}
 }
 
+func TestGoogleChatThoughtSignatureRoundTrip(t *testing.T) {
+	// The Gemini API requires the thought_signature the model emitted on a
+	// functionCall to be echoed back on the SAME part in later requests (when
+	// thinking is enabled). Gemini emits it as a SIBLING field of the part
+	// (thoughtSignature), not inside the functionCall object. This test verifies
+	// the full round trip: the value is captured from the model's response and
+	// re-sent with the history, in the same position.
+	ts := "AQAAAB4AAAAXChEQExoPAAAAf+8E8e2R0T0="
+	srv, lastBody := googleTestServer(t, []string{
+		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read","args":{"path":"a.txt"}},"thoughtSignature":"` + ts + `"}]},"finishReason":"STOP"}]}`,
+		`data: [DONE]`,
+	})
+	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
+
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "read a.txt"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat (capture): %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %d, want 1", len(resp.ToolCalls))
+	}
+	if got := resp.ToolCalls[0].ThoughtSignature; got != ts {
+		t.Errorf("captured ThoughtSignature = %q, want %q", got, ts)
+	}
+
+	// Now echo the history back (assistant tool call + tool result), as the
+	// server would after running the tool, and check the signature is re-sent
+	// as a sibling field of the part.
+	_, err = p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "read", Name: "read", Arguments: `{"path":"a.txt"}`, ThoughtSignature: ts}}},
+			{Role: "tool", Content: `{"content":"file contents"}`, ToolCallID: "read"},
+			{Role: RoleUser, Content: "continue"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat (echo): %v", err)
+	}
+
+	var gReq googleRequest
+	_ = json.Unmarshal([]byte(*lastBody), &gReq)
+	if len(gReq.Contents) < 1 || gReq.Contents[0].Parts[0].FunctionCall == nil {
+		t.Fatalf("expected assistant functionCall in echoed request: %+v", gReq.Contents)
+	}
+	if got := gReq.Contents[0].Parts[0].ThoughtSignature; got != ts {
+		t.Errorf("echoed thought_signature = %q, want %q (sibling part field)", got, ts)
+	}
+}
+
 func TestGoogleChatToolResultMapping(t *testing.T) {
 	srv, lastBody := googleTestServer(t, []string{`data: [DONE]`})
 	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
@@ -337,7 +388,22 @@ func TestGoogleChatToolResultNonJSONWrapped(t *testing.T) {
 		t.Errorf("toolResultAsJSON(plain) = %s, want wrapped", got)
 	}
 	if got := toolResultAsJSON(`{"a":1}`); string(got) != `{"a":1}` {
-		t.Errorf("toolResultAsJSON(json) = %s, want as-is", got)
+		t.Errorf("toolResultAsJSON(json object) = %s, want as-is", got)
+	}
+	// Text output is stored in history as a JSON *string* (e.g. a file list).
+	// It is valid JSON but NOT an object, so it must be wrapped, otherwise
+	// Gemini rejects functionResponse.response (which must be a Struct) with
+	// HTTP 400.
+	jsonStr := `"context/context.go\ncontext/context_test.go"`
+	if got := toolResultAsJSON(jsonStr); string(got) != `{"result":"context/context.go\ncontext/context_test.go"}` {
+		t.Errorf("toolResultAsJSON(json string) = %s, want wrapped in object", got)
+	}
+	// Arrays and numbers are valid JSON but also must be wrapped.
+	if got := toolResultAsJSON(`[1,2]`); string(got) != `{"result":[1,2]}` {
+		t.Errorf("toolResultAsJSON(array) = %s, want wrapped in object", got)
+	}
+	if got := toolResultAsJSON(`42`); string(got) != `{"result":42}` {
+		t.Errorf("toolResultAsJSON(number) = %s, want wrapped in object", got)
 	}
 }
 

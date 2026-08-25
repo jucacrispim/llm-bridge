@@ -65,6 +65,12 @@ type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments string // raw JSON arguments
+	// ThoughtSignature is Gemini's base64 thought_signature that must be echoed
+	// back on the functionCall part when thinking mode is enabled. It is
+	// preserved through the history so a tool call made in an earlier turn can
+	// be re-sent with the same signature. Empty for providers that do not use it
+	// (DeepSeek/OpenAI).
+	ThoughtSignature string
 }
 
 type ChatResponse struct {

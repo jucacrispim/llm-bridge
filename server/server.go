@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
 	appcontext "llm-bridge/context"
 	"llm-bridge/history"
+	"llm-bridge/knowledge"
 	"llm-bridge/llm"
 	"llm-bridge/logger"
 	"llm-bridge/protocol"
@@ -34,6 +36,11 @@ var defaultSystemPrompt = func() string {
 type state struct {
 	cwd            string
 	knowledgeBases []json.RawMessage
+	// kb is the project-scoped knowledge base used to resolve `knowledge` tool
+	// calls locally. nil means the knowledge base is disabled; the tool then
+	// resolves internally to a "disabled" result instead of waiting on the
+	// client. Wired in by the entry point (cmd/bridge).
+	kb *knowledge.Manager
 	// provider is the single fixed provider used when no registry is set
 	// (kept for the runWithProvider/Run entry points and existing tests).
 	provider llm.LLMProvider
@@ -141,6 +148,69 @@ func (st *state) appendToolResult(id, content string) {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
 	history.AppendToolResult(&st.history, id, content)
+}
+
+// resolveKnowledge executes a knowledge tool call locally and appends its real
+// result to the history. It never waits for the client (fire-and-forget): the
+// knowledge base is always executed internally, so a client round-trip would
+// only stall the turn. If the knowledge base is disabled (kb nil), it appends a
+// plain "disabled" result so the model still gets the tool response the
+// provider requires for each tool_call.
+func (st *state) resolveKnowledge(id, args string) {
+	if st.kb == nil {
+		st.appendToolResult(id, "knowledge base disabled")
+		return
+	}
+	var raw json.RawMessage
+	if args != "" {
+		raw = json.RawMessage(args)
+	}
+	out, err := st.kb.Execute(raw)
+	if err != nil {
+		out = "error: " + err.Error()
+	}
+	st.appendToolResult(id, out)
+}
+
+// kbBaseMetadata is the subset of a knowledge base's client-reported metadata
+// (set_knowledge_bases) that we use to link a base to the current project: its
+// display name and its path. Other fields (id, type, description) are ignored.
+type kbBaseMetadata struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// projectKBName returns the display name of the knowledge base associated with
+// the current cwd (the project being worked on), derived from the metadata the
+// client sends via set_knowledge_bases. A base is linked to the project when its
+// path equals the cwd, is an ancestor/descendant of it, or shares the project
+// name (last path element) with the cwd. Returns "" when there is no cwd yet or
+// no matching base, so the caller can fall back to a generic label.
+func (st *state) projectKBName() string {
+	if st.cwd == "" {
+		return ""
+	}
+	project := filepath.Base(st.cwd)
+	cwd := strings.TrimRight(st.cwd, string(filepath.Separator))
+	for _, raw := range st.knowledgeBases {
+		var b kbBaseMetadata
+		if err := json.Unmarshal(raw, &b); err != nil {
+			continue // ignore malformed metadata entries
+		}
+		if b.Path == "" {
+			continue
+		}
+		p := strings.TrimRight(b.Path, string(filepath.Separator))
+		if p == cwd ||
+			strings.HasPrefix(p, cwd+string(filepath.Separator)) ||
+			strings.HasPrefix(cwd, p+string(filepath.Separator)) {
+			return b.Name
+		}
+		if filepath.Base(b.Path) == project {
+			return b.Name
+		}
+	}
+	return ""
 }
 
 // sanitizeHistory strips ephemeral blocks and orphaned tool_calls messages.
@@ -321,6 +391,22 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			entries, _ := appcontext.Load(st.cwd)
 			for _, e := range entries {
 				st.appendUser(e.Render())
+			}
+			// When the knowledge base is enabled, surface a single minimal line
+			// about the project's KB (not its contents) so the model knows the
+			// `knowledge` tool is available. Only the cwd project is mentioned —
+			// other bases are noise, and the search is already scoped to cwd.
+			if st.kb != nil {
+				kbName := st.projectKBName()
+				if kbName == "" && st.cwd != "" {
+					kbName = filepath.Base(st.cwd)
+				}
+				line := "Knowledge base"
+				if kbName != "" {
+					line += " do projeto \"" + kbName + "\""
+				}
+				line += " disponível (tool: knowledge)."
+				st.appendUser(line)
 			}
 			st.firstTurn = false
 		}
@@ -532,12 +618,25 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		}
 
 		st.pendingToolIDs = make([]string, 0, len(resp.ToolCalls))
+		st.pendingToolResults = make(map[string]json.RawMessage)
+		// Knowledge tool calls resolve locally and never wait for the client:
+		// execute immediately and append the real result so the turn keeps
+		// moving without a round-trip. Only non-knowledge calls go to
+		// pendingToolIDs.
 		for _, tc := range resp.ToolCalls {
+			if tc.Name == "knowledge" {
+				st.resolveKnowledge(tc.ID, tc.Arguments)
+				continue
+			}
 			st.pendingToolIDs = append(st.pendingToolIDs, tc.ID)
 		}
-		st.pendingToolResults = make(map[string]json.RawMessage)
-		st.inToolCycle = true
-		return "", false
+		if len(st.pendingToolIDs) > 0 {
+			st.inToolCycle = true
+			return "", false
+		}
+		// Every tool call was internal (knowledge): loop back and call Chat
+		// again with the results already appended to the history.
+		continue
 	}
 }
 
@@ -561,7 +660,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, kb *knowledge.Manager) error {
 	if len(providers) > 0 {
 		if defaultName == "" {
 			for name := range providers {
@@ -574,7 +673,10 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 	if aggressivePrune {
 		logger.Infof("aggressive prune enabled: collapsing tool-calling turns")
 	}
-	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune}
+	if kb != nil {
+		logger.Infof("knowledge base enabled")
+	}
+	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune, kb: kb}
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
 
@@ -639,9 +741,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name(), "", false)
+		return run(r, w, providers, provider.Name(), "", false, nil)
 	}
-	return run(r, w, nil, "", "", false)
+	return run(r, w, nil, "", "", false, nil)
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -662,12 +764,21 @@ func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProv
 // and an initial global system prompt.
 func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, false)
+	return run(r, w, providers, defaultName, systemPrompt, false, nil)
 }
 
 // RunWithOptions starts the server loop with a registry of named providers, an
 // initial global system prompt, and the aggressive-prune option (see state).
 func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, nil)
+}
+
+// RunWithKnowledge starts the server loop like RunWithOptions, but also wires a
+// project-scoped knowledge base (kb) into the state so `knowledge` tool calls
+// resolve locally (fire-and-forget) instead of waiting on the client. kb == nil
+// keeps the knowledge base disabled. This is the entry point used by cmd/bridge.
+func RunWithKnowledge(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, kb *knowledge.Manager) error {
+	// notest
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, kb)
 }

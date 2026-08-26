@@ -14,6 +14,10 @@ SCRIPTS_DIR=./scripts/
 build:
 	$(GOBUILD) $(OUTFLAG) cmd/bridge/main.go
 
+.PHONY: build-kb # - Build with knowledge base (ONNX) enabled
+build-kb:
+	CGO_ENABLED=1 $(GOBUILD) -tags knowledge_onnx $(OUTFLAG) cmd/bridge/main.go
+
 .PHONY: test # - Run all tests
 test:
 	$(GOBUILD) ./...
@@ -49,7 +53,7 @@ uninstall:
 	go clean -i llm-bridge/$(BIN_NAME)
 
 
-all: build test install
+all: build build-kb test install
 
 .PHONY: help  # - Show this help text
 help:

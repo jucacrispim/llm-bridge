@@ -44,5 +44,10 @@ func All() []llm.Tool {
 			Description: "Search for an exact string in a file and replace the first occurrence with a new string",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"search":{"type":"string"},"replace":{"type":"string"}},"required":["path","search","replace"]}`),
 		},
+		{
+			Name:        "knowledge",
+			Description: "Search, show or add to the project's local knowledge base (scoped to the current working directory). Use 'show' to list stored items, 'search' with a query to find relevant notes, or 'add' with a label and text to store something learned in this conversation.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["show","search","add"]},"query":{"type":"string"},"label":{"type":"string"},"text":{"type":"string"},"limit":{"type":"integer"}},"required":["command"]}`),
+		},
 	}
 }

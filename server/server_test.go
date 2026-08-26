@@ -319,6 +319,65 @@ func TestHandleLineSetKnowledgeBases(t *testing.T) {
 	}
 }
 
+// TestProjectKBNameMatchesCwdByPath verifies that projectKBName links a base to
+// the current cwd when the base path equals/contains the cwd.
+func TestProjectKBNameMatchesCwdByPath(t *testing.T) {
+	st := &state{
+		cwd: "/home/user/proj",
+		knowledgeBases: []json.RawMessage{
+			json.RawMessage(`{"name":"Projeto X","path":"/home/user/proj"}`),
+		},
+	}
+	if got := st.projectKBName(); got != "Projeto X" {
+		t.Fatalf("projectKBName() = %q, want Projeto X", got)
+	}
+}
+
+// TestProjectKBNameMatchesByProjectName verifies that projectKBName falls back
+// to matching the project name (last path element) when the base path is
+// unrelated but shares the basename with the cwd.
+func TestProjectKBNameMatchesByProjectName(t *testing.T) {
+	st := &state{
+		cwd: "/other/repo/myproj",
+		knowledgeBases: []json.RawMessage{
+			json.RawMessage(`{"name":"myproj KB","path":"/data/kbs/myproj"}`),
+		},
+	}
+	if got := st.projectKBName(); got != "myproj KB" {
+		t.Fatalf("projectKBName() = %q, want myproj KB", got)
+	}
+}
+
+// TestProjectKBNameIgnoresOtherProjects verifies that bases belonging to other
+// projects do not match, and that a malformed entry is skipped.
+func TestProjectKBNameIgnoresOtherProjects(t *testing.T) {
+	st := &state{
+		cwd: "/home/user/proj",
+		knowledgeBases: []json.RawMessage{
+			json.RawMessage(`{"name":"Other","path":"/home/user/other"}`),
+			json.RawMessage(`not-json`),
+		},
+	}
+	if got := st.projectKBName(); got != "" {
+		t.Fatalf("projectKBName() = %q, want empty for non-matching bases", got)
+	}
+}
+
+// TestProjectKBNameNoCwdOrEmpty verifies the empty-result edge cases: no cwd, no
+// bases, or a base without a path.
+func TestProjectKBNameNoCwdOrEmpty(t *testing.T) {
+	if got := (&state{}).projectKBName(); got != "" {
+		t.Fatalf("projectKBName() with no cwd = %q, want empty", got)
+	}
+	st := &state{
+		cwd:            "/home/user/proj",
+		knowledgeBases: []json.RawMessage{json.RawMessage(`{"name":"nopath"}`)},
+	}
+	if got := st.projectKBName(); got != "" {
+		t.Fatalf("projectKBName() with pathless base = %q, want empty", got)
+	}
+}
+
 func TestHandleLineSetKnowledgeBasesInvalid(t *testing.T) {
 	st := newTestState()
 	var w bytes.Buffer

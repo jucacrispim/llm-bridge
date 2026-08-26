@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
+	"llm-bridge/knowledge"
 	"llm-bridge/llm"
 	"llm-bridge/logger"
 	"llm-bridge/server"
@@ -26,6 +28,8 @@ func main() {
 	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
 	systemPromptFlag := flag.String("system-prompt", "", "path to a file containing the system prompt (or literal system prompt string)")
 	aggressivePrune := flag.Bool("aggressive-prune", false, "collapse each completed tool-calling turn into just the user prompt + final answer, dropping the intermediate tool calls, tool results, and chain-of-thought from the history to save tokens and keep the prefix cacheable. Off by default.")
+	knowledgeEnabled := flag.Bool("knowledge", true, "enable the project knowledge base (tool 'knowledge'); false disables it")
+	knowledgeBase := flag.String("knowledge-base", "", "base directory for the project knowledge bases (default ~/.local/share/llm-bridge/knowledge_bases)")
 	flag.Parse()
 
 	if *providerName != "deepseek" && *providerName != "google" {
@@ -141,9 +145,75 @@ func main() {
 		}
 	}
 
-	if err := server.RunWithOptions(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune); err != nil {
+	// Build the project-scoped knowledge base manager.
+	//
+	// -knowledge=false disables the KB outright (nil embedder → the server
+	// treats it as disabled).
+	//
+	// When enabled, we try the real embedder. If loading it fails (model file
+	// missing, or the build is without the knowledge_onnx tag, in which case
+	// NewEmbedder always returns the "embeddings disabled" error / dlopen
+	// failures at runtime), we log a warning and fall back to the disabled
+	// embedder — the bridge keeps running, just without a KB (no crash).
+	var kb *knowledge.Manager
+	if !*knowledgeEnabled {
+		logger.Infof("knowledge base disabled (flag -knowledge=false)")
+		kb = knowledge.NewManager(nil, "")
+	} else {
+		baseDir := *knowledgeBase
+		if baseDir == "" {
+			baseDir = os.Getenv("KNOWLEDGE_BASE")
+		}
+		if baseDir == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				home = "~"
+			}
+			baseDir = filepath.Join(home, ".local", "share", "llm-bridge", "knowledge_bases")
+		}
+		modelPath := os.Getenv("LLM_BRIDGE_KB_MODEL")
+		if modelPath == "" {
+			modelPath = filepath.Join(mustCacheDir(), "model.onnx")
+		}
+		tokenizerPath := os.Getenv("LLM_BRIDGE_KB_TOKENIZER")
+		if tokenizerPath == "" {
+			tokenizerPath = filepath.Join(mustCacheDir(), "tokenizer.json")
+		}
+		embed, err := knowledge.NewEmbedder(modelPath, tokenizerPath)
+		if err != nil {
+			logger.Warningf("knowledge base disabled: failed to load embedder: %v", err)
+			kb = knowledge.NewManager(knowledge.DisabledEmbedder{}, "")
+		} else {
+			kb = knowledge.NewManager(embed, "")
+		}
+		logger.Infof("knowledge base enabled (base dir: %s)", baseDir)
+	}
+
+	if err := server.RunWithKnowledge(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune, kb); err != nil {
 		os.Exit(1)
 	}
+}
+
+// mustCacheDir returns the llm-bridge cache dir (~/.cache/llm-bridge),
+// creating it if needed. Default location for the downloaded KB model and
+// tokenizer.
+func mustCacheDir() string {
+	dir, err := os.UserCacheDir()
+	if err != nil || dir == "" {
+		dir = filepath.Join(homeDir(), ".cache")
+	}
+	dir = filepath.Join(dir, "llm-bridge")
+	_ = os.MkdirAll(dir, 0o755)
+	return dir
+}
+
+// homeDir returns the user's home directory (or "~" as a last resort).
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "~"
+	}
+	return home
 }
 
 // setupFileLogging redirects all logger output to logFile and enables the

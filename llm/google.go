@@ -263,6 +263,12 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 		case RoleAssistant:
 			role := "model"
 			parts := []googlePart{}
+			if m.Reasoning != "" {
+				parts = append(parts, googlePart{
+					Text:    m.Reasoning,
+					Thought: true,
+				})
+			}
 			if m.Content != "" {
 				parts = append(parts, googlePart{Text: m.Content})
 			}
@@ -282,13 +288,15 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 					ThoughtSignature: tc.ThoughtSignature,
 				})
 			}
-			gContents = append(gContents, googleContent{Role: role, Parts: parts})
+			if len(parts) > 0 {
+				gContents = append(gContents, googleContent{Role: role, Parts: parts})
+			}
 			continue
 
 		case "tool":
 			// A tool result. Gemini expects these as a user-role part carrying a
-			// functionResponse matched by name. Our history stores the result as
-			// a "tool" message with ToolCallID set to the function name.
+			// functionResponse matched by name. Ensure we fallback to ToolCallID or Name correctly.
+
 			parts := []googlePart{{
 				FunctionResponse: &googleFunctionResponse{
 					Name:     m.ToolCallID,
@@ -367,14 +375,16 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 		logger.Tracef("  role=%s parts=%d", c.Role, len(c.Parts))
 		for _, part := range c.Parts {
 			switch {
-			case part.Text != "":
-				logger.Tracef("    text=%q", part.Text)
 			case part.FunctionCall != nil:
-				logger.Tracef("    function_call name=%s args=%s thought_signature=%s", part.FunctionCall.Name, string(part.FunctionCall.Args), part.ThoughtSignature)
+				logger.Tracef("    function_call name=%s args=%s thought_signature=%s",
+					part.FunctionCall.Name, string(part.FunctionCall.Args), part.ThoughtSignature)
 			case part.FunctionResponse != nil:
-				logger.Tracef("    function_response name=%s response=%s", part.FunctionResponse.Name, string(part.FunctionResponse.Response))
+				logger.Tracef("    function_response name=%s response=%s",
+					part.FunctionResponse.Name, string(part.FunctionResponse.Response))
 			case part.Thought:
 				logger.Tracef("    thought text=%q", part.Text)
+			case part.Text != "":
+				logger.Tracef("    text=%q", part.Text)
 			}
 		}
 	}
@@ -459,9 +469,9 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 					// function name. The server's pending-tool bookkeeping and
 					// the history's tool-result matching both key off this id.
 					toolCalls = append(toolCalls, ToolCall{
-						ID:               part.FunctionCall.Name,
-						Name:             part.FunctionCall.Name,
-						Arguments:        string(part.FunctionCall.Args),
+						ID:        part.FunctionCall.Name,
+						Name:      part.FunctionCall.Name,
+						Arguments: string(part.FunctionCall.Args),
 						// The thought_signature arrives as a sibling field of
 						// the part, not inside the functionCall object.
 						ThoughtSignature: part.ThoughtSignature,

@@ -30,7 +30,13 @@ func main() {
 	aggressivePrune := flag.Bool("aggressive-prune", false, "collapse each completed tool-calling turn into just the user prompt + final answer, dropping the intermediate tool calls, tool results, and chain-of-thought from the history to save tokens and keep the prefix cacheable. Off by default.")
 	knowledgeEnabled := flag.Bool("knowledge", true, "enable the project knowledge base (tool 'knowledge'); false disables it")
 	knowledgeBase := flag.String("knowledge-base", "", "base directory for the project knowledge bases (default ~/.local/share/llm-bridge/knowledge_bases)")
+	prune := flag.Bool("prune", false, "collapse reasoning and tool results, preserving file states (read/write/replace) as user snapshots. Off by default.")
 	flag.Parse()
+
+	if *aggressivePrune && *prune {
+		fmt.Fprintf(os.Stderr, "error: -aggressive-prune and -prune are mutually exclusive\n")
+		os.Exit(1)
+	}
 
 	if *providerName != "deepseek" && *providerName != "google" {
 		fmt.Fprintf(os.Stderr, "unsupported provider: %s (supported: deepseek, google)\n", *providerName)
@@ -189,7 +195,7 @@ func main() {
 		logger.Infof("knowledge base enabled (base dir: %s)", baseDir)
 	}
 
-	if err := server.RunWithKnowledge(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune, kb); err != nil {
+	if err := server.RunWithKnowledge(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune, *prune, kb); err != nil {
 		os.Exit(1)
 	}
 }

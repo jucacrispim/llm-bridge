@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"llm-bridge/logger"
 )
 
 func TestNewGoogleProvider(t *testing.T) {
@@ -557,4 +559,44 @@ func TestGoogleChatChunkError(t *testing.T) {
 	if !strings.Contains(err.Error(), "rate limited") {
 		t.Errorf("error = %q, want to contain rate limited", err.Error())
 	}
+}
+
+func TestGoogleChatReasoningMapping(t *testing.T) {
+	srv, lastBody := googleTestServer(t, []string{`data: [DONE]`})
+	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: RoleAssistant, Content: "ans", Reasoning: "my thought"},
+			{Role: RoleUser, Content: "next"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var gReq googleRequest
+	_ = json.Unmarshal([]byte(*lastBody), &gReq)
+	if len(gReq.Contents) != 2 {
+		t.Fatalf("contents len = %d, want 2", len(gReq.Contents))
+	}
+	modelContent := gReq.Contents[0]
+	if len(modelContent.Parts) != 2 {
+		t.Fatalf("parts len = %d, want 2 (thought + text)", len(modelContent.Parts))
+	}
+	if !modelContent.Parts[0].Thought || modelContent.Parts[0].Text != "my thought" {
+		t.Errorf("thought part = %+v, want thought=true text=my thought", modelContent.Parts[0])
+	}
+}
+
+func TestGoogleThoughtTraceLog(t *testing.T) {
+	logger.SetLogLevel(logger.LevelTrace)
+	defer logger.SetLogLevel(logger.LevelInfo)
+
+	srv, _ := googleTestServer(t, []string{
+		`data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"thinking trace"}]},"finishReason":"STOP"}]}`,
+		`data: [DONE]`,
+	})
+	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
+	_, _ = p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil)
 }

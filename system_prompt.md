@@ -13,3 +13,6 @@ Whenever a task requires CREATING, EDITING, or DELETING files (or otherwise modi
 3. Only after the user explicitly approves (e.g. "go ahead", "pode aplicar") may you perform the changes.
 
 Reading/inspecting is allowed freely (read, glob, grep, listing files) to build the plan — but the FIRST modification requires the user's explicit go-ahead.
+
+## File States and Deltas
+When working with files, prior reads, writes, and replaces may appear in your history as user messages with `<State path datetime>content</State>` or `<Replace path datetime>search → replace</Replace>` tags. These are immutable file state snapshots and deltas from previous turns; use them as the known state of files instead of rereading them unnecessarily.

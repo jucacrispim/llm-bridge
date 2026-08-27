@@ -30,6 +30,15 @@ func TestAppendAssistant(t *testing.T) {
 	}
 }
 
+func TestAppendAssistantEmptyDropped(t *testing.T) {
+	var h []llm.Message
+	resp := &llm.ChatResponse{Content: "", ToolCalls: nil}
+	AppendAssistant(&h, resp)
+	if len(h) != 0 {
+		t.Fatalf("len = %d, want 0", len(h))
+	}
+}
+
 func TestAppendAssistantStoresReasoning(t *testing.T) {
 	var h []llm.Message
 	resp := &llm.ChatResponse{

@@ -26,7 +26,13 @@ func main() {
 	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
 	systemPromptFlag := flag.String("system-prompt", "", "path to a file containing the system prompt (or literal system prompt string)")
 	aggressivePrune := flag.Bool("aggressive-prune", false, "collapse each completed tool-calling turn into just the user prompt + final answer, dropping the intermediate tool calls, tool results, and chain-of-thought from the history to save tokens and keep the prefix cacheable. Off by default.")
+	prune := flag.Bool("prune", false, "collapse reasoning and tool results, preserving file states (read/write/replace) as user snapshots. Off by default.")
 	flag.Parse()
+
+	if *aggressivePrune && *prune {
+		fmt.Fprintf(os.Stderr, "error: -aggressive-prune and -prune are mutually exclusive\n")
+		os.Exit(1)
+	}
 
 	if *providerName != "deepseek" && *providerName != "google" {
 		fmt.Fprintf(os.Stderr, "unsupported provider: %s (supported: deepseek, google)\n", *providerName)
@@ -141,7 +147,7 @@ func main() {
 		}
 	}
 
-	if err := server.RunWithOptions(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune); err != nil {
+	if err := server.RunWithOptions(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune, *prune); err != nil {
 		os.Exit(1)
 	}
 }

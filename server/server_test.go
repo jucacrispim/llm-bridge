@@ -1592,3 +1592,200 @@ func TestRunWithSystemPromptGlobal(t *testing.T) {
 		t.Errorf("System = %q, want global system prompt", fp.lastReq.System)
 	}
 }
+
+// TestPruneTurnCollapsesAndPreservesSnapshots verifies that with prune enabled,
+// file tool calls (read, write, search_replace) are converted into user snapshots
+// (<State> / <Replace>) and intermediate reasoning/tool calls/results are dropped.
+func TestPruneTurnCollapsesAndPreservesSnapshots(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/a.go"}`},
+				},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{},
+				Reasoning:  "some reasoning",
+			},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	var w bytes.Buffer
+
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"inspect file"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	w.Reset()
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"package main"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+
+	// History should be: [user: "inspect file", user: "<State /tmp/a.go ...>package main</State>", assistant: "done"]
+	if len(st.history) != 3 {
+		t.Fatalf("history len = %d, want 3, got %+v", len(st.history), st.history)
+	}
+	if st.history[0].Role != llm.RoleUser || st.history[0].Content != "inspect file" {
+		t.Errorf("history[0] should be user prompt, got %+v", st.history[0])
+	}
+	if st.history[1].Role != llm.RoleUser || !strings.Contains(st.history[1].Content, "<State /tmp/a.go") || !strings.Contains(st.history[1].Content, "package main") {
+		t.Errorf("history[1] should be State snapshot, got %+v", st.history[1])
+	}
+	if st.history[2].Role != llm.RoleAssistant || st.history[2].Content != "done" {
+		t.Errorf("history[2] should be final assistant response, got %+v", st.history[2])
+	}
+}
+
+func TestPruneTurnWriteAndSearchReplace(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_1", Name: "write", Arguments: `{"path":"/tmp/b.go","content":"package b"}`},
+					{ID: "call_2", Name: "search_replace", Arguments: `{"path":"/tmp/b.go","search":"b","replace":"c"}`},
+				},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{},
+			},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	var w bytes.Buffer
+
+	_, _ = handleLine(`{"method":"prompt","params":{"text":"modify file"}}`, st, &w)
+	w.Reset()
+	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"ok"}}`, st, &w)
+	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_2","result":"ok"}}`, st, &w)
+
+	if len(st.history) != 4 {
+		t.Fatalf("history len = %d, want 4 (prompt + state + replace + answer), got %+v", len(st.history), st.history)
+	}
+	if !strings.Contains(st.history[1].Content, "<State /tmp/b.go") ||
+		!strings.Contains(st.history[2].Content, "<Replace /tmp/b.go") {
+		t.Fatalf("expected State and Replace snapshots, got %+v", st.history)
+	}
+}
+
+func TestPruneTurnEdgeCases(t *testing.T) {
+	st := &state{prune: true}
+	// historyLenBeforeTurn out of range
+	st.historyLenBeforeTurn = -1
+	st.pruneTurn()
+
+	st.historyLenBeforeTurn = 100
+	st.pruneTurn()
+
+	// turn too short (<= 2 messages)
+	st.history = []llm.Message{{Role: llm.RoleUser, Content: "hi"}, {Role: llm.RoleAssistant, Content: "hello"}}
+	st.historyLenBeforeTurn = 0
+	st.pruneTurn()
+
+	// last message has tool calls
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "hi"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1"}}},
+	}
+	st.historyLenBeforeTurn = 0
+	st.pruneTurn()
+
+	// collapseTurn edge cases
+	st.aggressivePrune = true
+	st.historyLenBeforeTurn = -1
+	st.collapseTurn()
+	st.historyLenBeforeTurn = 100
+	st.collapseTurn()
+	st.history = []llm.Message{{Role: llm.RoleUser, Content: "hi"}, {Role: llm.RoleAssistant, Content: "hello"}}
+	st.historyLenBeforeTurn = 0
+	st.collapseTurn()
+}
+
+func TestPruneTurnPureReplaceAndUnknownTool(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_unknown", Name: "search_replace", Arguments: `{"path":"/tmp/c.go","search":"a","replace":"b"}`},
+					{ID: "call_known", Name: "search_replace", Arguments: `{"path":"/tmp/c.go","search":"c","replace":"d"}`},
+				},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{},
+			},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	var w bytes.Buffer
+
+	_, _ = handleLine(`{"method":"prompt","params":{"text":"replace only"}}`, st, &w)
+	w.Reset()
+	// tool result for call_unknown has no matching tool call in calls map (tests `if !ok { continue }`)
+	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_unknown","result":"ok"}}`, st, &w)
+	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_known","result":"ok"}}`, st, &w)
+
+	if len(st.history) < 2 {
+		t.Fatalf("expected pruned history, got %+v", st.history)
+	}
+}
+
+func TestPruneAndAggressivePruneStartupLogs(t *testing.T) {
+	var out bytes.Buffer
+	input := `{"method":"quit"}`
+	err := RunWithOptions(strings.NewReader(input), &out, nil, "", "", false, true)
+	if err != nil {
+		t.Fatalf("RunWithOptions error: %v", err)
+	}
+
+	err = RunWithOptions(strings.NewReader(input), &out, nil, "", "", true, false)
+	if err != nil {
+		t.Fatalf("RunWithOptions error: %v", err)
+	}
+}
+
+func TestCollapseTurnInvalidLastMessage(t *testing.T) {
+	st := &state{aggressivePrune: true}
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "prompt"},
+		{Role: llm.RoleUser, Content: "user again"},
+	}
+	st.historyLenBeforeTurn = 0
+	st.collapseTurn()
+
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "prompt"},
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "1"}}},
+	}
+	st.historyLenBeforeTurn = 0
+	st.collapseTurn()
+}
+
+func TestPruneTurnOrphanToolMessage(t *testing.T) {
+	st := &state{prune: true}
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "prompt"},
+		{Role: "tool", ToolCallID: "orphan_id", Content: "result"},
+		{Role: llm.RoleAssistant, Content: "final answer"},
+	}
+	st.historyLenBeforeTurn = 0
+	st.pruneTurn()
+}

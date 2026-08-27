@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	appcontext "llm-bridge/context"
 	"llm-bridge/history"
@@ -61,6 +62,11 @@ type state struct {
 	// intermediate tool_calls, tool results, and their chain-of-thought. Off by
 	// default; enabled via the -aggressive-prune flag.
 	aggressivePrune bool
+
+	// prune, when enabled, collapses reasoning and tool results of file tools
+	// into user snapshots (read/write/replace), preserving file state without
+	// storing tool calls or reasoning.
+	prune bool
 
 	cancel context.CancelFunc
 	// cancelled reports whether the current turn was cancelled (as opposed to
@@ -204,6 +210,189 @@ func (st *state) collapseTurn() {
 		Content: last.Content,
 	})
 	st.history = collapsed
+}
+
+type fileEvent struct {
+	path    string
+	kind    string // "state" or "replace"
+	content string
+	seq     int
+}
+
+// pruneTurn collapses reasoning and intermediate tool calls/results into
+// structured user snapshots (<State> and <Replace>), preserving file states
+// while dropping tool calls, tool results, and chain-of-thought from history.
+//
+// Unlike collapseTurn which completely discards intermediate tool activity,
+// pruneTurn preserves the final state of modified/read files as immutable
+// user messages (`<State>` and `<Replace>`), preventing the model from having
+// to reread files in subsequent turns while keeping history compact and free
+// of heavy reasoning blocks.
+func (st *state) pruneTurn() {
+	st.historyMut.Lock()
+	defer st.historyMut.Unlock()
+
+	// Ensure turn boundaries are valid.
+	start := st.historyLenBeforeTurn
+	if start < 0 || start >= len(st.history) {
+		return
+	}
+	last := st.history[len(st.history)-1]
+	// A valid turn to prune must end with a plain assistant response (no pending tool calls).
+	if last.Role != llm.RoleAssistant || len(last.ToolCalls) > 0 {
+		return
+	}
+	// Turns with no intermediate tool activity do not need file pruning.
+	if len(st.history)-start <= 2 {
+		return
+	}
+
+	turnMessages := st.history[start : len(st.history)-1]
+
+	type toolCallInfo struct {
+		name string
+		args map[string]any
+	}
+	// Map tool call IDs to their metadata (tool name and parsed arguments).
+	calls := make(map[string]toolCallInfo)
+
+	for _, msg := range turnMessages {
+		if msg.Role == llm.RoleAssistant {
+			for _, tc := range msg.ToolCalls {
+				var args map[string]any
+				if tc.Arguments != "" {
+					_ = json.Unmarshal([]byte(tc.Arguments), &args)
+				}
+				calls[tc.ID] = toolCallInfo{name: tc.Name, args: args}
+			}
+		}
+	}
+
+	var events []fileEvent
+	seqCounter := 0
+
+	// Extract file events (reads, writes, replaces) from tool results and tool arguments.
+	for _, msg := range turnMessages {
+		if msg.Role == "tool" {
+			info, ok := calls[msg.ToolCallID]
+			if !ok {
+				continue
+			}
+
+			switch info.name {
+			case "read":
+				path, _ := info.args["path"].(string)
+				if path != "" {
+					events = append(events, fileEvent{
+						path:    path,
+						kind:    "state",
+						content: msg.Content,
+						seq:     seqCounter,
+					})
+					seqCounter++
+				}
+			case "write":
+				path, _ := info.args["path"].(string)
+				content, _ := info.args["content"].(string)
+				if path != "" {
+					events = append(events, fileEvent{
+						path:    path,
+						kind:    "state",
+						content: content,
+						seq:     seqCounter,
+					})
+					seqCounter++
+				}
+			case "search_replace":
+				path, _ := info.args["path"].(string)
+				search, _ := info.args["search"].(string)
+				replace, _ := info.args["replace"].(string)
+				if path != "" {
+					repContent := fmt.Sprintf("search:\n%s\n---\nreplace:\n%s", search, replace)
+					events = append(events, fileEvent{
+						path:    path,
+						kind:    "replace",
+						content: repContent,
+						seq:     seqCounter,
+					})
+					seqCounter++
+				}
+			}
+		} else if msg.Role == llm.RoleAssistant {
+			for _, tc := range msg.ToolCalls {
+				info := calls[tc.ID]
+				if info.name == "write" {
+					path, _ := info.args["path"].(string)
+					content, _ := info.args["content"].(string)
+					if path != "" {
+						events = append(events, fileEvent{
+							path:    path,
+							kind:    "state",
+							content: content,
+							seq:     seqCounter,
+						})
+						seqCounter++
+					}
+				}
+			}
+		}
+	}
+
+	eventsByPath := make(map[string][]fileEvent)
+	for _, ev := range events {
+		eventsByPath[ev.path] = append(eventsByPath[ev.path], ev)
+	}
+
+	// Apply path-based reduction rule:
+	// Baseline = the last state (read/write) snapshot for each path.
+	// Keep the baseline plus all replaces occurring after it; drop prior events.
+	var survivingEvents []fileEvent
+	for _, pathEvents := range eventsByPath {
+		lastStateIdx := -1
+		for i := len(pathEvents) - 1; i >= 0; i-- {
+			if pathEvents[i].kind == "state" {
+				lastStateIdx = i
+				break
+			}
+		}
+
+		if lastStateIdx != -1 {
+			survivingEvents = append(survivingEvents, pathEvents[lastStateIdx:]...)
+		} else {
+			survivingEvents = append(survivingEvents, pathEvents...)
+		}
+	}
+
+	// Restore original chronological order among surviving events across paths.
+	sort.Slice(survivingEvents, func(i, j int) bool {
+		return survivingEvents[i].seq < survivingEvents[j].seq
+	})
+
+	// Rebuild the history for this turn: original user prompt + file snapshots/deltas + final answer.
+	var newHistory []llm.Message
+	newHistory = append(newHistory, st.history[:start]...)
+	newHistory = append(newHistory, st.history[start])
+
+	datetime := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	for _, ev := range survivingEvents {
+		var markup string
+		if ev.kind == "state" {
+			markup = fmt.Sprintf("<State %s %s>%s</State>", ev.path, datetime, ev.content)
+		} else {
+			markup = fmt.Sprintf("<Replace %s %s>%s</Replace>", ev.path, datetime, ev.content)
+		}
+		newHistory = append(newHistory, llm.Message{
+			Role:    llm.RoleUser,
+			Content: markup,
+		})
+	}
+
+	newHistory = append(newHistory, llm.Message{
+		Role:    llm.RoleAssistant,
+		Content: last.Content,
+	})
+
+	st.history = newHistory
 }
 
 // write serializes a write to w (the bridge's stdout). All event output goes
@@ -523,6 +712,9 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			if st.aggressivePrune {
 				st.collapseTurn()
 			}
+			if st.prune {
+				st.pruneTurn()
+			}
 			st.sanitizeHistory()
 			st.inToolCycle = false
 			st.pendingToolIDs = nil
@@ -561,7 +753,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool) error {
 	if len(providers) > 0 {
 		if defaultName == "" {
 			for name := range providers {
@@ -574,7 +766,10 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 	if aggressivePrune {
 		logger.Infof("aggressive prune enabled: collapsing tool-calling turns")
 	}
-	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune}
+	if prune {
+		logger.Infof("prune enabled: collapsing reasoning and preserving file snapshots")
+	}
+	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune, prune: prune}
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
 
@@ -639,9 +834,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name(), "", false)
+		return run(r, w, providers, provider.Name(), "", false, false)
 	}
-	return run(r, w, nil, "", "", false)
+	return run(r, w, nil, "", "", false, false)
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -662,12 +857,12 @@ func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProv
 // and an initial global system prompt.
 func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, false)
+	return run(r, w, providers, defaultName, systemPrompt, false, false)
 }
 
 // RunWithOptions starts the server loop with a registry of named providers, an
 // initial global system prompt, and the aggressive-prune option (see state).
-func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool) error {
+func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune)
 }

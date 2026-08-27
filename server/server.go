@@ -84,6 +84,9 @@ type state struct {
 	totalPromptTokens     int
 	totalCompletionTokens int
 
+	turnPromptTokens     int
+	turnCompletionTokens int
+
 	// cancelMut guards the `cancel` field. It is read/written concurrently by
 	// the reader goroutine (which handles `cancel` immediately) and by
 	// runToolCycle while a Chat is streaming.
@@ -538,6 +541,8 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if sys != "" {
 			st.systemOverride = sys
 		}
+		st.turnPromptTokens = 0
+		st.turnCompletionTokens = 0
 		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
 		st.appendUser(p.Text)
 		return runToolCycle(st, w)
@@ -666,8 +671,10 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			inputTokens = resp.Usage.PromptTokens
 			outputTokens = resp.Usage.CompletionTokens
 		}
-		totalTokensThisTurn := inputTokens + outputTokens
-		st.totalTokens += totalTokensThisTurn
+		st.turnPromptTokens += inputTokens
+		st.turnCompletionTokens += outputTokens
+		totalTokensThisCall := inputTokens + outputTokens
+		st.totalTokens += totalTokensThisCall
 		st.totalPromptTokens += inputTokens
 		st.totalCompletionTokens += outputTokens
 
@@ -693,17 +700,23 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			}
 		}
 
+		if len(resp.ToolCalls) > 0 {
+			usageEvt := protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisCall)
+			_ = st.write(w, string(usageEvt)+"\n")
+		}
+
 		if len(resp.ToolCalls) == 0 {
 			contextPct := 0.0
 			model := resp.Model
 			if model == "" {
 				model = st.activeProvider().Model()
 			}
+			turnTotalTokens := st.turnPromptTokens + st.turnCompletionTokens
 			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
-				model, inputTokens, outputTokens, totalTokensThisTurn)
+				model, st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens)
 			_ = st.write(w, string(newEnd)+"\n")
 
-			newUsage := protocol.NewUsageDelta(inputTokens, outputTokens, totalTokensThisTurn)
+			newUsage := protocol.NewUsageDelta(st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens)
 			_ = st.write(w, string(newUsage)+"\n")
 			// Aggressive prune: collapse a tool-calling turn into just its user
 			// prompt + final answer, keeping the history small and its prefix

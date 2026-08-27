@@ -1789,3 +1789,40 @@ func TestPruneTurnOrphanToolMessage(t *testing.T) {
 	st.historyLenBeforeTurn = 0
 	st.pruneTurn()
 }
+
+// TestTurnTokenSumAcrossToolCalls verifies that token usage across intermediate
+// tool calls and final answer is correctly summed and reported in TurnEnd and UsageDelta.
+func TestTurnTokenSumAcrossToolCalls(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{PromptTokens: 100, CompletionTokens: 50},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{PromptTokens: 200, CompletionTokens: 80},
+			},
+		},
+	}
+	st := &state{provider: provider}
+	var w bytes.Buffer
+
+	_, _ = handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	w.Reset()
+	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"content"}}`, st, &w)
+
+	output := w.String()
+	// Total prompt tokens should be 100 + 200 = 300
+	// Total completion tokens should be 50 + 80 = 130
+	// Total tokens should be 300 + 130 = 430
+	if !strings.Contains(output, `"input_tokens":300`) ||
+		!strings.Contains(output, `"output_tokens":130`) ||
+		!strings.Contains(output, `"total_tokens":430`) {
+		t.Fatalf("expected summed tokens (300, 130, 430) in turn_end/usage_delta, got %q", output)
+	}
+}

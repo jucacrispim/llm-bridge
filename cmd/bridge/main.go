@@ -195,7 +195,8 @@ func main() {
 		logger.Infof("knowledge base enabled (base dir: %s)", baseDir)
 	}
 
-	if err := server.RunWithKnowledge(os.Stdin, os.Stdout, providers, *providerName, systemPrompt, *aggressivePrune, *prune, kb); err != nil {
+	if err := server.RunWithKnowledge(os.Stdin, os.Stdout, providers, *providerName,
+		systemPrompt, *aggressivePrune, *prune, kb); err != nil {
 		os.Exit(1)
 	}
 }

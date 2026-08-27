@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"llm-bridge/knowledge"
 	"llm-bridge/llm"
 )
 
@@ -1649,5 +1650,625 @@ func TestRunWithSystemPromptGlobal(t *testing.T) {
 	}
 	if fp.lastReq.System != "global system prompt" {
 		t.Errorf("System = %q, want global system prompt", fp.lastReq.System)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge base (resolveKnowledge + first-turn injection) tests
+// ---------------------------------------------------------------------------
+
+// TestResolveKnowledgeDisabled verifies that when no knowledge base is wired
+// (kb nil), a `knowledge` tool call resolves internally to a "disabled" result
+// appended to the history, instead of waiting on the client.
+func TestResolveKnowledgeDisabled(t *testing.T) {
+	st := newTestState()
+	st.resolveKnowledge("call_1", `{"command":"show"}`)
+	if len(st.history) != 1 {
+		t.Fatalf("history len = %d, want 1 (tool result)", len(st.history))
+	}
+	last := st.history[len(st.history)-1]
+	if last.Role != "tool" || last.ToolCallID != "call_1" || last.Content != "knowledge base disabled" {
+		t.Fatalf("expected disabled tool result, got %+v", last)
+	}
+}
+
+// TestResolveKnowledgeExecuteError verifies that a `knowledge` tool call against
+// a wired-but-disabled embedder resolves internally to an error result (an
+// embed that fails still produces a tool result so the model keeps its turn).
+func TestResolveKnowledgeExecuteError(t *testing.T) {
+	kb := knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")
+	st := &state{kb: kb}
+	st.resolveKnowledge("call_1", `{"command":"add","label":"x","text":"y"}`)
+	last := st.history[len(st.history)-1]
+	if last.Role != "tool" || last.ToolCallID != "call_1" {
+		t.Fatalf("expected tool result, got %+v", last)
+	}
+	if !strings.Contains(last.Content, "error:") {
+		t.Fatalf("expected error result from disabled embedder, got %q", last.Content)
+	}
+}
+
+// TestResolveKnowledgeNilArgs verifies that a knowledge tool call with empty
+// arguments still resolves internally without panicking (args omitted → empty
+// JSON payload).
+func TestResolveKnowledgeNilArgs(t *testing.T) {
+	kb := knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")
+	st := &state{kb: kb}
+	st.resolveKnowledge("call_1", "")
+	last := st.history[len(st.history)-1]
+	if last.Role != "tool" || last.ToolCallID != "call_1" {
+		t.Fatalf("expected tool result, got %+v", last)
+	}
+}
+
+// TestFirstTurnInjectsKnowledgeBaseLine verifies that when the knowledge base is
+// wired (kb != nil), the first prompt injects a single minimal line about the
+// project's KB before the user prompt. The KB name falls back to the cwd
+// basename when no project metadata is linked.
+func TestFirstTurnInjectsKnowledgeBaseLine(t *testing.T) {
+	kb := knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	t.Setenv("HOME", t.TempDir()) // isolate general context (none injected)
+	st := &state{provider: fp, kb: kb, firstTurn: true, cwd: "/home/user/proj"}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	msgs := fp.lastReq.Messages
+	if len(msgs) != 2 {
+		t.Fatalf("len = %d, want 2 (KB line + prompt)", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Content, "Knowledge base") || !strings.Contains(msgs[0].Content, "proj") {
+		t.Fatalf("msgs[0] should be the KB line, got %q", msgs[0].Content)
+	}
+	if msgs[1].Role != llm.RoleUser || msgs[1].Content != "hi" {
+		t.Fatalf("msgs[1] should be the user prompt, got %+v", msgs[1])
+	}
+}
+
+// TestKnowledgeToolResolvedInternally verifies that a `knowledge` tool call is
+// resolved internally (fire-and-forget) and never enters pendingToolIDs: the
+// turn keeps moving and Chat is called again without any client round-trip.
+func TestKnowledgeToolResolvedInternally(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "k1", Name: "knowledge", Arguments: `{"command":"add","label":"n","text":"t"}`}},
+			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	st := &state{provider: provider, kb: knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"remember"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	// knowledge resolved internally → Chat called twice (tool call + final),
+	// with no pending tool and no tool cycle left behind.
+	if provider.callCount != 2 {
+		t.Fatalf("callCount = %d, want 2 (no client round-trip)", provider.callCount)
+	}
+	if st.inToolCycle {
+		t.Fatal("should not be in tool cycle after internal knowledge resolution")
+	}
+	if len(st.pendingToolIDs) != 0 {
+		t.Fatalf("knowledge tool should not be pending, got %v", st.pendingToolIDs)
+	}
+	last := st.history[len(st.history)-1]
+	if last.Role != llm.RoleAssistant || last.Content != "done" {
+		t.Fatalf("final message should be the answer, got %+v", last)
+	}
+}
+
+// TestRunWithKnowledgeWiresKB verifies the RunWithKnowledge entry point wires a
+// knowledge base and resolves a knowledge tool call internally through the full
+// server loop (covers the kb != nil logging path too).
+func TestRunWithKnowledgeWiresKB(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "k1", Name: "knowledge", Arguments: `{"command":"show"}`}},
+			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	kb := knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")
+	var out bytes.Buffer
+	input := `{"method":"prompt","params":{"text":"hi"}}
+{"method":"quit"}
+`
+	err := RunWithKnowledge(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, kb)
+	if err != nil {
+		t.Fatalf("RunWithKnowledge error: %v", err)
+	}
+	if provider.callCount != 2 {
+		t.Fatalf("callCount = %d, want 2 (internal knowledge resolution)", provider.callCount)
+	}
+	if !strings.Contains(out.String(), `{"event":"turn_end"`) {
+		t.Fatalf("expected turn_end, got %q", out.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Prune (-prune) write / replace-only / guard tests
+// ---------------------------------------------------------------------------
+
+// TestPruneWriteToolCreatesState verifies that a `write` tool produces a <State>
+// snapshot in the pruned history, with the content taken from the write
+// argument (the most faithful snapshot of the whole file).
+func TestPruneWriteToolCreatesState(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "w1", Name: "write", Arguments: `{"path":"/tmp/new.go","content":"package main"}`}},
+			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"create file"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle")
+	}
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"w1","result":"ok"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	if st.inToolCycle {
+		t.Fatal("expected tool cycle to finish")
+	}
+	// [prompt, <State from write content>, answer]
+	if len(st.history) != 3 {
+		t.Fatalf("history len = %d, want 3 (prompt + State + answer), got %+v", len(st.history), st.history)
+	}
+	stateMsg := st.history[1]
+	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, "<State /tmp/new.go ") || !strings.Contains(stateMsg.Content, ">package main</State>") {
+		t.Fatalf("history[1] should be a <State> from the write content, got %+v", stateMsg)
+	}
+}
+
+// TestPruneReplaceOnlyAppendsDelta verifies that a search_replace with no prior
+// read/write baseline in the turn produces just a <Replace> delta (the baseline
+// lives in a prior turn's history), covering the no-state branch of the
+// per-path reduction.
+func TestPruneReplaceOnlyAppendsDelta(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "s1", Name: "search_replace", Arguments: `{"path":"/tmp/a.go","search":"x","replace":"y"}`}},
+			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"patch"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle")
+	}
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"s1","result":"ok"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	if st.inToolCycle {
+		t.Fatal("expected tool cycle to finish")
+	}
+	// [prompt, <Replace>, answer]
+	if len(st.history) != 3 {
+		t.Fatalf("history len = %d, want 3 (prompt + Replace + answer), got %+v", len(st.history), st.history)
+	}
+	repMsg := st.history[1]
+	if repMsg.Role != llm.RoleUser || !strings.Contains(repMsg.Content, "<Replace /tmp/a.go ") {
+		t.Fatalf("history[1] should be a <Replace> delta, got %+v", repMsg)
+	}
+}
+
+// TestPruneTurnIgnoresUnknownToolResult verifies that a tool result referencing
+// an unknown call id is skipped without panicking (covers the `!ok` guard), and
+// that a known read still becomes a <State> snapshot.
+func TestPruneTurnIgnoresUnknownToolResult(t *testing.T) {
+	st := &state{history: []llm.Message{
+		{Role: llm.RoleUser, Content: "hi"},
+		{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCall{{ID: "known", Name: "read", Arguments: `{"path":"/tmp/a"}`}}},
+		{Role: llm.RoleUser, Content: "task"},
+		{Role: "tool", ToolCallID: "known", Content: "body"},
+		{Role: "tool", ToolCallID: "unknown", Content: "orphan"},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	st.historyLenBeforeTurn = 0
+	st.pruneTurn()
+	// [hi(user), <State /tmp/a>, done]
+	if len(st.history) != 3 {
+		t.Fatalf("history len = %d, want 3 (prompt + State + answer), got %+v", len(st.history), st.history)
+	}
+	stateMsg := st.history[1]
+	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, "<State /tmp/a ") {
+		t.Fatalf("history[1] should be a <State>, got %+v", stateMsg)
+	}
+}
+
+// TestPruneAndCollapseTurnGuards covers the early-return guard clauses shared by
+// collapseTurn and pruneTurn: an invalid start marker and a history that does
+// not end with a plain assistant answer (no tool calls) are both left untouched.
+func TestPruneAndCollapseTurnGuards(t *testing.T) {
+	// start marker beyond history length → guards return early
+	st := &state{history: []llm.Message{
+		{Role: llm.RoleUser, Content: "hi"},
+		{Role: llm.RoleAssistant, Content: "ok"},
+	}}
+	st.historyLenBeforeTurn = 5
+	st.collapseTurn()
+	st.pruneTurn()
+	if len(st.history) != 2 {
+		t.Fatalf("guards should leave history untouched, got %+v", st.history)
+	}
+
+	// last message carries tool_calls (not a plain answer) → guards return early
+	st2 := &state{history: []llm.Message{
+		{Role: llm.RoleUser, Content: "hi"},
+		{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCall{{ID: "c", Name: "read"}}},
+	}}
+	st2.historyLenBeforeTurn = 0
+	st2.collapseTurn()
+	st2.pruneTurn()
+	if len(st2.history) != 2 {
+		t.Fatalf("tool_calls last message should be left untouched, got %+v", st2.history)
+	}
+}
+
+// TestRunWithOptionsPruneAndAggressive exercises the run() option-logging
+// branches for aggressivePrune and prune (reaching the pure logging paths), and
+// confirms the turn still completes normally.
+func TestRunWithOptionsPruneAndAggressive(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	var out bytes.Buffer
+	input := `{"method":"prompt","params":{"text":"hi"}}
+{"method":"quit"}
+`
+	err := RunWithOptions(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "", true, true)
+	if err != nil {
+		t.Fatalf("RunWithOptions error: %v", err)
+	}
+	if !strings.Contains(out.String(), `{"event":"turn_end"`) {
+		t.Fatalf("expected turn_end, got %q", out.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Prune (-prune) tests
+// ---------------------------------------------------------------------------
+
+// TestPruneCollapsesToolTurnIntoSnapshots verifies the full -prune flow: a turn
+// that reads a file and then applies a search_replace is rebuilt at turn close as
+// [prior prefix + user prompt + <State> snapshot + <Replace> delta + final
+// answer], with all intermediate tool_calls, tool results, and reasoning dropped
+// and no assistant message carrying a tool_call left behind (DeepSeek-safe).
+func TestPruneCollapsesToolTurnIntoSnapshots(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/a.go"}`}},
+			},
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "call_2", Name: "search_replace", Arguments: `{"path":"/tmp/a.go","search":"old","replace":"new"}`}},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{},
+				Reasoning:  "reasoning that must be pruned",
+			},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	// Seed a prior turn (a plain user->assistant pair) that must be preserved.
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "earlier"},
+		{Role: llm.RoleAssistant, Content: "previous answer"},
+	}
+	var w bytes.Buffer
+
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle after read tool call")
+	}
+	// deliver read result
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file body"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle after search_replace tool call")
+	}
+	// deliver search_replace result
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_2","result":"ok"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	if st.inToolCycle {
+		t.Fatal("expected tool cycle to finish")
+	}
+
+	// history is now [earlier, previous answer, hi(user), <State>, <Replace>, done]
+	if len(st.history) != 6 {
+		t.Fatalf("history len = %d, want 6 (2 prior + prompt + State + Replace + answer), got %+v", len(st.history), st.history)
+	}
+	// prior prefix preserved byte-identically
+	if st.history[0].Content != "earlier" || st.history[1].Content != "previous answer" {
+		t.Fatalf("prior turns should be preserved untouched, got %+v", st.history[:2])
+	}
+	// user prompt
+	if st.history[2].Role != llm.RoleUser || st.history[2].Content != "hi" {
+		t.Fatalf("history[2] should be the user prompt, got %+v", st.history[2])
+	}
+	// <State> snapshot for the read (content from the tool_result)
+	stateMsg := st.history[3]
+	if stateMsg.Role != llm.RoleUser || !strings.HasPrefix(stateMsg.Content, "<State /tmp/a.go ") || !strings.HasSuffix(stateMsg.Content, ">\"file body\"</State>") {
+		t.Fatalf("history[3] should be a <State> snapshot, got %+v", stateMsg)
+	}
+	// <Replace> delta for the search_replace
+	replaceMsg := st.history[4]
+	if replaceMsg.Role != llm.RoleUser || !strings.HasPrefix(replaceMsg.Content, "<Replace /tmp/a.go ") || !strings.Contains(replaceMsg.Content, "search:\nold\n---\nreplace:\nnew") || !strings.HasSuffix(replaceMsg.Content, "</Replace>") {
+		t.Fatalf("history[4] should be a <Replace> delta, got %+v", replaceMsg)
+	}
+	// final answer
+	last := st.history[5]
+	if last.Role != llm.RoleAssistant || last.Content != "done" {
+		t.Fatalf("history[5] should be the final assistant answer, got %+v", last)
+	}
+	// no assistant message with tool_calls, no tool results, no reasoning
+	for _, m := range st.history {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("pruned history should contain no tool_calls, got %+v", m)
+		}
+		if m.Role == "tool" {
+			t.Fatalf("pruned history should contain no tool results, got %+v", m)
+		}
+		if m.Reasoning != "" {
+			t.Fatalf("pruned history should contain no reasoning, got %+v", m)
+		}
+	}
+}
+
+// TestPruneReductionKeepsBaselinePlusLaterReplaces covers the path reduction rule
+// for the sequence read->replace->read->replace: the baseline is the LAST read, so
+// only it plus the replace after it survive (the first read and first replace are
+// dropped as redundant). See the `-prune` reduction table.
+func TestPruneReductionKeepsBaselinePlusLaterReplaces(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "r1", Name: "read", Arguments: `{"path":"/tmp/a.go"}`}},
+			},
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "s1", Name: "search_replace", Arguments: `{"path":"/tmp/a.go","search":"a","replace":"b"}`}},
+			},
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "r2", Name: "read", Arguments: `{"path":"/tmp/a.go"}`}},
+			},
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "s2", Name: "search_replace", Arguments: `{"path":"/tmp/a.go","search":"c","replace":"d"}`}},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{},
+			},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	var w bytes.Buffer
+
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"edit file"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	for _, id := range []string{"r1", "s1", "r2", "s2"} {
+		if !st.inToolCycle {
+			t.Fatalf("expected in tool cycle before delivering %s", id)
+		}
+		_, quit = handleLine(`{"method":"tool_result","params":{"id":"`+id+`","result":"body-`+id+`"}}`, st, &w)
+		if quit {
+			t.Fatalf("tool_result %s should not quit", id)
+		}
+	}
+	if st.inToolCycle {
+		t.Fatal("expected tool cycle to finish")
+	}
+
+	// history is now [prompt, <State> (from r2), <Replace> (from s2), done]
+	// — the first read/replace pair (r1/s1) is dropped as redundant.
+	if len(st.history) != 4 {
+		t.Fatalf("history len = %d, want 4 (prompt + baseline State + one Replace + answer), got %+v", len(st.history), st.history)
+	}
+	if st.history[0].Role != llm.RoleUser || st.history[0].Content != "edit file" {
+		t.Fatalf("history[0] should be the user prompt, got %+v", st.history[0])
+	}
+	stateMsg := st.history[1]
+	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, ">\"body-r2\"</State>") {
+		t.Fatalf("history[1] should be the baseline <State> from the 2nd read, got %+v", stateMsg)
+	}
+	replaceMsg := st.history[2]
+	if replaceMsg.Role != llm.RoleUser || !strings.Contains(replaceMsg.Content, "search:\nc\n---\nreplace:\nd") {
+		t.Fatalf("history[2] should be the <Replace> from s2 only, got %+v", replaceMsg)
+	}
+	if st.history[3].Role != llm.RoleAssistant || st.history[3].Content != "done" {
+		t.Fatalf("history[3] should be the final answer, got %+v", st.history[3])
+	}
+}
+
+// TestPruneDropsNonFileTools verifies that non-file tools (grep/shell/glob/code)
+// leave no trace in the pruned history: only file read/write/replace produce
+// snapshots. A shell tool result is dropped entirely.
+func TestPruneDropsNonFileTools(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls: []llm.ToolCall{
+					{ID: "sh1", Name: "shell", Arguments: `{"command":"ls"}`},
+					{ID: "r1", Name: "read", Arguments: `{"path":"/tmp/b.go"}`},
+				},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{},
+			},
+		},
+	}
+	st := &state{provider: provider, prune: true}
+	var w bytes.Buffer
+
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"explore"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !st.inToolCycle {
+		t.Fatal("expected to be in tool cycle")
+	}
+	// both tools go to pending; deliver them in any order
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"sh1","result":"ls output"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"r1","result":"b body"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	if st.inToolCycle {
+		t.Fatal("expected tool cycle to finish")
+	}
+
+	// history is now [prompt, <State /tmp/b.go>, done] — the shell result is gone.
+	if len(st.history) != 3 {
+		t.Fatalf("history len = %d, want 3 (prompt + State + answer), got %+v", len(st.history), st.history)
+	}
+	if st.history[0].Role != llm.RoleUser || st.history[0].Content != "explore" {
+		t.Fatalf("history[0] should be the user prompt, got %+v", st.history[0])
+	}
+	stateMsg := st.history[1]
+	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, ">\"b body\"</State>") {
+		t.Fatalf("history[1] should be the <State> from the read, got %+v", stateMsg)
+	}
+	if st.history[2].Role != llm.RoleAssistant || st.history[2].Content != "done" {
+		t.Fatalf("history[2] should be the final answer, got %+v", st.history[2])
+	}
+}
+
+// TestPruneKeepsConversationTurns verifies that -prune does NOT touch plain
+// conversational turns (no tools): the user prompt and assistant answer are kept
+// as-is, nothing reordered or dropped.
+func TestPruneKeepsConversationTurns(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp, prune: true}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if len(st.history) != 2 {
+		t.Fatalf("history len = %d, want 2 (prompt + answer)", len(st.history))
+	}
+	if st.history[0].Role != llm.RoleUser || st.history[0].Content != "hi" {
+		t.Fatalf("history[0] should be the user prompt, got %+v", st.history[0])
+	}
+	if st.history[1].Role != llm.RoleAssistant || st.history[1].Content != "Hello" {
+		t.Fatalf("history[1] should be the assistant answer, got %+v", st.history[1])
+	}
+}
+
+// TestPruneDefaultOff verifies that WITHOUT the -prune flag the interleaved tool
+// history (assistant tool_calls + tool results) is preserved across the turn,
+// matching the default behavior.
+func TestPruneDefaultOff(t *testing.T) {
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		},
+	}
+	st := &state{provider: provider} // prune defaults to false
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	// [user, assistant(tool_calls), tool, assistant(final)] — nothing collapsed.
+	if len(st.history) != 4 {
+		t.Fatalf("history len = %d, want 4 (interleaved, prune off), got %+v", len(st.history), st.history)
+	}
+	if len(st.history[1].ToolCalls) != 1 || st.history[2].Role != "tool" {
+		t.Fatalf("interleaved tool history should be preserved without prune, got %+v", st.history)
 	}
 }

@@ -28,11 +28,12 @@ type item struct {
 // scoped to a single project; when dir is non-empty, Add persists to
 // dir/<project>/data.json after each insertion.
 type Manager struct {
-	embed   Embedder
-	idx     Index
-	dir     string // base dir ("" = in-memory only, no persistence)
-	project string
-	items   []item
+	embed     Embedder
+	idx       Index
+	dir       string // base dir ("" = in-memory only, no persistence)
+	project   string
+	seedRoot  string // dir of seed .md files; used by Reset to rebuild from seed
+	items     []item
 }
 
 // NewManager returns an in-memory Manager for project backed by embed, with no
@@ -98,14 +99,32 @@ func (m *Manager) save() error {
 	return os.WriteFile(m.dataPath(), data, 0o644)
 }
 
-// Add embeds text with the passage prefix, stores it in the index, records the
-// item and persists to disk (if persistence is enabled). It returns the
-// assigned id.
+// Add embeds text with the passage prefix and stores it under label. It is an
+// **upsert by label**: if an item with that label already exists, its text and
+// vector are replaced (re-embedded with the new content) instead of inserting a
+// duplicate. The label is the stable identifier the model uses both to store a
+// note and to correct one it previously wrote. Returns the item's id and
+// persists to disk (if persistence is enabled).
 func (m *Manager) Add(label, text string) (int, error) {
 	vec, err := m.embed.Embed(PassagePrefix+text, false)
 	if err != nil {
 		return 0, err
 	}
+
+	// Upsert: reuse an existing item with the same label.
+	for i := range m.items {
+		if m.items[i].Payload.Label == label {
+			m.items[i].Payload.Text = text
+			m.items[i].Vector = vec
+			logger.Tracef("knowledge update: label=%q id=%d", label, m.items[i].ID)
+			m.rebuildIndex()
+			if err := m.save(); err != nil {
+				return 0, err
+			}
+			return m.items[i].ID, nil
+		}
+	}
+
 	id := m.idx.Add(vec, label, text)
 	logger.Tracef("knowledge add: label=%q id=%d", label, id)
 
@@ -149,6 +168,55 @@ func (m *Manager) Show() string {
 // Len returns the number of stored items.
 func (m *Manager) Len() int { return m.idx.Len() }
 
+// SetSeedRoot records the directory of the seed .md files used by Reset to
+// rebuild the knowledge base from curated content.
+func (m *Manager) SetSeedRoot(root string) { m.seedRoot = root }
+
+// rebuildIndex reconstructs the brute-force index from the current items. It is
+// used after any item mutation (upsert/delete) that the plain index cannot apply
+// in place. The KB is small, so a full rebuild is cheap.
+func (m *Manager) rebuildIndex() {
+	m.idx = NewBruteForce()
+	for _, it := range m.items {
+		m.idx.Add(it.Vector, it.Payload.Label, it.Payload.Text)
+	}
+}
+
+// Delete removes the item with the given label, rebuilding the index and
+// persisting. It returns (false, nil) when no item has that label, so the caller
+// can surface a plain "not found" notice instead of an error.
+func (m *Manager) Delete(label string) (bool, error) {
+	for i, it := range m.items {
+		if it.Payload.Label == label {
+			m.items = append(m.items[:i], m.items[i+1:]...)
+			m.rebuildIndex()
+			logger.Tracef("knowledge delete: label=%q", label)
+			if err := m.save(); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Reset clears the knowledge base and rebuilds it from the seed .md files
+// (m.seedRoot, if set). It is how the curated seed content — the source of truth
+// for architecture/notes — is refreshed after being edited. Manual items added
+// during conversations are discarded. When no seed root is configured it simply
+// wipes the KB (a hard reset).
+func (m *Manager) Reset() error {
+	m.items = nil
+	m.idx = NewBruteForce()
+	if m.dir != "" {
+		_ = os.Remove(m.dataPath())
+	}
+	if m.seedRoot == "" {
+		return nil
+	}
+	return m.EnsureSeeded(m.seedRoot)
+}
+
 // Execute handles a `knowledge` tool invocation (command: show|search|add) and
 // returns the formatted result to feed back to the model as the tool result.
 // args is the tool's raw JSON arguments.
@@ -186,6 +254,23 @@ func (m *Manager) Execute(args json.RawMessage) (string, error) {
 			return "", err
 		}
 		return fmt.Sprintf("added %q (id %d)", p.Label, id), nil
+	case "delete":
+		if p.Label == "" {
+			return "", errors.New("knowledge delete requires a label")
+		}
+		ok, err := m.Delete(p.Label)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return fmt.Sprintf("delete: label %q not found", p.Label), nil
+		}
+		return fmt.Sprintf("deleted %q", p.Label), nil
+	case "reset":
+		if err := m.Reset(); err != nil {
+			return "", err
+		}
+		return "knowledge base reset", nil
 	default:
 		return "", fmt.Errorf("unknown knowledge command %q", p.Command)
 	}

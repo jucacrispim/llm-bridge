@@ -31,6 +31,7 @@ func main() {
 	aggressivePrune := flag.Bool("aggressive-prune", false, "collapse each completed tool-calling turn into just the user prompt + final answer, dropping the intermediate tool calls, tool results, and chain-of-thought from the history to save tokens and keep the prefix cacheable. Off by default.")
 	knowledgeEnabled := flag.Bool("knowledge", true, "enable the project knowledge base (tool 'knowledge'); false disables it")
 	knowledgeBase := flag.String("knowledge-base", "", "base directory for the project knowledge bases (default ~/.local/share/llm-bridge/knowledge_bases)")
+	kbLoad := flag.String("kb-load", "lazy", "when to load the knowledge base model: 'lazy' (default, load on first use so the server starts fast) or 'eager' (load at startup; failure disables the KB with a warning)")
 	prune := flag.Bool("prune", false, "collapse reasoning and tool results, preserving file states (read/write/replace) as user snapshots. Off by default.")
 	populateKB := flag.String("populate-project-kb", "", "populate the knowledge base for -project from a seed directory and exit (standalone mode; requires the ONNX embedder). Mutually exclusive with running the server.")
 	projectName := flag.String("project", "", "project name; used with -populate-project-kb as the knowledge base key")
@@ -175,11 +176,16 @@ func main() {
 	// -knowledge=false disables the KB outright (embedder nil → the server
 	// treats it as disabled).
 	//
-	// When enabled, we try the real embedder. If loading it fails (model file
-	// missing, or the build is without the knowledge_onnx tag, in which case
-	// NewEmbedder always returns the "embeddings disabled" error / dlopen
-	// failures at runtime), we log a warning and fall back to the disabled
-	// embedder — the bridge keeps running, just without a KB (no crash).
+	// When enabled, the load timing of the (heavy) ONNX model is controlled by
+	// -kb-load:
+	//   - "lazy" (default): wraps the embedder in a LazyEmbedder, so the model
+	//     is only loaded on the first embedding (first `knowledge` add/search).
+	//     The server starts fast; a failure to load surfaces as the result of
+	//     that first KB operation instead of crashing or delaying boot.
+	//   - "eager": the previous behavior — load the embedder at startup; if it
+	//     fails (model file missing, or the build is without the knowledge_onnx
+	//     tag, in which case NewEmbedder always errors), log a warning and fall
+	//     back to the disabled embedder so the bridge keeps running without a KB.
 	var kbBaseDir string
 	var kbEmbed knowledge.Embedder
 	if *knowledgeEnabled {
@@ -202,14 +208,19 @@ func main() {
 		if tokenizerPath == "" {
 			tokenizerPath = filepath.Join(mustCacheDir(), "tokenizer.json")
 		}
-		embed, err := knowledge.NewEmbedder(modelPath, tokenizerPath)
-		if err != nil {
-			logger.Warningf("knowledge base disabled: failed to load embedder: %v", err)
-			logger.Infof("knowledge base disabled (base dir: %s)", kbBaseDir)
-			kbEmbed = knowledge.DisabledEmbedder{}
+		if *kbLoad == "eager" {
+			embed, err := knowledge.NewEmbedder(modelPath, tokenizerPath)
+			if err != nil {
+				logger.Warningf("knowledge base disabled: failed to load embedder: %v", err)
+				logger.Infof("knowledge base disabled (base dir: %s)", kbBaseDir)
+				kbEmbed = knowledge.DisabledEmbedder{}
+			} else {
+				kbEmbed = embed
+				logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
+			}
 		} else {
-			kbEmbed = embed
-			logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
+			kbEmbed = knowledge.NewLazyEmbedder(modelPath, tokenizerPath)
+			logger.Infof("knowledge base enabled (lazy load, base dir: %s)", kbBaseDir)
 		}
 	} else {
 		logger.Infof("knowledge base disabled (flag -knowledge=false)")

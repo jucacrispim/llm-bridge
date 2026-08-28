@@ -38,8 +38,10 @@ type state struct {
 	cwd            string
 	knowledgeBases []json.RawMessage
 	// kbEmbed is the embedder to use for the project knowledge base. nil means
-	// the knowledge base is disabled. The per-project Manager is built lazily
-	// on `set_cwd` (see loadKBProject) and stored in kb.
+	// the knowledge base is disabled. It may itself be a LazyEmbedder (the
+	// -kb-load default) that defers the ONNX model load until the first
+	// embedding. The per-project Manager is built lazily on `set_cwd` (see
+	// loadKBProject) and stored in kb.
 	kbEmbed knowledge.Embedder
 	// kbBaseDir is the base directory where per-project KBs live
 	// (kbBaseDir/<project>/data.json). Empty means the KB is disabled.

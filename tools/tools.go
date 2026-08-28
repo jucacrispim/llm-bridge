@@ -6,7 +6,7 @@ import (
 	"llm-bridge/llm"
 )
 
-// All returns the seven tools that the bridge exposes to the LLM.
+// All returns the tools that the bridge exposes to the LLM.
 func All() []llm.Tool {
 	return []llm.Tool{
 		{
@@ -33,11 +33,6 @@ func All() []llm.Tool {
 			Name:        "glob",
 			Description: "Find files matching a glob pattern",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
-		},
-		{
-			Name:        "code",
-			Description: "Provide a code snippet or execute code",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"code":{"type":"string"}},"required":["code"]}`),
 		},
 		{
 			Name:        "search_replace",

@@ -1769,9 +1769,10 @@ func TestKnowledgeToolResolvedInternally(t *testing.T) {
 	}
 }
 
-// TestRunWithKnowledgeWiresKB verifies the RunWithKnowledge entry point wires a
-// knowledge base and resolves a knowledge tool call internally through the full
-// server loop (covers the kb != nil logging path too).
+// TestRunWithKnowledgeWiresKB verifies the RunWithKnowledgeBase entry point
+// wires a knowledge base and resolves a knowledge tool call internally through
+// the full server loop (covers the kb != nil logging path too). A set_cwd
+// drives the per-project Manager to be loaded for the project.
 func TestRunWithKnowledgeWiresKB(t *testing.T) {
 	provider := &fakeProvider{
 		name: "fake",
@@ -1785,20 +1786,91 @@ func TestRunWithKnowledgeWiresKB(t *testing.T) {
 			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
 		},
 	}
-	kb := knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")
 	var out bytes.Buffer
-	input := `{"method":"prompt","params":{"text":"hi"}}
+	input := `{"method":"set_cwd","params":{"cwd":"/tmp/proj"}}
+{"method":"prompt","params":{"text":"hi"}}
 {"method":"quit"}
 `
-	err := RunWithKnowledge(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, kb)
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, t.TempDir(), knowledge.DisabledEmbedder{})
 	if err != nil {
-		t.Fatalf("RunWithKnowledge error: %v", err)
+		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}
 	if provider.callCount != 2 {
 		t.Fatalf("callCount = %d, want 2 (internal knowledge resolution)", provider.callCount)
 	}
 	if !strings.Contains(out.String(), `{"event":"turn_end"`) {
 		t.Fatalf("expected turn_end, got %q", out.String())
+	}
+}
+
+// TestLoadKBProjectLoadsPersistedKB verifies that loadKBProject (called on
+// set_cwd) loads the project's persisted data.json into st.kb, so the KB
+// populated via -populate-project-kb is actually used at runtime.
+func TestLoadKBProjectLoadsPersistedKB(t *testing.T) {
+	base := t.TempDir()
+	// Persist a KB for project "proj" directly (same schema Load reads).
+	dataPath := filepath.Join(base, "proj", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataPath, []byte(`[
+  {"id":0,"payload":{"label":"seed:README.md","text":"conteudo","vector":[1,0]}},
+  {"id":1,"payload":{"label":"seed:proj/README.md","text":"proj","vector":[0,1]}}
+]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &state{kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{}}
+	st.loadKBProject("proj")
+	if st.kb == nil {
+		t.Fatal("expected kb to be loaded for project")
+	}
+	if st.kb.Len() != 2 {
+		t.Fatalf("kb.Len() = %d, want 2", st.kb.Len())
+	}
+}
+
+// TestLoadKBProjectDisabled verifies that loadKBProject with no embedder/base
+// dir clears st.kb (KB disabled) and does not panic.
+func TestLoadKBProjectDisabled(t *testing.T) {
+	st := &state{kb: knowledge.NewManager(knowledge.DisabledEmbedder{}, "x")}
+	st.loadKBProject("proj")
+	if st.kb != nil {
+		t.Fatalf("expected kb cleared when disabled, got %+v", st.kb)
+	}
+}
+
+// TestLoadKBProjectEmptyProject verifies that loadKBProject with an empty
+// project name is a no-op: it leaves the current kb unchanged (covers the
+// early-return guard).
+func TestLoadKBProjectEmptyProject(t *testing.T) {
+	st := &state{kbBaseDir: t.TempDir(), kbEmbed: knowledge.DisabledEmbedder{}}
+	st.loadKBProject("") // no-op, does not panic
+	if st.kb != nil {
+		t.Fatalf("expected kb untouched for empty project, got %+v", st.kb)
+	}
+}
+
+// TestLoadKBProjectFallbackOnError verifies that when loading the project's
+// data.json fails (corrupt file), loadKBProject falls back to an empty
+// in-memory manager for that project so the `knowledge` tool still resolves
+// locally instead of erroring (covers the Load-error branch).
+func TestLoadKBProjectFallbackOnError(t *testing.T) {
+	base := t.TempDir()
+	dataPath := filepath.Join(base, "proj", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataPath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := &state{kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{}}
+	st.loadKBProject("proj")
+	if st.kb == nil {
+		t.Fatal("expected kb fallback manager to be set on load error")
+	}
+	if st.kb.Len() != 0 {
+		t.Fatalf("expected empty fallback manager, got %d items", st.kb.Len())
 	}
 }
 

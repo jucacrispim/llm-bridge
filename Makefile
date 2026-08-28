@@ -16,7 +16,7 @@ build:
 
 .PHONY: build-kb # - Build with knowledge base (ONNX) enabled
 build-kb:
-	CGO_ENABLED=1 $(GOBUILD) -tags knowledge_onnx $(OUTFLAG) cmd/bridge/main.go
+	CGO_ENABLED=1 CGO_LDFLAGS="-L$(HOME)/.cache/llm-bridge/libtokenizers" $(GOBUILD) -tags knowledge_onnx $(OUTFLAG) cmd/bridge/main.go
 
 .PHONY: test # - Run all tests
 test:

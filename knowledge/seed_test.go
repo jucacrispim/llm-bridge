@@ -49,6 +49,19 @@ func TestEnsureSeededIdempotent(t *testing.T) {
 	}
 }
 
+// TestSeedLabelFor covers the seedLabelFor helper: a normal relative path
+// yields the slash-relative label, and a pair that cannot be made relative
+// (base relative vs target absolute) falls back to the basename.
+func TestSeedLabelFor(t *testing.T) {
+	if got := seedLabelFor("seeds", "seeds/sub/README.md"); got != "sub/README.md" {
+		t.Fatalf("seedLabelFor(seeds, seeds/sub/README.md) = %q, want sub/README.md", got)
+	}
+	// filepath.Rel errors here (relative base vs absolute target) → basename fallback
+	if got := seedLabelFor("seeds", "/abs/path/README.md"); got != "README.md" {
+		t.Fatalf("seedLabelFor(seeds, /abs/...) = %q, want README.md (basename fallback)", got)
+	}
+}
+
 func TestEnsureSeededSkipsUnreadable(t *testing.T) {
 	root := t.TempDir()
 	// A subdirectory of .md (not a file) should be skipped gracefully.

@@ -37,10 +37,15 @@ var defaultSystemPrompt = func() string {
 type state struct {
 	cwd            string
 	knowledgeBases []json.RawMessage
+	// kbEmbed is the embedder to use for the project knowledge base. nil means
+	// the knowledge base is disabled. The per-project Manager is built lazily
+	// on `set_cwd` (see loadKBProject) and stored in kb.
+	kbEmbed knowledge.Embedder
+	// kbBaseDir is the base directory where per-project KBs live
+	// (kbBaseDir/<project>/data.json). Empty means the KB is disabled.
+	kbBaseDir string
 	// kb is the project-scoped knowledge base used to resolve `knowledge` tool
-	// calls locally. nil means the knowledge base is disabled; the tool then
-	// resolves internally to a "disabled" result instead of waiting on the
-	// client. Wired in by the entry point (cmd/bridge).
+	// calls locally for the current cwd. nil means disabled.
 	kb *knowledge.Manager
 	// provider is the single fixed provider used when no registry is set
 	// (kept for the runWithProvider/Run entry points and existing tests).
@@ -220,6 +225,30 @@ func (st *state) projectKBName() string {
 		}
 	}
 	return ""
+}
+
+// loadKBProject loads (or creates) the knowledge base manager for the given
+// project from disk (kbBaseDir/<project>/data.json) and stores it in st.kb,
+// replacing whatever project was active before. When the KB is disabled
+// (no embedder/base dir) st.kb is cleared so the `knowledge` tool reports it
+// disabled. Runs on `set_cwd` so the KB always follows the current project.
+func (st *state) loadKBProject(project string) {
+	if st.kbEmbed == nil || st.kbBaseDir == "" {
+		st.kb = nil
+		return
+	}
+	if project == "" {
+		return
+	}
+	m, err := knowledge.Load(st.kbBaseDir, project, st.kbEmbed)
+	if err != nil {
+		logger.Warningf("knowledge: load project %q: %v", project, err)
+		// Fall back to an empty in-memory manager for this project so the
+		// `knowledge` tool still resolves locally instead of erroring.
+		st.kb = knowledge.NewManager(st.kbEmbed, project)
+		return
+	}
+	st.kb = m
 }
 
 // sanitizeHistory strips ephemeral blocks and orphaned tool_calls messages.
@@ -643,6 +672,9 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			return string(protocol.NewError("invalid set_cwd params: " + err.Error())), false
 		}
 		st.cwd = p.Cwd
+		// Rebuild the project knowledge base to follow the new cwd (loads the
+		// project's data.json from disk, or clears the KB when disabled).
+		st.loadKBProject(filepath.Base(p.Cwd))
 		return "", false
 
 	case string(protocol.MethodSetKnowledgeBases):
@@ -865,7 +897,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kb *knowledge.Manager) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder) error {
 
 	if len(providers) > 0 {
 		if defaultName == "" {
@@ -879,14 +911,14 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 	if aggressivePrune {
 		logger.Infof("aggressive prune enabled: collapsing tool-calling turns")
 	}
-	if kb != nil {
-		logger.Infof("knowledge base enabled")
+	if kbEmbed != nil {
+		logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
 	}
 	if prune {
 		logger.Infof("prune enabled: collapsing reasoning and preserving file snapshots")
 	}
 
-	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune, prune: prune, kb: kb}
+	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune, prune: prune, kbBaseDir: kbBaseDir, kbEmbed: kbEmbed}
 
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
@@ -952,9 +984,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name(), "", false, false, nil)
+		return run(r, w, providers, provider.Name(), "", false, false, "", nil)
 	}
-	return run(r, w, nil, "", "", false, false, nil)
+	return run(r, w, nil, "", "", false, false, "", nil)
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -975,7 +1007,7 @@ func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProv
 // and an initial global system prompt.
 func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, false, false, nil)
+	return run(r, w, providers, defaultName, systemPrompt, false, false, "", nil)
 
 }
 
@@ -983,14 +1015,17 @@ func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMP
 // initial global system prompt, and the aggressive-prune option (see state).
 func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, nil)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", nil)
 }
 
-// RunWithKnowledge starts the server loop like RunWithOptions, but also wires a
-// project-scoped knowledge base (kb) into the state so `knowledge` tool calls
-// resolve locally (fire-and-forget) instead of waiting on the client. kb == nil
-// keeps the knowledge base disabled. This is the entry point used by cmd/bridge.
-func RunWithKnowledge(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kb *knowledge.Manager) error {
+// RunWithKnowledgeBase starts the server loop like RunWithOptions, but also
+// wires the project knowledge base: kbBaseDir is where per-project KBs live
+// (kbBaseDir/<project>/data.json) and kbEmbed is the embedder used to load them.
+// A per-project Manager is built lazily on `set_cwd`, so `knowledge` tool calls
+// resolve locally (fire-and-forget) against the current project's KB. kbEmbed
+// nil (or empty base dir) keeps the knowledge base disabled. This is the entry
+// point used by cmd/bridge.
+func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kb)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbEmbed)
 }

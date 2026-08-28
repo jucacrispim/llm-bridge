@@ -5,6 +5,7 @@ package main
 // notest
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -31,7 +32,23 @@ func main() {
 	knowledgeEnabled := flag.Bool("knowledge", true, "enable the project knowledge base (tool 'knowledge'); false disables it")
 	knowledgeBase := flag.String("knowledge-base", "", "base directory for the project knowledge bases (default ~/.local/share/llm-bridge/knowledge_bases)")
 	prune := flag.Bool("prune", false, "collapse reasoning and tool results, preserving file states (read/write/replace) as user snapshots. Off by default.")
+	populateKB := flag.String("populate-project-kb", "", "populate the knowledge base for -project from a seed directory and exit (standalone mode; requires the ONNX embedder). Mutually exclusive with running the server.")
+	projectName := flag.String("project", "", "project name; used with -populate-project-kb as the knowledge base key")
 	flag.Parse()
+
+	// Standalone mode: populate a project's knowledge base from a seed dir and
+	// exit. It does NOT enter the server loop. Uses the ONNX embedder
+	// (make build-kb) to embed every *.md in the seed dir (global + per-project)
+	// and does a FULL rebuild (wipe + re-embed), so edits to the seed are
+	// reflected. The seed stays decoupled from the binary — it is only read at
+	// populate time.
+	if *populateKB != "" {
+		if err := populateProjectKB(*populateKB, *projectName, *knowledgeBase); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	if *aggressivePrune && *prune {
 		fmt.Fprintf(os.Stderr, "error: -aggressive-prune and -prune are mutually exclusive\n")
@@ -151,9 +168,11 @@ func main() {
 		}
 	}
 
-	// Build the project-scoped knowledge base manager.
+	// Knowledge base wiring. The server builds the per-project Manager lazily
+	// on `set_cwd` (kbBaseDir/<project>/data.json), so here we only resolve the
+	// base dir and the embedder.
 	//
-	// -knowledge=false disables the KB outright (nil embedder → the server
+	// -knowledge=false disables the KB outright (embedder nil → the server
 	// treats it as disabled).
 	//
 	// When enabled, we try the real embedder. If loading it fails (model file
@@ -161,21 +180,19 @@ func main() {
 	// NewEmbedder always returns the "embeddings disabled" error / dlopen
 	// failures at runtime), we log a warning and fall back to the disabled
 	// embedder — the bridge keeps running, just without a KB (no crash).
-	var kb *knowledge.Manager
-	if !*knowledgeEnabled {
-		logger.Infof("knowledge base disabled (flag -knowledge=false)")
-		kb = knowledge.NewManager(nil, "")
-	} else {
-		baseDir := *knowledgeBase
-		if baseDir == "" {
-			baseDir = os.Getenv("KNOWLEDGE_BASE")
+	var kbBaseDir string
+	var kbEmbed knowledge.Embedder
+	if *knowledgeEnabled {
+		kbBaseDir = *knowledgeBase
+		if kbBaseDir == "" {
+			kbBaseDir = os.Getenv("KNOWLEDGE_BASE")
 		}
-		if baseDir == "" {
+		if kbBaseDir == "" {
 			home, err := os.UserHomeDir()
 			if err != nil {
 				home = "~"
 			}
-			baseDir = filepath.Join(home, ".local", "share", "llm-bridge", "knowledge_bases")
+			kbBaseDir = filepath.Join(home, ".local", "share", "llm-bridge", "knowledge_bases")
 		}
 		modelPath := os.Getenv("LLM_BRIDGE_KB_MODEL")
 		if modelPath == "" {
@@ -188,17 +205,74 @@ func main() {
 		embed, err := knowledge.NewEmbedder(modelPath, tokenizerPath)
 		if err != nil {
 			logger.Warningf("knowledge base disabled: failed to load embedder: %v", err)
-			kb = knowledge.NewManager(knowledge.DisabledEmbedder{}, "")
+			kbEmbed = knowledge.DisabledEmbedder{}
 		} else {
-			kb = knowledge.NewManager(embed, "")
+			kbEmbed = embed
 		}
-		logger.Infof("knowledge base enabled (base dir: %s)", baseDir)
+		logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
+	} else {
+		logger.Infof("knowledge base disabled (flag -knowledge=false)")
 	}
 
-	if err := server.RunWithKnowledge(os.Stdin, os.Stdout, providers, *providerName,
-		systemPrompt, *aggressivePrune, *prune, kb); err != nil {
+	if err := server.RunWithKnowledgeBase(os.Stdin, os.Stdout, providers, *providerName,
+		systemPrompt, *aggressivePrune, *prune, kbBaseDir, kbEmbed); err != nil {
 		os.Exit(1)
 	}
+}
+
+// populateProjectKB implements the standalone -populate-project-kb mode: it
+// fully rebuilds the given project's knowledge base from a seed directory and
+// persists it, then returns (the caller exits). The seed dir layout follows
+// EnsureSeeded: <seedDir>/*.md (global) plus <seedDir>/<project>/*.md
+// (per-project). The rebuild is total — existing data.json for the project is
+// wiped and re-embedded from the seed, so edits to the seed are reflected.
+// Requires the ONNX embedder (knowledge_onnx build tag); a failure to load it
+// is fatal here.
+func populateProjectKB(seedDir, project, knowledgeBaseFlag string) error {
+	if project == "" {
+		return errors.New("-populate-project-kb requires -project")
+	}
+	if seedDir == "" {
+		return errors.New("-populate-project-kb requires a seed directory")
+	}
+
+	baseDir := knowledgeBaseFlag
+	if baseDir == "" {
+		baseDir = os.Getenv("KNOWLEDGE_BASE")
+	}
+	if baseDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "~"
+		}
+		baseDir = filepath.Join(home, ".local", "share", "llm-bridge", "knowledge_bases")
+	}
+	modelPath := os.Getenv("LLM_BRIDGE_KB_MODEL")
+	if modelPath == "" {
+		modelPath = filepath.Join(mustCacheDir(), "model.onnx")
+	}
+	tokenizerPath := os.Getenv("LLM_BRIDGE_KB_TOKENIZER")
+	if tokenizerPath == "" {
+		tokenizerPath = filepath.Join(mustCacheDir(), "tokenizer.json")
+	}
+
+	embed, err := knowledge.NewEmbedder(modelPath, tokenizerPath)
+	if err != nil {
+		return fmt.Errorf("load embedder (build with `make build-kb` and run fetch_kb.sh?): %w", err)
+	}
+	m, err := knowledge.Load(baseDir, project, embed)
+	if err != nil {
+		return fmt.Errorf("load project kb: %w", err)
+	}
+	m.SetSeedRoot(seedDir)
+	// Reset wipes the project's data.json and re-embeds from the seed (total
+	// reconstruction, reflecting any seed edits).
+	if err := m.Reset(); err != nil {
+		return fmt.Errorf("rebuild kb from seed: %w", err)
+	}
+	fmt.Printf("populated knowledge base for project %q in %s (%d items)\n",
+		project, filepath.Join(baseDir, project), m.Len())
+	return nil
 }
 
 // mustCacheDir returns the llm-bridge cache dir (~/.cache/llm-bridge),

@@ -20,6 +20,14 @@ import (
 //
 // The E5 `query: `/`passage: ` prefixes are applied by the Manager/callers
 // (see Embedder interface), so Embed just tokenizes the text it is given.
+//
+// maxSeqLen caps the token sequence length before it reaches the model. E5
+// models use max_position_embeddings=512, and feeding a longer sequence makes
+// the runtime fail broadcasting the position embeddings onto the input. A
+// document longer than this is truncated (the head is embedded); note the E5
+// prefix counts toward the limit.
+const maxSeqLen = 512
+
 type onnxEmbedder struct {
 	tok      *tokenizers.Tokenizer
 	session  *ort.DynamicAdvancedSession
@@ -121,6 +129,13 @@ func (o *onnxEmbedder) Embed(text string, isQuery bool) ([]float32, error) {
 	seq := len(ids)
 	if seq == 0 {
 		return nil, errors.New("knowledge: empty tokenization")
+	}
+	// Truncate to the model's max sequence length. E5 cannot broadcast the
+	// position embeddings beyond 512, so a longer document is embedded from its
+	// head. Keeps the tensors/meanPool below on the truncated seq.
+	if seq > maxSeqLen {
+		ids = ids[:maxSeqLen]
+		seq = maxSeqLen
 	}
 
 	// Build int64 input tensors. input_ids/attention_mask use the token ids /

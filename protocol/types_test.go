@@ -108,3 +108,19 @@ func TestNewThinking(t *testing.T) {
 		t.Errorf("NewThinking() = %s, want %s", got, want)
 	}
 }
+
+func TestNewFilesChanged(t *testing.T) {
+	got := string(NewFilesChanged([]string{"a.txt", "b.go"}))
+	want := `{"event":"files_changed","files":["a.txt","b.go"]}`
+	if got != want {
+		t.Errorf("NewFilesChanged() = %s, want %s", got, want)
+	}
+}
+
+func TestNewFilesChangedEmpty(t *testing.T) {
+	got := string(NewFilesChanged(nil))
+	want := `{"event":"files_changed","files":null}`
+	if got != want {
+		t.Errorf("NewFilesChanged(nil) = %s, want %s", got, want)
+	}
+}

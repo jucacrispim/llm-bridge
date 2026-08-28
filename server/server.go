@@ -100,6 +100,11 @@ type state struct {
 
 	turnPromptTokens     int
 	turnCompletionTokens int
+	// turnFilesChanged collects the paths written or modified during the
+	// current turn (via write and search_replace tools), reported to the
+	// client as a files_changed event at the end of the turn. Reset at the
+	// start of each prompt.
+	turnFilesChanged []string
 
 	// cancelMut guards the `cancel` field. It is read/written concurrently by
 	// the reader goroutine (which handles `cancel` immediately) and by
@@ -275,6 +280,35 @@ func (st *state) historyLen() int {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
 	return len(st.history)
+}
+
+// recordFileChanged adds path to the current turn's files_changed list if it is
+// not already present (dedup). Only called for write/search_replace tools.
+func (st *state) recordFileChanged(path string) {
+	if path == "" {
+		return
+	}
+	for _, p := range st.turnFilesChanged {
+		if p == path {
+			return
+		}
+	}
+	st.turnFilesChanged = append(st.turnFilesChanged, path)
+}
+
+// filePathFromArgs returns the "path" argument of a tool call's JSON arguments,
+// or "" when absent/unparseable.
+func filePathFromArgs(args string) string {
+	if args == "" {
+		return ""
+	}
+	var a struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(args), &a); err != nil {
+		return ""
+	}
+	return a.Path
 }
 
 // collapseTurn compresses a completed tool-calling turn into just the user
@@ -660,6 +694,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		}
 		st.turnPromptTokens = 0
 		st.turnCompletionTokens = 0
+		st.turnFilesChanged = nil
 		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
 		st.appendUser(p.Text)
 		return runToolCycle(st, w)
@@ -818,6 +853,12 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			if err == nil {
 				_ = st.write(w, string(evt)+"\n")
 			}
+			// Track files written/modified this turn so the client is notified
+			// via a files_changed event when the turn ends.
+			switch tc.Name {
+			case "write", "search_replace":
+				st.recordFileChanged(filePathFromArgs(tc.Arguments))
+			}
 		}
 
 		if len(resp.ToolCalls) > 0 {
@@ -835,6 +876,14 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
 				model, st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens)
 			_ = st.write(w, string(newEnd)+"\n")
+			// Report the files modified during this turn (write/search_replace)
+			// so the client can refresh them. Sorted for deterministic output.
+			if len(st.turnFilesChanged) > 0 {
+				files := make([]string, len(st.turnFilesChanged))
+				copy(files, st.turnFilesChanged)
+				sort.Strings(files)
+				_ = st.write(w, string(protocol.NewFilesChanged(files))+"\n")
+			}
 
 			newUsage := protocol.NewUsageDelta(st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens)
 			_ = st.write(w, string(newUsage)+"\n")

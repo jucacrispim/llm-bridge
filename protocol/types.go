@@ -65,6 +65,14 @@ type UsageDelta struct {
 	TotalTokens  int   `json:"total_tokens"`
 }
 
+// FilesChanged reports the paths that were written or modified during the
+// just-completed turn (via the write and search_replace tools). Reads are not
+// included. The client can use it to refresh buffers/status for those files.
+type FilesChanged struct {
+	Event Event    `json:"event"`
+	Files []string `json:"files"`
+}
+
 func NewReady() []byte {
 	evt := Ready{Event: EventReady}
 	b, _ := json.Marshal(evt)
@@ -114,6 +122,14 @@ func NewCancelled() []byte {
 
 func NewUsageDelta(inputTokens, outputTokens, totalTokens int) []byte {
 	evt := UsageDelta{Event: EventUsageDelta, InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens}
+	b, _ := json.Marshal(evt)
+	return b
+}
+
+// NewFilesChanged serializes a files_changed event for the given modified file
+// paths. An empty list is allowed (the client can just ignore the event).
+func NewFilesChanged(files []string) []byte {
+	evt := FilesChanged{Event: EventFilesChanged, Files: files}
 	b, _ := json.Marshal(evt)
 	return b
 }

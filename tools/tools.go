@@ -11,8 +11,8 @@ func All() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        "read",
-			Description: "Read a file from disk",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`),
+			Description: "Read a file from disk. Optional 'offset' (0-based line index to start at) and 'limit' (max number of lines to return) select a slice of the file by lines; without them the whole file is returned.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}`),
 		},
 		{
 			Name:        "write",

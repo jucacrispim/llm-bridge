@@ -205,11 +205,12 @@ func main() {
 		embed, err := knowledge.NewEmbedder(modelPath, tokenizerPath)
 		if err != nil {
 			logger.Warningf("knowledge base disabled: failed to load embedder: %v", err)
+			logger.Infof("knowledge base disabled (base dir: %s)", kbBaseDir)
 			kbEmbed = knowledge.DisabledEmbedder{}
 		} else {
 			kbEmbed = embed
+			logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
 		}
-		logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
 	} else {
 		logger.Infof("knowledge base disabled (flag -knowledge=false)")
 	}

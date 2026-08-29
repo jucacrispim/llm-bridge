@@ -31,6 +31,9 @@ setupenv:
 docs:
 	$(SCRIPTS_DIR)/env.sh build-docs
 
+.PHONY: doc # - Build documentation (alias for docs)
+doc: docs
+
 .PHONY: coverage # - Run all tests and check coverage
 coverage:
 	$(SCRIPTS_DIR)/check_coverage.sh

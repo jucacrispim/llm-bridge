@@ -661,12 +661,23 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		// client as a single hook_action event. Hooks do not touch the
 		// conversation history nor the LLM.
 		if text := strings.TrimSpace(p.Text); strings.HasPrefix(text, "#") {
+			// Hooks run asynchronously in their own goroutine so a slow script
+			// (e.g. a build) does not block the main server loop: other commands
+			// (prompts, tool results, cancel) keep being processed while the hook
+			// executes. The hook_action event is written through st.write, which
+			// serializes on writeMut, so it cannot interleave with streaming
+			// events from the main loop. Hooks are not cancelable: a script once
+			// launched runs to completion (its output is simply written when done).
 			hookName, hookArgs := parseHook(text)
-			out, err := hooks.Run(st.cwd, hookName, hookArgs)
-			if err != nil {
-				return string(protocol.NewHook(hookName, "", err.Error())), false
-			}
-			return string(protocol.NewHook(hookName, out, "")), false
+			go func() {
+				out, err := hooks.Run(st.cwd, hookName, hookArgs)
+				if err != nil {
+					_ = st.write(w, string(protocol.NewHook(hookName, "", err.Error()))+"\n")
+					return
+				}
+				_ = st.write(w, string(protocol.NewHook(hookName, out, ""))+"\n")
+			}()
+			return "", false
 		}
 
 		if st.inToolCycle {

@@ -184,16 +184,24 @@ func TestHandleLineHook(t *testing.T) {
 	st.cwd = dir
 	var w bytes.Buffer
 	line := `{"method":"prompt","params":{"text":"#algo parametro"}}`
-	resp, quit := handleLine(line, st, &w)
+	_, quit := handleLine(line, st, &w)
 	if quit {
 		t.Fatal("hook should not quit")
 	}
-	// The hook result is returned as the response (goes to the client via
-	// st.write in run()), not written to w by handleLine itself.
-	if !strings.Contains(resp, `"event":"hook_action"`) ||
-		!strings.Contains(resp, `"name":"algo"`) ||
-		!strings.Contains(resp, "hook output: parametro") {
-		t.Errorf("hook response mismatch: %q", resp)
+	// Hooks run asynchronously: handleLine returns "" immediately and the
+	// hook_action event is written to w by the hook goroutine when the script
+	// finishes. Wait for it to appear (with a timeout).
+	deadline := time.After(2 * time.Second)
+	for !strings.Contains(w.String(), `"event":"hook_action"`) {
+		select {
+		case <-deadline:
+			t.Fatalf("hook_action never emitted; output=%q", w.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if !strings.Contains(w.String(), `"name":"algo"`) ||
+		!strings.Contains(w.String(), "hook output: parametro") {
+		t.Errorf("hook response mismatch: %q", w.String())
 	}
 	// The hook must not touch the conversation history.
 	if st.historyLen() != 0 {
@@ -206,10 +214,21 @@ func TestHandleLineHookMissing(t *testing.T) {
 	var w bytes.Buffer
 	line := `{"method":"prompt","params":{"text":"#naoexiste"}}`
 	resp, _ := handleLine(line, st, &w)
-	if !strings.Contains(resp, `"event":"hook_action"`) ||
-		!strings.Contains(resp, `"name":"naoexiste"`) ||
-		!strings.Contains(resp, `"error"`) {
-		t.Errorf("missing hook response mismatch: %q", resp)
+	if resp != "" {
+		t.Fatalf("expected empty returned response for async hook, got %q", resp)
+	}
+	// wait for the hook_action error event to be written asynchronously
+	deadline := time.After(2 * time.Second)
+	for !strings.Contains(w.String(), `"event":"hook_action"`) {
+		select {
+		case <-deadline:
+			t.Fatalf("hook_action never emitted; output=%q", w.String())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if !strings.Contains(w.String(), `"name":"naoexiste"`) ||
+		!strings.Contains(w.String(), `"error"`) {
+		t.Errorf("missing hook response mismatch: %q", w.String())
 	}
 }
 

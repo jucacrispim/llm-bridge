@@ -133,3 +133,23 @@ func NewFilesChanged(files []string) []byte {
 	b, _ := json.Marshal(evt)
 	return b
 }
+
+// HookEvent reports the result of running a local hook script (triggered by a
+// message starting with "#"). Output carries the script's combined
+// stdout+stderr on success; Error carries the failure reason when the hook
+// could not be run or exited non-zero. Exactly one of Output/Error is set.
+type HookEvent struct {
+	Event  Event  `json:"event"`
+	Name   string `json:"name"`
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// NewHook serializes a hook_action event for the given hook name. When errMsg
+// is non-empty it is reported in the Error field (Output is omitted);
+// otherwise output carries the script's result.
+func NewHook(name, output, errMsg string) []byte {
+	evt := HookEvent{Event: EventHookAction, Name: name, Output: output, Error: errMsg}
+	b, _ := json.Marshal(evt)
+	return b
+}

@@ -16,6 +16,7 @@ import (
 
 	appcontext "llm-bridge/context"
 	"llm-bridge/history"
+	"llm-bridge/hooks"
 	"llm-bridge/knowledge"
 	"llm-bridge/llm"
 	"llm-bridge/logger"
@@ -294,6 +295,20 @@ func (st *state) recordFileChanged(path string) {
 		}
 	}
 	st.turnFilesChanged = append(st.turnFilesChanged, path)
+}
+
+// parseHook splits a hook message (starting with "#") into the hook name (the
+// first whitespace-delimited token after "#") and the remaining arguments.
+// E.g. "#git status" → name "git", args ["status"]; "#algo" → name "algo",
+// no args. An empty message ("#" alone) yields an empty name (handled by
+// hooks.Run/Lookup).
+func parseHook(text string) (string, []string) {
+	rest := strings.TrimSpace(strings.TrimPrefix(text, "#"))
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return "", nil
+	}
+	return fields[0], fields[1:]
 }
 
 // filePathFromArgs returns the "path" argument of a tool call's JSON arguments,
@@ -636,6 +651,22 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		var p protocol.PromptParams
 		if err := json.Unmarshal(cmd.Params, &p); err != nil {
 			return string(protocol.NewError("invalid prompt params: " + err.Error())), false
+		}
+
+		// Hooks: a message starting with "#" runs a local script instead of
+		// invoking the LLM. The first token after "#" is the hook name
+		// (.llm-bridge/hooks/<name>.sh, project dir first, then general); the
+		// rest of the message is passed as arguments to the script. The script
+		// runs in the project's cwd and its combined output is returned to the
+		// client as a single hook_action event. Hooks do not touch the
+		// conversation history nor the LLM.
+		if text := strings.TrimSpace(p.Text); strings.HasPrefix(text, "#") {
+			hookName, hookArgs := parseHook(text)
+			out, err := hooks.Run(st.cwd, hookName, hookArgs)
+			if err != nil {
+				return string(protocol.NewHook(hookName, "", err.Error())), false
+			}
+			return string(protocol.NewHook(hookName, out, "")), false
 		}
 
 		if st.inToolCycle {

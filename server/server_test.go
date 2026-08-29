@@ -169,6 +169,50 @@ func TestHandleLinePromptNoChunk(t *testing.T) {
 	}
 }
 
+func TestHandleLineHook(t *testing.T) {
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, ".llm-bridge", "hooks")
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(hookDir, "algo.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"hook output: $@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	st := newTestState()
+	st.cwd = dir
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"#algo parametro"}}`
+	resp, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("hook should not quit")
+	}
+	// The hook result is returned as the response (goes to the client via
+	// st.write in run()), not written to w by handleLine itself.
+	if !strings.Contains(resp, `"event":"hook_action"`) ||
+		!strings.Contains(resp, `"name":"algo"`) ||
+		!strings.Contains(resp, "hook output: parametro") {
+		t.Errorf("hook response mismatch: %q", resp)
+	}
+	// The hook must not touch the conversation history.
+	if st.historyLen() != 0 {
+		t.Errorf("hook should not touch history, got %d messages", st.historyLen())
+	}
+}
+
+func TestHandleLineHookMissing(t *testing.T) {
+	st := newTestState()
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"#naoexiste"}}`
+	resp, _ := handleLine(line, st, &w)
+	if !strings.Contains(resp, `"event":"hook_action"`) ||
+		!strings.Contains(resp, `"name":"naoexiste"`) ||
+		!strings.Contains(resp, `"error"`) {
+		t.Errorf("missing hook response mismatch: %q", resp)
+	}
+}
+
 func TestHandleLinePromptToolCall(t *testing.T) {
 	st := &state{provider: &fakeProvider{
 		name: "fake",
@@ -1632,6 +1676,82 @@ func TestAggressivePruneDefaultOff(t *testing.T) {
 	}
 	if len(st.history[1].ToolCalls) != 1 || st.history[2].Role != "tool" {
 		t.Fatalf("interleaved tool history should be preserved without prune, got %+v", st.history)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Helper unit tests (recordFileChanged, parseHook, filePathFromArgs)
+// ---------------------------------------------------------------------------
+
+// TestRecordFileChanged verifies that recordFileChanged ignores an empty path,
+// appends new paths, and dedups (a path already in the current turn's list is
+// not added again).
+func TestRecordFileChanged(t *testing.T) {
+	st := &state{}
+	st.recordFileChanged("")
+	if len(st.turnFilesChanged) != 0 {
+		t.Fatalf("empty path should be ignored, got %v", st.turnFilesChanged)
+	}
+	st.recordFileChanged("/tmp/a.go")
+	st.recordFileChanged("/tmp/b.go")
+	if len(st.turnFilesChanged) != 2 ||
+		st.turnFilesChanged[0] != "/tmp/a.go" ||
+		st.turnFilesChanged[1] != "/tmp/b.go" {
+		t.Fatalf("expected [a.go b.go], got %v", st.turnFilesChanged)
+	}
+	// duplicate is ignored
+	st.recordFileChanged("/tmp/a.go")
+	if len(st.turnFilesChanged) != 2 {
+		t.Fatalf("duplicate path should be deduped, got %v", st.turnFilesChanged)
+	}
+}
+
+// TestParseHook verifies that parseHook splits a hook message (starting with
+// "#") into the hook name and its remaining arguments, and that a bare "#"
+// yields an empty name with no args.
+func TestParseHook(t *testing.T) {
+	cases := []struct {
+		in   string
+		name string
+		args []string
+	}{
+		{"#ls -l", "ls", []string{"-l"}},
+		{"#algo", "algo", nil},
+		{"#", "", nil},
+		{"#ls  -l  --all", "ls", []string{"-l", "--all"}},
+	}
+	for _, tc := range cases {
+		name, args := parseHook(tc.in)
+		if name != tc.name {
+			t.Errorf("parseHook(%q) name = %q, want %q", tc.in, name, tc.name)
+		}
+		if len(args) != len(tc.args) {
+			t.Errorf("parseHook(%q) args = %v, want %v", tc.in, args, tc.args)
+			continue
+		}
+		for i := range args {
+			if args[i] != tc.args[i] {
+				t.Errorf("parseHook(%q) args[%d] = %q, want %q", tc.in, i, args[i], tc.args[i])
+			}
+		}
+	}
+}
+
+// TestFilePathFromArgs verifies that filePathFromArgs extracts the "path"
+// argument of a tool call's JSON arguments, and returns "" for an empty string,
+// unparseable JSON, or JSON without a path field.
+func TestFilePathFromArgs(t *testing.T) {
+	if got := filePathFromArgs(`{"path":"/tmp/x"}`); got != "/tmp/x" {
+		t.Errorf("filePathFromArgs(valid) = %q, want /tmp/x", got)
+	}
+	if got := filePathFromArgs(""); got != "" {
+		t.Errorf("filePathFromArgs(empty) = %q, want empty", got)
+	}
+	if got := filePathFromArgs("not json"); got != "" {
+		t.Errorf("filePathFromArgs(invalid) = %q, want empty", got)
+	}
+	if got := filePathFromArgs(`{"other":1}`); got != "" {
+		t.Errorf("filePathFromArgs(no path) = %q, want empty", got)
 	}
 }
 

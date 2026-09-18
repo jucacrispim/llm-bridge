@@ -283,6 +283,17 @@ func (st *state) historyLen() int {
 	return len(st.history)
 }
 
+// hasPendingToolID reports whether the current tool cycle is still waiting on a
+// tool_result for id.
+func (st *state) hasPendingToolID(id string) bool {
+	for _, pid := range st.pendingToolIDs {
+		if pid == id {
+			return true
+		}
+	}
+	return false
+}
+
 // recordFileChanged adds path to the current turn's files_changed list if it is
 // not already present (dedup). Only called for write/search_replace tools.
 func (st *state) recordFileChanged(path string) {
@@ -781,6 +792,15 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		if err := json.Unmarshal(cmd.Params, &p); err != nil {
 			return string(protocol.NewError("invalid tool_result params: " + err.Error())), false
 		}
+		// Only accept a result for a tool call this turn is actually waiting on.
+		// A tool_result whose id is not pending — e.g. a late result from a
+		// command the client kept running after the turn was cancelled, or a
+		// stale result racing into a newer turn's tool cycle — must be ignored:
+		// appending it would leave an orphaned "tool" message with no matching
+		// assistant tool_call, which the provider rejects on the next request
+		if !st.hasPendingToolID(p.ID) {
+			return "", false
+		}
 		if _, ok := st.pendingToolResults[p.ID]; ok {
 			return string(protocol.NewError("duplicate tool_result for id " + p.ID)), false
 		}
@@ -822,6 +842,11 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		// in the history below instead of being lost.
 		var partialContent strings.Builder
 		var partialReasoning strings.Builder
+		// Never send an orphaned assistant tool_calls  message to the provider.
+		// A cancelled turn can leave one in the history without its tool
+		// results, and the provider rejects that with HTTP 400. Sanitizing
+		// right before the snapshot guarantees the request is always valid.
+		st.sanitizeHistory()
 		resp, err := st.activeProvider().Chat(ctx, llm.ChatRequest{
 			Messages:        st.historySnapshot(),
 			Tools:           tools.All(),
@@ -859,6 +884,31 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			}
 			logger.Errorf("provider error: %v", err)
 			return string(protocol.NewError(err.Error())), false
+		}
+		// The turn may have been cancelled while Chat was finishing (the reader
+		// goroutine handles `cancel` concurrently and may have already reset the
+		// turn state and sanitized the history). If so, do NOT commit the
+		// response as-is: an assistant message with tool_calls that will never
+		// receive its tool results is exactly the orphan the provider rejects.
+		// Persist only the produced content (never the tool_calls) and
+		// re-sanitize so nothing half-finished lingers in the history.
+		if st.isCancelled() {
+			cancel()
+			if resp != nil {
+				content := resp.Content
+				if content == "" {
+					content = partialContent.String()
+				}
+				reasoning := resp.Reasoning
+				if reasoning == "" {
+					reasoning = partialReasoning.String()
+				}
+				if content != "" || reasoning != "" {
+					st.appendAssistant(&llm.ChatResponse{Content: content, Reasoning: reasoning})
+				}
+			}
+			st.sanitizeHistory()
+			return "", false
 		}
 		cancel()
 

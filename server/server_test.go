@@ -2483,3 +2483,141 @@ func TestPruneDefaultOff(t *testing.T) {
 		t.Fatalf("interleaved tool history should be preserved without prune, got %+v", st.history)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Late / orphaned tool_result hardening (cancel race)
+// ---------------------------------------------------------------------------
+
+// TestHandleLineToolResultUnknownIDIgnored verifies that a tool_result whose id
+// is NOT among the pending tool calls is silently ignored instead of being
+// appended. A late result (e.g. from a command the client kept running after a
+// cancel) that lands while a newer turn is in its tool cycle would otherwise
+// create an orphaned "tool" message the provider rejects.
+func TestHandleLineToolResultUnknownIDIgnored(t *testing.T) {
+	st := &state{
+		inToolCycle:        true,
+		pendingToolIDs:     []string{"call_1"},
+		pendingToolResults: map[string]json.RawMessage{},
+	}
+	var w bytes.Buffer
+	resp, quit := handleLine(`{"method":"tool_result","params":{"id":"call_2","result":"late"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_result should not quit")
+	}
+	if resp != "" {
+		t.Fatalf("unknown-id tool_result should be ignored, got %q", resp)
+	}
+	if w.Len() != 0 {
+		t.Fatalf("expected no output for ignored tool_result, got %q", w.String())
+	}
+	if len(st.history) != 0 {
+		t.Fatalf("unknown-id tool_result must not be appended, got %+v", st.history)
+	}
+	if !st.inToolCycle || !st.hasPendingToolID("call_1") {
+		t.Fatal("still awaiting the real pending tool call")
+	}
+}
+
+// cancelRaceProvider blocks in Chat until `proceed` is closed, then returns a
+// successful response carrying tool_calls — simulating a stream that completes
+// at the very moment the user cancels.
+type cancelRaceProvider struct {
+	started chan struct{}
+	proceed chan struct{}
+	once    sync.Once
+}
+
+func (p *cancelRaceProvider) Chat(_ context.Context, _ llm.ChatRequest, onChunk func(string)) (*llm.ChatResponse, error) {
+	p.once.Do(func() { close(p.started) })
+	<-p.proceed
+	if onChunk != nil {
+		onChunk("partial answer")
+	}
+	return &llm.ChatResponse{
+		Content:    "full answer",
+		StopReason: "tool_calls",
+		Usage:      &llm.Usage{},
+		ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+	}, nil
+}
+
+func (p *cancelRaceProvider) Name() string  { return "race" }
+func (p *cancelRaceProvider) Model() string { return "race" }
+
+// TestCancelRaceDuringChatStripsToolCalls verifies the fix for the race where a
+// cancel arrives while Chat is finishing: the response must NOT be committed as
+// an assistant tool_calls message (which would be an orphan the provider
+// rejects), even though Chat returned successfully after the cancel.
+func TestCancelRaceDuringChatStripsToolCalls(t *testing.T) {
+	provider := &cancelRaceProvider{started: make(chan struct{}), proceed: make(chan struct{})}
+	st := &state{provider: provider}
+	var w bytes.Buffer
+
+	promptDone := make(chan struct{})
+	go func() {
+		defer close(promptDone)
+		if _, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w); quit {
+			t.Error("prompt should not quit")
+		}
+	}()
+
+	// wait until the provider's Chat has started (and is blocked)
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt never started Chat")
+	}
+
+	// cancel while Chat is still running, then let it return successfully
+	resp, quit := handleLine(`{"method":"cancel"}`, st, &w)
+	if quit {
+		t.Fatal("cancel should not quit")
+	}
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+	close(provider.proceed)
+
+	select {
+	case <-promptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt handleLine never returned after cancel")
+	}
+
+	if st.inToolCycle {
+		t.Fatal("cancelled turn must not be left in a tool cycle")
+	}
+	for _, m := range st.history {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("cancelled turn left orphaned tool_calls in history: %+v", m)
+		}
+	}
+}
+
+// TestRunToolCycleSanitizesOrphanBeforeSend verifies the belt-and-suspenders
+// guard in runToolCycle: an orphaned assistant tool_calls message already sitting
+// in the history is stripped right before the request is snapshotted, so it can
+// never reach the provider.
+func TestRunToolCycleSanitizesOrphanBeforeSend(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	// simulate the residue the race could leave behind: an assistant tool_calls
+	// message with no corresponding tool result.
+	st.history = []llm.Message{
+		{Role: llm.RoleUser, Content: "earlier"},
+		{Role: llm.RoleAssistant, Content: "", ToolCalls: []llm.ToolCall{{ID: "orphan", Name: "read", Arguments: `{}`}}},
+	}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	for _, m := range fp.lastReq.Messages {
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("orphaned tool_calls must be sanitized before sending, got %+v", m)
+		}
+	}
+}

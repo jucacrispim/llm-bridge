@@ -27,6 +27,10 @@ test:
 setupenv:
 	$(SCRIPTS_DIR)/env.sh setup-env
 
+.PHONY: setupdocsenv # - Install needed tools for docs
+setupdocsenv:
+	$(SCRIPTS_DIR)/env.sh setup-docs-env
+
 .PHONY: docs # - Build documentation
 docs:
 	$(SCRIPTS_DIR)/env.sh build-docs

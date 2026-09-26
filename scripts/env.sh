@@ -21,7 +21,7 @@ if [ ! -d "$DOCS_VENV_DIR" ]
     fi
     source $DOCS_VENV_DIR/bin/activate
     echo "installing sphinx"
-    pip install sphinx sphinx-pdj-theme
+    pip install sphinx sphinx-pdj-theme --extra-index-url=https://pypi.poraodojuca.dev
 }
 
 build_docs(){
@@ -35,8 +35,11 @@ build_docs(){
 case "$1" in
     "setup-env")
         setup_env
-        setup_docs_env
         ;;
+
+    "setup-docs-env")
+	setup_docs_env
+	;;
 
     "build-docs")
         build_docs
@@ -47,6 +50,7 @@ case "$1" in
         echo "Usage: env.sh OP"
         echo "OPs are:"
         echo " - setup-env"
+        echo " - setup-docs-env"
         echo " - build-docs"
         exit 1;
 

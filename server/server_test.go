@@ -818,6 +818,86 @@ func TestHandleLinePromptContextCanceled(t *testing.T) {
 	}
 }
 
+// cancelRacePartialProvider blocks in Chat until `proceed` is closed, streams a
+// partial chunk and then returns a response whose Content is EMPTY — simulating
+// a cancel that lands exactly as the stream finishes and the provider reports
+// the content only through the streaming callback (no final content). This
+// forces the server to fall back to the streamed partial content when the turn
+// was cancelled.
+type cancelRacePartialProvider struct {
+	started chan struct{}
+	proceed chan struct{}
+	once    sync.Once
+}
+
+func (p *cancelRacePartialProvider) Chat(_ context.Context, _ llm.ChatRequest, onChunk func(string)) (*llm.ChatResponse, error) {
+	p.once.Do(func() { close(p.started) })
+	<-p.proceed
+	if onChunk != nil {
+		onChunk("partial answer")
+	}
+	return &llm.ChatResponse{StopReason: "END_TURN", Usage: &llm.Usage{}}, nil
+}
+
+func (p *cancelRacePartialProvider) Name() string  { return "race-partial" }
+func (p *cancelRacePartialProvider) Model() string { return "race-partial" }
+
+// TestCancelRaceDuringChatKeepsPartialContent verifies the fallback branch of the
+// cancel-race handling: when the turn was cancelled and the final response has
+// no content of its own, the streamed partial content is persisted as the
+// assistant message (so the cancelled turn keeps its context), and no
+// tool_calls survive in the history.
+func TestCancelRaceDuringChatKeepsPartialContent(t *testing.T) {
+	provider := &cancelRacePartialProvider{started: make(chan struct{}), proceed: make(chan struct{})}
+	st := &state{provider: provider}
+	var w bytes.Buffer
+
+	promptDone := make(chan struct{})
+	go func() {
+		defer close(promptDone)
+		if _, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w); quit {
+			t.Error("prompt should not quit")
+		}
+	}()
+
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt never started Chat")
+	}
+
+	resp, quit := handleLine(`{"method":"cancel"}`, st, &w)
+	if quit {
+		t.Fatal("cancel should not quit")
+	}
+	if resp != `{"event":"cancelled"}` {
+		t.Fatalf("expected cancelled, got %q", resp)
+	}
+	close(provider.proceed)
+
+	select {
+	case <-promptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt handleLine never returned after cancel")
+	}
+
+	if st.inToolCycle {
+		t.Fatal("cancelled turn must not be left in a tool cycle")
+	}
+	var found bool
+	for _, m := range st.history {
+		if m.Role == llm.RoleAssistant && m.Content == "partial answer" {
+			found = true
+		}
+		if len(m.ToolCalls) > 0 {
+			t.Fatalf("cancelled turn left orphaned tool_calls in history: %+v", m)
+		}
+	}
+	if !found {
+		t.Fatalf("expected the streamed partial content to be persisted, got %+v", st.history)
+	}
+}
+
 // FASE 3 — integration tests for context injection
 
 func TestFirstPromptInjectsContextInOrder(t *testing.T) {

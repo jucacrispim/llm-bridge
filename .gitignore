@@ -42,3 +42,4 @@ docs/source/apidoc/
 /coverage.html
 /coverage.out
 .aider*
+/.llm-bridge/

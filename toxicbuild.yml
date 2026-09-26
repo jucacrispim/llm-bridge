@@ -1,0 +1,53 @@
+
+builders:
+
+  - name: Build & Test
+
+    platform: go1.22
+
+    envvars:
+      PATH: "$PATH:$HOME/go/bin"
+      ENV: ci
+
+    steps:
+      - name: Setup env
+        command: make setupenv
+
+      - name: Build
+        command: make build
+
+      - name: Test & coverage
+        command: make coverage
+
+
+
+  - name: Docs
+    branches:
+      - master
+
+    triggered_by:
+      - builder_name: Build & Test
+        statuses:
+          - success
+
+    plugins:
+      - name: apt-install
+        packages:
+          - python3
+          - python3-venv
+          - python3-pip
+          - curl
+
+    envvars:
+      ENV: ci
+
+    steps:
+
+      - name: Setup env
+        command: make setupdocsenv
+
+      - name: Build docs
+        command: make docs
+
+      - name: upload docs
+        command: ./scripts/upload_docs.sh

@@ -1080,7 +1080,7 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 		// line. The default bufio.Scanner limit is 64KB per line; beyond that it
 		// returns ErrTooLong and the whole bridge exits with status 1. Raise the
 		// limit so a large tool result no longer kills the process.
-		scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // até 8MB por linha
+		scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // up to 8MB per line
 		for scanner.Scan() {
 			line := scanner.Text()
 			logger.Debugf("received: %s", line)

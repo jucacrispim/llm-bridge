@@ -1393,10 +1393,10 @@ func TestHandleLinePromptEmitsThinkingEvent(t *testing.T) {
 	}
 }
 
-// TestHandleLinePromptEmitsThinkingFallback cobre o branch do runToolCycle em que
-// o provedor retorna resp.Reasoning sem streameá-lo (OnReasoning nunca é chamado,
-// via fakeProvider.skipReasoning). Nesse caso o servidor emite um único evento
-// thinking como fallback e ainda persiste o reasoning no histórico.
+// TestHandleLinePromptEmitsThinkingFallback covers the runToolCycle branch where
+// the provider returns resp.Reasoning without streaming it (OnReasoning is never
+// called, via fakeProvider.skipReasoning). In that case the server emits a single
+// thinking event as a fallback and still persists the reasoning in the history.
 func TestHandleLinePromptEmitsThinkingFallback(t *testing.T) {
 	fp := &fakeProvider{
 		name:          "fake",

@@ -217,10 +217,19 @@ type ThinkingOptions struct {
 	Type string `json:"type"`
 }
 
+// streamOptions controls the streaming extras. include_usage makes DeepSeek
+// emit a final chunk carrying the `usage` object (prompt/completion tokens and
+// the prompt_cache_hit_tokens/prompt_cache_miss_tokens accounting). Without it
+// the streamed response has no usage at all.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type openAIRequest struct {
 	Model           string           `json:"model"`
 	Messages        []openAIMessage  `json:"messages"`
 	Stream          bool             `json:"stream"`
+	StreamOptions   *streamOptions   `json:"stream_options,omitempty"`
 	Tools           []openAITool     `json:"tools,omitempty"`
 	Thinking        *ThinkingOptions `json:"thinking,omitempty"`
 	ReasoningEffort *string          `json:"reasoning_effort,omitempty"`
@@ -326,10 +335,11 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 	model := p.resolveModel(req)
 
 	payload := openAIRequest{
-		Model:    model,
-		Messages: msgs,
-		Stream:   true,
-		Tools:    toolsPayload,
+		Model:         model,
+		Messages:      msgs,
+		Stream:        true,
+		StreamOptions: &streamOptions{IncludeUsage: true},
+		Tools:         toolsPayload,
 	}
 	// Thinking mode is sent explicitly via the structured `thinking` parameter
 	// (accepted by v3 and v4 models):

@@ -171,6 +171,41 @@ func TestGoogleChatRequestPayload(t *testing.T) {
 	}
 }
 
+func TestGoogleChatUsageCacheAccounting(t *testing.T) {
+	cases := []struct {
+		name     string
+		prompt   int
+		cached   int
+		wantHit  int
+		wantMiss int
+	}{
+		{"partial", 100, 80, 80, 20},
+		{"full", 100, 100, 100, 0},
+		{"none", 100, 0, 0, 100},
+		// Defensive: a cached count larger than the prompt is clamped.
+		{"clamped", 100, 120, 120, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := googleTestServer(t, []string{
+				fmt.Sprintf(`data: {"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":%d,"candidatesTokenCount":3,"totalTokenCount":%d,"cachedContentTokenCount":%d}}`,
+					tc.prompt, tc.prompt+3, tc.cached),
+				`data: [DONE]`,
+			})
+			p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
+			resp, err := p.Chat(context.Background(), ChatRequest{
+				Messages: []Message{{Role: RoleUser, Content: "hi"}},
+			}, nil)
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			if resp.Usage == nil || resp.Usage.CacheHitTokens != tc.wantHit || resp.Usage.CacheMissTokens != tc.wantMiss {
+				t.Fatalf("Usage = %+v, want hit=%d miss=%d", resp.Usage, tc.wantHit, tc.wantMiss)
+			}
+		})
+	}
+}
+
 func TestGoogleChatSystemPromptInInstruction(t *testing.T) {
 	srv, lastBody := googleTestServer(t, []string{`data: [DONE]`})
 	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")

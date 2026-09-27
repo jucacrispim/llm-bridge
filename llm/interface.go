@@ -59,6 +59,12 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CacheHitTokens/CacheMissTokens expose the provider's prompt cache
+	// accounting so the bridge can measure cache hit/miss per request.
+	// DeepSeek fills them from prompt_cache_hit_tokens/prompt_cache_miss_tokens;
+	// Google derives them from cachedContentTokenCount (see llm/google.go).
+	CacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+	CacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
 }
 
 type ToolCall struct {

@@ -101,6 +101,11 @@ type state struct {
 
 	turnPromptTokens     int
 	turnCompletionTokens int
+	// turnCacheHitTokens/turnCacheMissTokens sum the provider's prompt cache
+	// accounting over every call in the current turn, surfaced to the client
+	// in the turn_end event. Reset at the start of each prompt.
+	turnCacheHitTokens  int
+	turnCacheMissTokens int
 	// turnFilesChanged collects the paths written or modified during the
 	// current turn (via write and search_replace tools), reported to the
 	// client as a files_changed event at the end of the turn. Reset at the
@@ -747,6 +752,8 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		}
 		st.turnPromptTokens = 0
 		st.turnCompletionTokens = 0
+		st.turnCacheHitTokens = 0
+		st.turnCacheMissTokens = 0
 		st.turnFilesChanged = nil
 		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
 		st.appendUser(p.Text)
@@ -920,10 +927,33 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		}
 		st.turnPromptTokens += inputTokens
 		st.turnCompletionTokens += outputTokens
+		if resp.Usage != nil {
+			st.turnCacheHitTokens += resp.Usage.CacheHitTokens
+			st.turnCacheMissTokens += resp.Usage.CacheMissTokens
+		}
 		totalTokensThisCall := inputTokens + outputTokens
 		st.totalTokens += totalTokensThisCall
 		st.totalPromptTokens += inputTokens
 		st.totalCompletionTokens += outputTokens
+
+		// Per-request cache accounting, parsed from the provider's usage
+		// (DeepSeek prompt_cache_hit/miss_tokens, Google cachedContentTokenCount).
+		// Emitted as a single parseable line; only visible with -logfile/-debug
+		// (trace level), so it never pollutes the protocol stream.
+		if resp.Usage != nil {
+			hit := resp.Usage.CacheHitTokens
+			miss := resp.Usage.CacheMissTokens
+			hitPct := 0.0
+			if hit+miss > 0 {
+				hitPct = float64(hit) * 100 / float64(hit+miss)
+			}
+			model := resp.Model
+			if model == "" {
+				model = st.activeProvider().Model()
+			}
+			logger.Tracef("usage provider=%s model=%s prompt=%d hit=%d miss=%d out=%d hit_pct=%.1f",
+				st.activeProvider().Name(), model, inputTokens, hit, miss, outputTokens, hitPct)
+		}
 
 		if !emittedChunk && resp.Content != "" {
 			_ = st.write(w, string(protocol.NewChunk(resp.Content))+"\n")
@@ -966,7 +996,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			}
 			turnTotalTokens := st.turnPromptTokens + st.turnCompletionTokens
 			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
-				model, st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens)
+				model, st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens,
+				st.turnCacheHitTokens, st.turnCacheMissTokens)
 			_ = st.write(w, string(newEnd)+"\n")
 			// Report the files modified during this turn (write/search_replace)
 			// so the client can refresh them. Sorted for deterministic output.

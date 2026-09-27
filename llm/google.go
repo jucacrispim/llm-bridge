@@ -229,9 +229,10 @@ type googleCandidate struct {
 }
 
 type googleUsageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
 }
 
 type googleResponse struct {
@@ -451,10 +452,17 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 		}
 
 		if chunk.UsageMetadata != nil {
+			cached := chunk.UsageMetadata.CachedContentTokenCount
+			miss := chunk.UsageMetadata.PromptTokenCount - cached
+			if miss < 0 {
+				miss = 0
+			}
 			usage = &Usage{
 				PromptTokens:     chunk.UsageMetadata.PromptTokenCount,
 				CompletionTokens: chunk.UsageMetadata.CandidatesTokenCount,
 				TotalTokens:      chunk.UsageMetadata.TotalTokenCount,
+				CacheHitTokens:   cached,
+				CacheMissTokens:  miss,
 			}
 		}
 

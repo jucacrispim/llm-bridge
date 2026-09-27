@@ -47,6 +47,12 @@ type TurnEnd struct {
 	InputTokens  int      `json:"input_tokens"`
 	OutputTokens int      `json:"output_tokens"`
 	TotalTokens  int      `json:"total_tokens"`
+	// CacheHitTokens/CacheMissTokens are the prompt cache accounting for the
+	// whole turn, summed over every provider call made in it (the turn may
+	// include several tool-cycle round trips). Providers without cache
+	// reporting leave them at zero.
+	CacheHitTokens  int `json:"cache_hit_tokens"`
+	CacheMissTokens int `json:"cache_miss_tokens"`
 }
 
 type ErrorEvent struct {
@@ -100,10 +106,11 @@ func NewToolCall(id, name string, input any) ([]byte, error) {
 	return json.Marshal(evt)
 }
 
-func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens int) []byte {
+func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens int) []byte {
 	evt := TurnEnd{Event: EventTurnEnd, StopReason: stopReason,
 		ContextPct: contextPct, Model: model,
-		InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens}
+		InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens,
+		CacheHitTokens: cacheHitTokens, CacheMissTokens: cacheMissTokens}
 	b, _ := json.Marshal(evt)
 	return b
 }

@@ -113,12 +113,40 @@ func TestHandleLinePromptSuccess(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
 	if len(st.history) == 0 {
 		t.Fatal("expected non-empty history after turn")
+	}
+}
+
+func TestHandleLineTurnEndReportsCacheUsage(t *testing.T) {
+	// A tool-calling turn makes two provider calls; the turn_end must report
+	// the cache accounting summed over both.
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*llm.ChatResponse{
+			{
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{PromptTokens: 100, CompletionTokens: 2, CacheHitTokens: 80, CacheMissTokens: 20},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{PromptTokens: 50, CompletionTokens: 3, CacheHitTokens: 40, CacheMissTokens: 10},
+			},
+		},
+	}
+	st := &state{provider: provider}
+	var w bytes.Buffer
+	_, _ = handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	w.Reset()
+	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
+	if got := w.String(); !strings.Contains(got, `"input_tokens":150,"output_tokens":5,"total_tokens":155,"cache_hit_tokens":120,"cache_miss_tokens":30`) {
+		t.Fatalf("turn_end did not report summed cache usage, got %q", got)
 	}
 }
 
@@ -163,7 +191,7 @@ func TestHandleLinePromptNoChunk(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
@@ -607,7 +635,7 @@ func TestRunWithProviderBasic(t *testing.T) {
 	got := out.String()
 	expected := `{"event":"ready"}` + "\n" +
 		`{"event":"chunk","text":"Hi"}` + "\n" +
-		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n" +
+		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" +
 		`{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if got != expected {
 		t.Errorf("runWithProvider output:\n got: %q\nwant: %q", got, expected)

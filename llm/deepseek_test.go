@@ -218,6 +218,35 @@ func TestChatSendsModelAndResolveModel(t *testing.T) {
 	}
 }
 
+func TestChatSendsStreamOptionsAndParsesCacheUsage(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+				"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":3,\"total_tokens\":103,\"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":20}}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewDeepSeekProviderWithThinking("key", server.URL, "deepseek-chat", false)
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// usage only arrives if the stream asks for it explicitly.
+	if !strings.Contains(gotBody, `"stream_options":{"include_usage":true}`) {
+		t.Fatalf("expected stream_options include_usage in request body, got %s", gotBody)
+	}
+	if resp.Usage == nil || resp.Usage.CacheHitTokens != 80 || resp.Usage.CacheMissTokens != 20 {
+		t.Fatalf("unexpected usage: %+v", resp.Usage)
+	}
+}
+
 func TestChatAutoModelSwitchesWithThinking(t *testing.T) {
 	var gotBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

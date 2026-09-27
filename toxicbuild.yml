@@ -36,6 +36,7 @@ builders:
       - name: apt-install
         packages:
           - curl
+          - make
 
     envvars:
       ENV: ci

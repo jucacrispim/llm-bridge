@@ -25,6 +25,8 @@ builders:
     branches:
       - master
 
+    platform: python3.13
+
     triggered_by:
       - builder_name: Build & Test
         statuses:
@@ -33,9 +35,6 @@ builders:
     plugins:
       - name: apt-install
         packages:
-          - python3
-          - python3-venv
-          - python3-pip
           - curl
 
     envvars:

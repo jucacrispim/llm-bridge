@@ -27,12 +27,12 @@ lets the bridge translate that into whichever provider is active.
    :maxdepth: 2
 
    knowledge
+   hooks
 
 .. toctree::
    :maxdepth: 2
 
    providers
-   hooks
 
 .. toctree::
    :maxdepth: 2

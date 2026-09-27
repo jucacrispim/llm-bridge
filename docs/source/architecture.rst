@@ -43,7 +43,7 @@ The bridge is organized into focused packages:
 
 ``hooks``
     Resolves and executes ``#``-prefixed hook scripts (project dir first, then
-    the general ``~/.llm-bridge/hooks/``). See :doc:`hooks`.
+    the general ``~/.llm-bridge/hooks/``). See :doc:`hacking`.
 
 ``knowledge``
     The per-project knowledge base: index, ONNX embedder (``Embedder``,
@@ -170,7 +170,7 @@ LLM. ``handleLine`` parses the hook name/args and launches ``hooks.Run`` in a
 goroutine, returning immediately so the main loop keeps processing. The
 result is written as a single ``hook_action`` event through ``st.write``
 (serialized on ``writeMut``), so it never interleaves with streaming. Hooks do
-not touch the history and are not cancellable. See :doc:`hooks`.
+not touch the history and are not cancellable. See :doc:`hacking`.
 
 Pruning and history management
 ------------------------------

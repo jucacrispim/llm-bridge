@@ -36,7 +36,7 @@ they fit together):
     ``knowledge``.
 
 ``hooks``
-    Resolves and executes ``#``-prefixed hook scripts (see :doc:`hooks`).
+    Resolves and executes ``#``-prefixed hook scripts (see :doc:`hacking`).
 
 ``knowledge``
     The per-project knowledge base: index, embedders, ``Manager`` and seed

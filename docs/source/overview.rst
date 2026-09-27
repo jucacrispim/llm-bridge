@@ -66,6 +66,6 @@ Project-local files (the ``<cwd>`` directory) are therefore directly
 accessible to the model's tools.
 
 The protocol itself is described in :doc:`protocol`, the providers in
-:doc:`providers`, hooks in :doc:`hooks`, the knowledge base in
+:doc:`/hacking/providers`, hooks in :doc:`hooks`, the knowledge base in
 :doc:`knowledge`, context loading in :doc:`context`, and build/run details in
 :doc:`usage`.

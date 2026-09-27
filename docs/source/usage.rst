@@ -174,7 +174,7 @@ The bridge reads these from the environment at runtime.
 * ``LLM_BRIDGE_ONNXRUNTIME_LIB`` — path to ``libonnxruntime.so``, required by the KB build.
 * ``LLM_BRIDGE_KB_DIR`` — cache dir used by ``scripts/fetch_kb.sh`` to download the KB assets (default ``~/.cache/llm-bridge``; script only, not read by the bridge).
 
-See :doc:`providers` for the meaning of each provider variable and
+See :doc:`/hacking/providers` for the meaning of each provider variable and
 :doc:`knowledge` for the KB ones.
 
 Logging

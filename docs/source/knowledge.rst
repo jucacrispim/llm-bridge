@@ -63,4 +63,4 @@ seeding and requires the ONNX embedder. The seed stays decoupled from the
 binary — it is only read at populate time.
 
 Implementation details (the ``knowledge`` package, index, embedders, the
-``Manager`` and persistence) live in :doc:`hacking`.
+``Manager`` and persistence) live in :doc:`/hacking/knowledge-internals`.

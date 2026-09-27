@@ -32,15 +32,8 @@ lets the bridge translate that into whichever provider is active.
 .. toctree::
    :maxdepth: 2
 
-   providers
-
-.. toctree::
-   :maxdepth: 2
-
    overview
-   architecture
-   development
-   hacking
+   hacking/index
 
 Indices and tables
 ------------------

@@ -16,7 +16,7 @@ The active provider is selected at startup with ``--provider``
 (``deepseek`` or ``google``). Because both providers are registered up front,
 a single prompt can switch the active provider (and its model, thinking mode,
 reasoning effort or system prompt) through the per-request overrides described
-in :doc:`protocol` — the override persists across subsequent prompts.
+in :doc:`/protocol` — the override persists across subsequent prompts.
 
 The shared request/response types (``llm/interface.go``) are:
 
@@ -94,7 +94,7 @@ Reasoning content
     - **With ``-prune`` or ``-aggressive-prune``** — the chain-of-thought (and,
       for ``-aggressive-prune``, the intermediate tool calls and tool results
       too) is actually **removed from the stored history** once the turn
-      completes. See :doc:`usage` for the difference between the two modes.
+      completes. See :doc:`/usage` for the difference between the two modes.
 
 Environment variables
     ``DEEPSEEK_API_KEY`` (required), ``DEEPSEEK_URL`` (default

@@ -36,15 +36,16 @@ they fit together):
     ``knowledge``.
 
 ``hooks``
-    Resolves and executes ``#``-prefixed hook scripts (see :doc:`hacking`).
+    Resolves and executes ``#``-prefixed hook scripts (see
+    :doc:`hooks-internals`).
 
 ``knowledge``
     The per-project knowledge base: index, embedders, ``Manager`` and seed
-    handling (see :doc:`hacking`).
+    handling (see :doc:`knowledge-internals`).
 
 ``context``
     Loads the Markdown context files injected on the first turn (see
-    :doc:`hacking`).
+    :doc:`context-internals`).
 
 ``history``
     Helpers to manage the conversation history slice (append/sanitize,
@@ -83,7 +84,7 @@ not return a synchronous response.
 
 When the tool loop writes files via the ``write`` / ``search_replace`` tools,
 the bridge emits a ``files_changed`` event after ``turn_end`` listing the
-modified paths (see :doc:`protocol`). A client (e.g. Emacs) can hook into this
+modified paths (see :doc:`/protocol`). A client (e.g. Emacs) can hook into this
 to trigger automated tests for the changed Go files — e.g. running
 ``go test ./<dir> -v -run '<Test funcs>'`` for the affected package. The
 ``custom-commands.el`` helper in this repo shows one approach.

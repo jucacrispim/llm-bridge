@@ -18,7 +18,7 @@ When it is loaded
 -----------------
 
 The context is loaded on the **first turn** of the conversation (see
-:doc:`architecture`), right before your first prompt, and only once —
+:doc:`/hacking/architecture`), right before your first prompt, and only once —
 afterwards it is just part of the conversation history. No extra event is
 emitted for it; the usual ``ready`` already signals the bridge is up.
 
@@ -32,4 +32,4 @@ The project/general lookup mirrors how :doc:`hooks` scripts are resolved
    model stores and retrieves during the conversation.
 
 Implementation details (the ``context`` package, load order and rendering) live
-in :doc:`hacking`.
+in :doc:`/hacking/context-internals`.

@@ -47,4 +47,4 @@ Behavior
 The wire format of the ``hook_action`` event is described in :doc:`protocol`.
 
 Implementation details (script resolution and execution, and how hooks run
-alongside the main loop) live in :doc:`hacking`.
+alongside the main loop) live in :doc:`/hacking/hooks-internals`.

@@ -2,7 +2,7 @@ Architecture
 ============
 
 This page describes how the bridge is structured, how the main loop works and
-how the pieces fit together. See :doc:`protocol` for the wire format and
+how the pieces fit together. See :doc:`/protocol` for the wire format and
 :doc:`providers` for the LLM providers.
 
 Package layout
@@ -34,7 +34,7 @@ The bridge is organized into focused packages:
     Wire types and helpers. ``InboundCommand`` (the client → bridge messages)
     and the outbound events (``NewChunk``, ``NewThinking``, ``NewToolCall``,
     ``NewTurnEnd``, ``NewError``, ``NewCancelled``, ``NewUsageDelta``,
-    ``NewFilesChanged``, ``NewHook``, ``NewReady``). See :doc:`protocol`.
+    ``NewFilesChanged``, ``NewHook``, ``NewReady``). See :doc:`/protocol`.
 
 ``tools``
     ``tools.All()`` returns the tool definitions the bridge exposes to the
@@ -43,17 +43,17 @@ The bridge is organized into focused packages:
 
 ``hooks``
     Resolves and executes ``#``-prefixed hook scripts (project dir first, then
-    the general ``~/.llm-bridge/hooks/``). See :doc:`hacking`.
+    the general ``~/.llm-bridge/hooks/``). See :doc:`hooks-internals`.
 
 ``knowledge``
     The per-project knowledge base: index, ONNX embedder (``Embedder``,
     ``LazyEmbedder``, ``DisabledEmbedder``), the ``Manager`` and the seed
-    handling. See :doc:`hacking`.
+    handling. See :doc:`knowledge-internals`.
 
 ``context``
     Loads the Markdown context files (``~/.llm-bridge/*.md`` plus
     ``<cwd>/.llm-bridge/*.md``) that are injected on the first turn. See
-    :doc:`hacking`.
+    :doc:`context-internals`.
 
 ``history``
     Helpers to sanitize/manage the conversation history slice.
@@ -170,7 +170,7 @@ LLM. ``handleLine`` parses the hook name/args and launches ``hooks.Run`` in a
 goroutine, returning immediately so the main loop keeps processing. The
 result is written as a single ``hook_action`` event through ``st.write``
 (serialized on ``writeMut``), so it never interleaves with streaming. Hooks do
-not touch the history and are not cancellable. See :doc:`hacking`.
+not touch the history and are not cancellable. See :doc:`hooks-internals`.
 
 Pruning and history management
 ------------------------------
@@ -184,7 +184,7 @@ To save tokens and keep the history prefix byte-stable for provider caching:
   the user prompt + the final answer, dropping intermediate tool calls, tool
   results and chain-of-thought entirely.
 
-Both are mutually exclusive and off by default. See :doc:`usage`.
+Both are mutually exclusive and off by default. See :doc:`/usage`.
 
 Knowledge base
 --------------
@@ -193,4 +193,4 @@ On ``set_cwd``, the server builds the per-project ``knowledge.Manager`` lazily
 from ``kbBaseDir/<project>/data.json`` (clearing it when disabled). The
 ``knowledge`` tool calls are resolved locally inside ``runToolCycle`` so they
 never wait on the client. A one-line note about the project's KB is injected on
-the first turn when the KB is enabled. See :doc:`hacking`.
+the first turn when the KB is enabled. See :doc:`knowledge-internals`.

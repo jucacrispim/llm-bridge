@@ -18,6 +18,7 @@ lets the bridge translate that into whichever provider is active.
 
    usage
    protocol
+   tools
 
 .. toctree::
    :maxdepth: 2

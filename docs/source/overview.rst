@@ -80,7 +80,7 @@ client as a subprocess. There is no network port by default: the client spawns
 Project-local files (the ``<cwd>`` directory) are therefore directly
 accessible to the model's tools.
 
-The protocol itself is described in :doc:`protocol`, the providers in
-:doc:`/hacking/providers`, hooks in :doc:`hooks`, the knowledge base in
-:doc:`knowledge`, context loading in :doc:`context`, and build/run details in
-:doc:`usage`.
+The protocol itself is described in :doc:`protocol`, tool calls in
+:doc:`tools`, the providers in :doc:`/hacking/providers`, hooks in
+:doc:`hooks`, the knowledge base in :doc:`knowledge`, context loading in
+:doc:`context`, and build/run details in :doc:`usage`.

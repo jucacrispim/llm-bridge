@@ -193,7 +193,7 @@ Events (bridge → client)
          "event": "turn_end",
          "stop_reason": "stop",
          "context_pct": 0.42,
-         "model": "deepseek-reasoner",
+         "model": "deepseek-flash",
          "input_tokens": 1024,
          "output_tokens": 512,
          "total_tokens": 1536,

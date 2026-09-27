@@ -83,7 +83,7 @@ directory and exits (see :doc:`knowledge`):
 
 .. code-block:: sh
 
-   $ ./build/llm-bridge -populate-project-kb <seedDir> -project <project>
+   $ ./build/llm-bridge -populate-project-kb ~/.local/share/llm-bridge/seeds -project <project>
 
 CLI flags
 ---------
@@ -97,7 +97,7 @@ CLI flags
     Force a model. When it is the default provider it overrides
     ``DEEPSEEK_MODEL`` / ``GOOGLE_MODEL``. For DeepSeek without any explicit
     model, the model is derived from the thinking mode
-    (``deepseek-reasoner`` / ``deepseek-chat``).
+    (``deepseek-flash`` / ``deepseek-chat``).
 
 ``--thinking[=true|false]``
     Enable/disable thinking mode (default ``true``). When no explicit model is
@@ -161,7 +161,7 @@ The bridge reads these from the environment at runtime.
 
 * ``DEEPSEEK_API_KEY`` — API key (required).
 * ``DEEPSEEK_URL`` — API endpoint (default ``https://api.deepseek.com/chat/completions``).
-* ``DEEPSEEK_MODEL`` — explicit model; when unset, derived from thinking (``deepseek-reasoner`` / ``deepseek-chat``).
+* ``DEEPSEEK_MODEL`` — explicit model; when unset, derived from thinking (``deepseek-flash`` / ``deepseek-chat``).
 * ``DEEPSEEK_THINKING`` — enable thinking mode (default ``true``).
 * ``DEEPSEEK_REASONING_EFFORT`` — reasoning effort sent when thinking is on (default ``high``).
 

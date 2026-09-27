@@ -40,7 +40,7 @@ Both providers honor, in order of priority:
    default provider, or ``DEEPSEEK_MODEL`` / ``GOOGLE_MODEL``).
 
 DeepSeek adds a third step: when no explicit model is configured anywhere, the
-model is **derived from the thinking mode** — ``deepseek-reasoner`` when
+model is **derived from the thinking mode** — ``deepseek-flash`` when
 thinking is on, ``deepseek-chat`` when off (``llm.DefaultModel``).
 
 Thinking and reasoning effort are also resolved per request through the same
@@ -56,7 +56,7 @@ Implemented in ``llm/deepseek.go``. The provider uses the OpenAI-compatible
 Model resolution (``resolveModel``)
     Per-request model → explicit provider model (``--model`` /
     ``DEEPSEEK_MODEL``) → default derived from the effective thinking mode
-    (``deepseek-reasoner`` / ``deepseek-chat``).
+    (``deepseek-flash`` / ``deepseek-chat``).
 
 Thinking (``ThinkingOptions``)
     Thinking mode is sent explicitly through the structured ``thinking``

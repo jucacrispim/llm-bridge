@@ -48,6 +48,12 @@ so it starts with content instead of being empty. Global seeds under
 ``seedRoot/<project>/*.md``. It is idempotent — once the KB has items, nothing
 is re-embedded.
 
+A conventional location for the seed directory is
+``~/.local/share/llm-bridge/seeds`` — alongside the per-project knowledge bases
+under ``~/.local/share/llm-bridge/knowledge_bases``. Only the
+``seedRoot/*.md`` plus ``seedRoot/<project>/*.md`` layout matters, not the path
+itself; the seed is decoupled from the binary (it is never compiled in).
+
 Repopulating from seeds
 -----------------------
 
@@ -56,7 +62,7 @@ A standalone mode fully rebuilds a project's KB from a seed directory
 
 .. code-block:: sh
 
-   ./build/llm-bridge -populate-project-kb <seedDir> -project <proj>
+   ./build/llm-bridge -populate-project-kb ~/.local/share/llm-bridge/seeds -project <proj>
 
 This uses the same ``seedRoot/*.md`` plus ``seedRoot/<project>/*.md`` layout as
 seeding and requires the ONNX embedder. The seed stays decoupled from the

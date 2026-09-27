@@ -47,7 +47,7 @@ type ChatRequest struct {
 	Model  string
 	// Thinking optionally overrides the provider's thinking mode for this
 	// request. nil means "use the provider's configured mode"; true/false
-	// switches between deepseek-reasoner and deepseek-chat unless Model is set.
+	// switches between deepseek-flash and deepseek-chat unless Model is set.
 	Thinking *bool
 	// ReasoningEffort optionally overrides the provider's reasoning_effort
 	// when thinking is on. nil means "use the provider's configured value";

@@ -90,7 +90,7 @@ func main() {
 		// Resolve the model: an explicit --model flag (when deepseek is the
 		// default) wins, then DEEPSEEK_MODEL. When no explicit model is
 		// configured, the provider derives the model from the thinking mode
-		// (deepseek-reasoner / deepseek-chat).
+		// (deepseek-flash / deepseek-chat).
 		apiKey := os.Getenv("DEEPSEEK_API_KEY")
 		endpoint := os.Getenv("DEEPSEEK_URL")
 		if endpoint == "" {

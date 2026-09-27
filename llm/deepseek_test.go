@@ -63,9 +63,9 @@ func TestNewDeepSeekProviderFromEnvDefaults(t *testing.T) {
 	if p.endpoint != "https://api.deepseek.com/chat/completions" {
 		t.Errorf("endpoint = %q, want default", p.endpoint)
 	}
-	// thinking is on by default, so the derived model is deepseek-reasoner
-	if p.Model() != "deepseek-reasoner" {
-		t.Errorf("Model() = %q, want deepseek-reasoner (thinking default)", p.Model())
+	// thinking is on by default, so the derived model is deepseek-flash
+	if p.Model() != "deepseek-flash" {
+		t.Errorf("Model() = %q, want deepseek-flash (thinking default)", p.Model())
 	}
 	if p.explicitModel {
 		t.Errorf("explicitModel = true, want false (no DEEPSEEK_MODEL)")
@@ -97,8 +97,8 @@ func TestNewDeepSeekProviderFromEnvThinkingDisabled(t *testing.T) {
 }
 
 func TestDefaultModel(t *testing.T) {
-	if got := DefaultModel(true); got != "deepseek-reasoner" {
-		t.Errorf("DefaultModel(true) = %q, want deepseek-reasoner", got)
+	if got := DefaultModel(true); got != "deepseek-flash" {
+		t.Errorf("DefaultModel(true) = %q, want deepseek-flash", got)
 	}
 	if got := DefaultModel(false); got != "deepseek-chat" {
 		t.Errorf("DefaultModel(false) = %q, want deepseek-chat", got)
@@ -166,8 +166,8 @@ func TestNewDeepSeekProviderAutoModel(t *testing.T) {
 	if p.explicitModel {
 		t.Error("explicitModel = true, want false")
 	}
-	if p.Model() != "deepseek-reasoner" {
-		t.Errorf("Model() = %q, want deepseek-reasoner", p.Model())
+	if p.Model() != "deepseek-flash" {
+		t.Errorf("Model() = %q, want deepseek-flash", p.Model())
 	}
 	p.SetThinking(false)
 	if p.Model() != "deepseek-chat" {
@@ -258,7 +258,7 @@ func TestChatAutoModelSwitchesWithThinking(t *testing.T) {
 	defer server.Close()
 
 	// auto-model provider with thinking OFF; a per-request override to ON must
-	// switch the derived model to deepseek-reasoner.
+	// switch the derived model to deepseek-flash.
 	p := NewDeepSeekProviderAutoModel("key", server.URL, false)
 	thinking := true
 	resp, err := p.Chat(context.Background(), ChatRequest{
@@ -268,11 +268,11 @@ func TestChatAutoModelSwitchesWithThinking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(gotBody, `"model":"deepseek-reasoner"`) {
-		t.Fatalf("expected deepseek-reasoner in request body, got %s", gotBody)
+	if !strings.Contains(gotBody, `"model":"deepseek-flash"`) {
+		t.Fatalf("expected deepseek-flash in request body, got %s", gotBody)
 	}
-	if resp.Model != "deepseek-reasoner" {
-		t.Errorf("resp.Model = %q, want deepseek-reasoner", resp.Model)
+	if resp.Model != "deepseek-flash" {
+		t.Errorf("resp.Model = %q, want deepseek-flash", resp.Model)
 	}
 
 	// no override: model derives from provider thinking (off → deepseek-chat)

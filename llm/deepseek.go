@@ -26,7 +26,7 @@ type DeepSeekProvider struct {
 	thinking bool
 	// explicitModel reports whether model was explicitly configured (via
 	// --model or DEEPSEEK_MODEL). When false, the model is derived from the
-	// thinking mode (deepseek-reasoner / deepseek-chat).
+	// thinking mode (deepseek-flash / deepseek-chat).
 	explicitModel bool
 	// reasoningEffort is sent as reasoning_effort in the request body when
 	// thinking is enabled. Empty means the parameter is not sent.
@@ -57,7 +57,7 @@ func NewDeepSeekProviderWithThinking(apiKey, endpoint, model string, thinking bo
 }
 
 // NewDeepSeekProviderAutoModel creates a provider without an explicit model;
-// the model is derived from the thinking mode (deepseek-reasoner when thinking
+// the model is derived from the thinking mode (deepseek-flash when thinking
 // is on, deepseek-chat when off).
 func NewDeepSeekProviderAutoModel(apiKey, endpoint string, thinking bool) *DeepSeekProvider {
 	return &DeepSeekProvider{
@@ -71,7 +71,7 @@ func NewDeepSeekProviderAutoModel(apiKey, endpoint string, thinking bool) *DeepS
 }
 
 // DefaultModel returns the DeepSeek model that matches the thinking mode:
-// deepseek-reasoner enables thinking, deepseek-chat disables it.
+// deepseek-flash enables thinking, deepseek-chat disables it.
 func DefaultModel(thinking bool) string {
 	if thinking {
 		return "deepseek-flash"
@@ -134,7 +134,7 @@ func (p *DeepSeekProvider) Model() string {
 func (p *DeepSeekProvider) Thinking() bool { return p.thinking }
 
 // SetThinking updates the thinking mode of the provider. For auto-model
-// providers this also changes the effective model (deepseek-reasoner /
+// providers this also changes the effective model (deepseek-flash /
 // deepseek-chat). An explicitly configured model is never touched.
 func (p *DeepSeekProvider) SetThinking(thinking bool) { p.thinking = thinking }
 

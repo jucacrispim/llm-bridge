@@ -42,7 +42,7 @@ type PromptParams struct {
 	// between prompts.
 	Provider string `json:"provider,omitempty"`
 	// Thinking optionally overrides thinking mode for the conversation:
-	// true → deepseek-reasoner, false → deepseek-chat. Omitted keeps the
+	// true → deepseek-flash, false → deepseek-chat. Omitted keeps the
 	// provider's configured mode.
 	Thinking *bool `json:"thinking,omitempty"`
 	// ReasoningEffort optionally overrides reasoning_effort when thinking is

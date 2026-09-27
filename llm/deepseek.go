@@ -74,7 +74,7 @@ func NewDeepSeekProviderAutoModel(apiKey, endpoint string, thinking bool) *DeepS
 // deepseek-reasoner enables thinking, deepseek-chat disables it.
 func DefaultModel(thinking bool) string {
 	if thinking {
-		return "deepseek-reasoner"
+		return "deepseek-flash"
 	}
 	return "deepseek-chat"
 }

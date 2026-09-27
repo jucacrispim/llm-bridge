@@ -133,7 +133,10 @@ Events (bridge → client)
 
 ``turn_end``
     End of a turn, with the stop reason, the model used and token counts.
-    ``context_pct`` may be ``null``.
+    ``context_pct`` may be ``null``. ``cache_hit_tokens`` / ``cache_miss_tokens``
+    are the prompt cache accounting summed over every provider call made in the
+    turn (a tool-calling turn makes several); providers without cache reporting
+    leave them at ``0``.
 
     .. code-block:: json
 
@@ -144,7 +147,9 @@ Events (bridge → client)
          "model": "deepseek-reasoner",
          "input_tokens": 1024,
          "output_tokens": 512,
-         "total_tokens": 1536
+         "total_tokens": 1536,
+         "cache_hit_tokens": 900,
+         "cache_miss_tokens": 124
        }
 
 ``usage_delta``

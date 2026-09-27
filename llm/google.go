@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"llm-bridge/logger"
 )
@@ -174,11 +176,30 @@ type googleFunctionResponse struct {
 	Response json.RawMessage `json:"response"`
 }
 
+// googleInlineData carries an image (or other media) inline as base64. Gemini
+// does not use OpenAI's image_url shape.
+type googleInlineData struct {
+	MIMEType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+// googleFileData references an externally hosted file by URI (e.g. a Files API
+// uri or a public http(s) URL).
+type googleFileData struct {
+	MIMEType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
+}
+
 type googlePart struct {
 	Text             string                  `json:"text,omitempty"`
 	Thought          bool                    `json:"thought,omitempty"`
 	FunctionCall     *googleFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *googleFunctionResponse `json:"functionResponse,omitempty"`
+	// InlineData carries an inline image (base64) part; FileData references an
+	// externally hosted image by URI. They are the two ways Gemini accepts
+	// images (it has no OpenAI-style image_url).
+	InlineData *googleInlineData `json:"inlineData,omitempty"`
+	FileData   *googleFileData   `json:"fileData,omitempty"`
 	// ThoughtSignature is Gemini's base64 thought_signature. When thinking mode
 	// is on, Gemini emits it as a SIBLING field of the functionCall part (not
 	// inside functionCall) and it MUST be echoed back on the same part in the
@@ -247,112 +268,7 @@ type googleResponse struct {
 func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func(string)) (*ChatResponse, error) {
 	model := p.resolveModel(req)
 
-	var gContents []googleContent
-	var systemParts []googlePart
-	if req.System != "" {
-		systemParts = append(systemParts, googlePart{Text: req.System})
-	}
-
-	for _, m := range req.Messages {
-		switch m.Role {
-		case RoleSystem:
-			if m.Content != "" {
-				systemParts = append(systemParts, googlePart{Text: m.Content})
-			}
-			continue
-
-		case RoleAssistant:
-			role := "model"
-			parts := []googlePart{}
-			if m.Reasoning != "" {
-				parts = append(parts, googlePart{
-					Text:    m.Reasoning,
-					Thought: true,
-				})
-			}
-			if m.Content != "" {
-				parts = append(parts, googlePart{Text: m.Content})
-			}
-			for _, tc := range m.ToolCalls {
-				args := json.RawMessage(tc.Arguments)
-				if len(args) == 0 {
-					args = json.RawMessage("{}")
-				}
-				parts = append(parts, googlePart{
-					FunctionCall: &googleFunctionCall{
-						Name: tc.Name,
-						Args: args,
-					},
-					// Echo the thought_signature back as a sibling part field,
-					// exactly where Gemini emitted it (required when thinking
-					// mode is enabled).
-					ThoughtSignature: tc.ThoughtSignature,
-				})
-			}
-			if len(parts) > 0 {
-				gContents = append(gContents, googleContent{Role: role, Parts: parts})
-			}
-			continue
-
-		case "tool":
-			// A tool result. Gemini expects these as a user-role part carrying a
-			// functionResponse matched by name. Ensure we fallback to ToolCallID or Name correctly.
-
-			parts := []googlePart{{
-				FunctionResponse: &googleFunctionResponse{
-					Name:     m.ToolCallID,
-					Response: toolResultAsJSON(m.Content),
-				},
-			}}
-			gContents = append(gContents, googleContent{Role: "user", Parts: parts})
-			continue
-
-		default: // RoleUser and any fallback
-			if m.Content != "" {
-				gContents = append(gContents, googleContent{
-					Role:  "user",
-					Parts: []googlePart{{Text: m.Content}},
-				})
-			}
-		}
-	}
-
-	// Gemini has no concept of a lone system message inside contents; all system
-	// instructions are gathered into the top-level system_instruction field.
-	gReq := googleRequest{Contents: gContents}
-	if len(systemParts) > 0 {
-		gReq.SystemInstruction = &googleSystemInstruction{Parts: systemParts}
-	}
-
-	// Function declarations mirror the tools the server exposes. Gemini
-	// parameters are the raw JSON schema, exactly like OpenAI's.
-	var tools []googleTool
-	if len(req.Tools) > 0 {
-		decls := make([]googleFunctionDeclaration, 0, len(req.Tools))
-		for _, t := range req.Tools {
-			decls = append(decls, googleFunctionDeclaration{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.Parameters,
-			})
-		}
-		tools = append(tools, googleTool{FunctionDeclarations: decls})
-	}
-	if len(tools) > 0 {
-		gReq.Tools = tools
-	}
-
-	// Thinking mode maps onto Gemini's thinkingConfig.thinkingBudget:
-	//   - thinking off → budget 0 (disables the model's reasoning stage)
-	//   - thinking on  → a positive budget (default DefaultGoogleThinkingBudget)
-	//     allocating that many tokens to the reasoning stage. A per-request
-	//     reasoning effort override that parses as a number wins over the
-	//     provider's configured budget.
-	gReq.GenerationConfig = &googleGenerationConfig{
-		ThinkingConfig: &googleThinkingConfig{
-			ThinkingBudget: p.effectiveThinkingBudget(req),
-		},
-	}
+	gReq := p.buildGoogleRequest(req)
 
 	body, err := json.Marshal(gReq)
 	if err != nil {
@@ -362,7 +278,7 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 	logger.Tracef("Google request reasoning: thinking=%v thinking_budget=%d",
 		p.effectiveThinking(req), gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
 	logger.Tracef("Google request model=%s contents=%d tools=%d thinkingBudget=%d",
-		model, len(gContents), len(tools), gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
+		model, len(gReq.Contents), len(gReq.Tools), gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
 
 	if gReq.SystemInstruction != nil {
 		logger.Tracef("Google system instruction parts: %d", len(gReq.SystemInstruction.Parts))
@@ -372,7 +288,7 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 	}
 
 	logger.Tracef("Google request contents (history):")
-	for _, c := range gContents {
+	for _, c := range gReq.Contents {
 		logger.Tracef("  role=%s parts=%d", c.Role, len(c.Parts))
 		for _, part := range c.Parts {
 			switch {
@@ -382,6 +298,10 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 			case part.FunctionResponse != nil:
 				logger.Tracef("    function_response name=%s response=%s",
 					part.FunctionResponse.Name, string(part.FunctionResponse.Response))
+			case part.InlineData != nil:
+				logger.Tracef("    inline_data mime_type=%s bytes=%d", part.InlineData.MIMEType, len(part.InlineData.Data))
+			case part.FileData != nil:
+				logger.Tracef("    file_data mime_type=%s file_uri=%s", part.FileData.MIMEType, part.FileData.FileURI)
 			case part.Thought:
 				logger.Tracef("    thought text=%q", part.Text)
 			case part.Text != "":
@@ -401,24 +321,36 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 
 	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse&key=%s", p.endpoint, model, p.apiKey)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		logger.Errorf("google request failed: %v", err)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		resp, err = p.doRequest(ctx, url, body)
+		if err != nil {
+			logger.Errorf("google request failed: %v", err)
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
 		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		// Gemini may reject an external fileUri (an arbitrary public http(s)
+		// URL) with HTTP 400. Fall back once: download the URL images and embed
+		// them inline, then retry.
+		if attempt == 0 && resp.StatusCode == http.StatusBadRequest {
+			if inlined, ok := inlineImageURLs(req.Messages); ok {
+				req.Messages = inlined
+				gReq = p.buildGoogleRequest(req)
+				body, err = json.Marshal(gReq)
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
+		}
 		logger.Errorf("google HTTP %d: %s", resp.StatusCode, string(respBody))
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
+	defer resp.Body.Close()
 
 	var fullContent strings.Builder
 	var fullReasoning strings.Builder
@@ -541,4 +473,201 @@ func toolResultAsJSON(content string) json.RawMessage {
 	// Not valid JSON at all — wrap the raw text in an object.
 	wrapped, _ := json.Marshal(map[string]string{"result": content})
 	return wrapped
+}
+
+// buildGoogleRequest converts a ChatRequest into the Gemini wire request:
+// contents (the messages, with images mapped to inlineData/fileData parts), the
+// top-level system instruction (Gemini carries system prompts there, not as a
+// content), the function declarations and the generation config (thinking
+// budget). It is called again with inlined images as the fallback when Gemini
+// rejects a URL-based image.
+func (p *GoogleProvider) buildGoogleRequest(req ChatRequest) googleRequest {
+	var gContents []googleContent
+	var systemParts []googlePart
+	if req.System != "" {
+		systemParts = append(systemParts, googlePart{Text: req.System})
+	}
+
+	for _, m := range req.Messages {
+		switch m.Role {
+		case RoleSystem:
+			if m.Content != "" {
+				systemParts = append(systemParts, googlePart{Text: m.Content})
+			}
+			continue
+
+		case RoleAssistant:
+			role := "model"
+			parts := []googlePart{}
+			if m.Reasoning != "" {
+				parts = append(parts, googlePart{
+					Text:    m.Reasoning,
+					Thought: true,
+				})
+			}
+			if m.Content != "" {
+				parts = append(parts, googlePart{Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				args := json.RawMessage(tc.Arguments)
+				if len(args) == 0 {
+					args = json.RawMessage("{}")
+				}
+				parts = append(parts, googlePart{
+					FunctionCall: &googleFunctionCall{
+						Name: tc.Name,
+						Args: args,
+					},
+					// Echo the thought_signature back as a sibling part field,
+					// exactly where Gemini emitted it (required when thinking
+					// mode is enabled).
+					ThoughtSignature: tc.ThoughtSignature,
+				})
+			}
+			if len(parts) > 0 {
+				gContents = append(gContents, googleContent{Role: role, Parts: parts})
+			}
+			continue
+
+		case "tool":
+			// A tool result. Gemini expects these as a user-role part carrying a
+			// functionResponse matched by name. Ensure we fallback to ToolCallID or Name correctly.
+
+			parts := []googlePart{{
+				FunctionResponse: &googleFunctionResponse{
+					Name:     m.ToolCallID,
+					Response: toolResultAsJSON(m.Content),
+				},
+			}}
+			gContents = append(gContents, googleContent{Role: "user", Parts: parts})
+			continue
+
+		default: // RoleUser and any fallback
+			parts := []googlePart{}
+			if m.Content != "" {
+				parts = append(parts, googlePart{Text: m.Content})
+			}
+			// Gemini has no OpenAI-style image_url: an inline image becomes an
+			// inlineData part, an external URL becomes a fileData part.
+			for _, im := range m.Images {
+				if im.URL != "" {
+					parts = append(parts, googlePart{FileData: &googleFileData{
+						MIMEType: im.MIME,
+						FileURI:  im.URL,
+					}})
+				} else {
+					parts = append(parts, googlePart{InlineData: &googleInlineData{
+						MIMEType: im.MIME,
+						Data:     im.Data,
+					}})
+				}
+			}
+			if len(parts) > 0 {
+				gContents = append(gContents, googleContent{Role: "user", Parts: parts})
+			}
+		}
+	}
+
+	// Gemini has no concept of a lone system message inside contents; all system
+	// instructions are gathered into the top-level system_instruction field.
+	gReq := googleRequest{Contents: gContents}
+	if len(systemParts) > 0 {
+		gReq.SystemInstruction = &googleSystemInstruction{Parts: systemParts}
+	}
+
+	// Function declarations mirror the tools the server exposes. Gemini
+	// parameters are the raw JSON schema, exactly like OpenAI's.
+	var tools []googleTool
+	if len(req.Tools) > 0 {
+		decls := make([]googleFunctionDeclaration, 0, len(req.Tools))
+		for _, t := range req.Tools {
+			decls = append(decls, googleFunctionDeclaration{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  t.Parameters,
+			})
+		}
+		tools = append(tools, googleTool{FunctionDeclarations: decls})
+	}
+	if len(tools) > 0 {
+		gReq.Tools = tools
+	}
+
+	// Thinking mode maps onto Gemini's thinkingConfig.thinkingBudget:
+	//   - thinking off → budget 0 (disables the model's reasoning stage)
+	//   - thinking on  → a positive budget (default DefaultGoogleThinkingBudget)
+	//     allocating that many tokens to the reasoning stage. A per-request
+	//     reasoning effort override that parses as a number wins over the
+	//     provider's configured budget.
+	gReq.GenerationConfig = &googleGenerationConfig{
+		ThinkingConfig: &googleThinkingConfig{
+			ThinkingBudget: p.effectiveThinkingBudget(req),
+		},
+	}
+	return gReq
+}
+
+// doRequest sends a pre-marshalled body to the Gemini streaming endpoint.
+func (p *GoogleProvider) doRequest(ctx context.Context, url string, body []byte) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	return p.client.Do(httpReq)
+}
+
+// inlineImageURLs returns a copy of messages in which every URL-based image has
+// been downloaded and embedded inline (base64). It is the fallback used when
+// Gemini rejects an external fileUri with HTTP 400. The second result is false
+// when the messages contain no URL image (nothing to inline) or a download
+// fails, in which case the caller reports the original API error.
+func inlineImageURLs(messages []Message) ([]Message, bool) {
+	found := false
+	out := make([]Message, len(messages))
+	copy(out, messages)
+	for i := range out {
+		if len(out[i].Images) == 0 {
+			continue
+		}
+		imgs := make([]Image, len(out[i].Images))
+		copy(imgs, out[i].Images)
+		for j := range imgs {
+			if imgs[j].URL == "" {
+				continue
+			}
+			found = true
+			raw, err := downloadImage(imgs[j].URL)
+			if err != nil {
+				logger.Warningf("google: inline fallback failed for %s: %v", imgs[j].URL, err)
+				return nil, false
+			}
+			mime := detectImageMIME(raw)
+			if mime == "" {
+				mime = imgs[j].MIME
+			}
+			imgs[j] = Image{
+				MIME:   mime,
+				Data:   base64.StdEncoding.EncodeToString(raw),
+				Detail: imgs[j].Detail,
+			}
+		}
+		out[i].Images = imgs
+	}
+	return out, found
+}
+
+// downloadImage fetches an http(s) image URL, capped at 64 MiB (the largest
+// image size both DeepSeek and Gemini accept).
+func downloadImage(url string) ([]byte, error) {
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download image: HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2727,5 +2728,110 @@ func TestRunToolCycleSanitizesOrphanBeforeSend(t *testing.T) {
 		if len(m.ToolCalls) > 0 {
 			t.Fatalf("orphaned tool_calls must be sanitized before sending, got %+v", m)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Image attachments (prompt `images`)
+// ---------------------------------------------------------------------------
+
+// onePixelPNGBase64 is the base64 of a 1x1 PNG, used for image-attachment tests.
+const onePixelPNGBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+
+func onePixelPNGBytes(t *testing.T) []byte {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(onePixelPNGBase64)
+	if err != nil {
+		t.Fatalf("decode test png: %v", err)
+	}
+	return raw
+}
+
+// TestHandleLinePromptWithImagePath verifies that a prompt carrying an image by
+// path resolves it against the cwd, reads it from disk and attaches it (inline,
+// format detected) to the user message the provider receives.
+func TestHandleLinePromptWithImagePath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shot.png"), onePixelPNGBytes(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp, cwd: dir}
+	var w bytes.Buffer
+	line := `{"method":"prompt","params":{"text":"what is this?","images":[{"path":"shot.png","detail":"high"}]}}`
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	msgs := fp.lastReq.Messages
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d, want 1", len(msgs))
+	}
+	m := msgs[0]
+	if m.Role != llm.RoleUser || m.Content != "what is this?" {
+		t.Fatalf("unexpected message: %+v", m)
+	}
+	if len(m.Images) != 1 {
+		t.Fatalf("images = %d, want 1", len(m.Images))
+	}
+	im := m.Images[0]
+	if im.MIME != "image/png" || im.Detail != "high" || im.Data != onePixelPNGBase64 {
+		t.Fatalf("unexpected image: %+v", im)
+	}
+}
+
+// TestHandleLinePromptWithInlineImage verifies that a prompt carrying inline
+// base64 image data (the clipboard-paste case) attaches it to the user message.
+func TestHandleLinePromptWithInlineImage(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	line := fmt.Sprintf(`{"method":"prompt","params":{"text":"hi","images":[{"data":"%s"}]}}`, onePixelPNGBase64)
+	_, quit := handleLine(line, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	m := fp.lastReq.Messages[0]
+	if len(m.Images) != 1 || m.Images[0].MIME != "image/png" {
+		t.Fatalf("expected one inline png image, got %+v", m.Images)
+	}
+}
+
+// TestHandleLinePromptImageError verifies that an unreadable/unsupported image
+// makes the prompt fail with an error event, before the provider is called and
+// before the prompt is appended to the history.
+func TestHandleLinePromptImageError(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp, cwd: t.TempDir()}
+	var w bytes.Buffer
+	resp, quit := handleLine(`{"method":"prompt","params":{"text":"x","images":[{"path":"missing.png"}]}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if !strings.Contains(resp, `"event":"error"`) || !strings.Contains(resp, "image:") {
+		t.Fatalf("expected image error, got %q", resp)
+	}
+	if fp.callCount != 0 {
+		t.Fatalf("provider must not be called on image error, got %d calls", fp.callCount)
+	}
+	if st.historyLen() != 0 {
+		t.Fatalf("prompt must not be appended on image error, got %v", st.history)
+	}
+}
+
+// TestResolvePromptImagesNoParams verifies the empty case returns no images.
+func TestResolvePromptImagesNoParams(t *testing.T) {
+	images, err := resolvePromptImages("/tmp", nil)
+	if err != nil || images != nil {
+		t.Fatalf("resolvePromptImages(nil) = %v, %v; want nil, nil", images, err)
 	}
 }

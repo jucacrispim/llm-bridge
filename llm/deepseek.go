@@ -190,12 +190,72 @@ type openAIMessageToolCall struct {
 	Function openAIFunctionCall `json:"function"`
 }
 
+// openAIContentPart is one element of the OpenAI-compatible multimodal content
+// array: a text block or an image_url block.
+type openAIContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
+}
+
+// openAIImageURL is the image_url payload: either an inline data: URL or an
+// external http(s) URL, plus an optional detail hint.
+type openAIImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
 type openAIMessage struct {
-	Role             string                  `json:"role"`
-	Content          string                  `json:"content,omitempty"`
+	Role string `json:"role"`
+	// Content is a plain JSON string for text-only messages (the previous wire
+	// format, byte-identical) or an array of content parts when the message
+	// carries images. Omitted entirely when empty.
+	Content          json.RawMessage         `json:"content,omitempty"`
 	ReasoningContent string                  `json:"reasoning_content,omitempty"`
 	ToolCalls        []openAIMessageToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string                  `json:"tool_call_id,omitempty"`
+}
+
+// openAIContent builds the wire value for a message's content: nil (omitted)
+// for an empty text-only message, a JSON string for a text-only message, or the
+// OpenAI multimodal array of text/image_url parts when the message carries
+// images. Images are attached only to user messages (the only role the API
+// accepts them on); any image on another role is ignored.
+func openAIContent(role, content string, images []Image) json.RawMessage {
+	if role != RoleUser {
+		images = nil
+	}
+	if len(images) == 0 {
+		if content == "" {
+			return nil
+		}
+		b, err := json.Marshal(content)
+		if err != nil {
+			// notest
+			return nil
+		}
+		return b
+	}
+	parts := make([]openAIContentPart, 0, len(images)+1)
+	if content != "" {
+		parts = append(parts, openAIContentPart{Type: "text", Text: content})
+	}
+	for _, im := range images {
+		u := im.URL
+		if u == "" {
+			u = im.DataURL()
+		}
+		parts = append(parts, openAIContentPart{
+			Type:     "image_url",
+			ImageURL: &openAIImageURL{URL: u, Detail: im.Detail},
+		})
+	}
+	b, err := json.Marshal(parts)
+	if err != nil {
+		// notest
+		return nil
+	}
+	return b
 }
 
 type openAIFunction struct {
@@ -279,12 +339,12 @@ type toolCallBuilder struct {
 func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk func(string)) (*ChatResponse, error) {
 	msgs := make([]openAIMessage, 0, len(req.Messages)+1)
 	if req.System != "" {
-		msgs = append(msgs, openAIMessage{Role: RoleSystem, Content: req.System})
+		msgs = append(msgs, openAIMessage{Role: RoleSystem, Content: openAIContent(RoleSystem, req.System, nil)})
 	}
 	for _, m := range req.Messages {
 		msg := openAIMessage{
 			Role:       m.Role,
-			Content:    m.Content,
+			Content:    openAIContent(m.Role, m.Content, m.Images),
 			ToolCallID: m.ToolCallID,
 		}
 		// DeepSeek's thinking mode requires the assistant's reasoning_content to
@@ -309,7 +369,7 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 
 	logger.Tracef("DeepSeek request messages (model=%s):", p.model)
 	for _, msg := range msgs {
-		logger.Tracef("  role=%s content=%q tool_calls=%d tool_call_id=%q", msg.Role, msg.Content, len(msg.ToolCalls), msg.ToolCallID)
+		logger.Tracef("  role=%s content=%s tool_calls=%d tool_call_id=%q", msg.Role, string(msg.Content), len(msg.ToolCalls), msg.ToolCallID)
 		for _, tc := range msg.ToolCalls {
 			logger.Tracef("    tool_call id=%s name=%s arguments=%s", tc.ID, tc.Function.Name, tc.Function.Arguments)
 		}

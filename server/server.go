@@ -157,9 +157,15 @@ func (st *state) effectiveSystem() string {
 
 // appendUser appends a user message to the shared conversation history.
 func (st *state) appendUser(content string) {
+	st.appendUserWithImages(content, nil)
+}
+
+// appendUserWithImages appends a user message carrying optional image
+// attachments to the shared conversation history.
+func (st *state) appendUserWithImages(content string, images []llm.Image) {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
-	history.AppendUser(&st.history, content)
+	history.AppendUserWithImages(&st.history, content, images)
 }
 
 // appendAssistant appends an assistant message to the shared conversation
@@ -340,6 +346,32 @@ func filePathFromArgs(args string) string {
 		return ""
 	}
 	return a.Path
+}
+
+// resolvePromptImages resolves the prompt's image attachments into llm.Images.
+// A path is read from disk (relative paths are resolved against cwd), data is
+// decoded/validated as inline base64, and a url is passed through to the
+// provider. It returns an error naming the offending image when it is missing,
+// unreadable or not a supported format.
+func resolvePromptImages(cwd string, params []protocol.ImageParam) ([]llm.Image, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	images := make([]llm.Image, 0, len(params))
+	for _, p := range params {
+		path := p.Path
+		if path != "" && !filepath.IsAbs(path) && cwd != "" {
+			path = filepath.Join(cwd, path)
+		}
+		im, err := llm.ResolveImage(path, p.URL, p.Data, p.MIME, p.Detail)
+		if err != nil {
+			return nil, fmt.Errorf("image: %w", err)
+		}
+		logger.Tracef("image path=%q url=%q mime=%s b64_len=%d detail=%q",
+			path, p.URL, im.MIME, len(im.Data), im.Detail)
+		images = append(images, im)
+	}
+	return images, nil
 }
 
 // collapseTurn compresses a completed tool-calling turn into just the user
@@ -756,7 +788,11 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		st.turnCacheMissTokens = 0
 		st.turnFilesChanged = nil
 		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
-		st.appendUser(p.Text)
+		images, err := resolvePromptImages(st.cwd, p.Images)
+		if err != nil {
+			return string(protocol.NewError(err.Error())), false
+		}
+		st.appendUserWithImages(p.Text, images)
 		return runToolCycle(st, w)
 
 	case string(protocol.MethodCancel):

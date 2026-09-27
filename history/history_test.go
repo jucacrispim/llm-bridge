@@ -18,6 +18,21 @@ func TestAppendUser(t *testing.T) {
 	}
 }
 
+func TestAppendUserWithImages(t *testing.T) {
+	var h []llm.Message
+	imgs := []llm.Image{{MIME: "image/png", Data: "AAAA"}}
+	AppendUserWithImages(&h, "look at this", imgs)
+	if len(h) != 1 {
+		t.Fatalf("len = %d, want 1", len(h))
+	}
+	if h[0].Role != llm.RoleUser || h[0].Content != "look at this" {
+		t.Fatalf("unexpected message: %+v", h[0])
+	}
+	if len(h[0].Images) != 1 || h[0].Images[0].MIME != "image/png" {
+		t.Fatalf("images not preserved: %+v", h[0].Images)
+	}
+}
+
 func TestAppendAssistant(t *testing.T) {
 	var h []llm.Message
 	resp := &llm.ChatResponse{Content: "answer", StopReason: "END_TURN"}

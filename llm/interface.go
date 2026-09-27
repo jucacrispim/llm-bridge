@@ -16,6 +16,11 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
+	// Images are optional image attachments for this message. They are only
+	// meaningful on user messages (both DeepSeek and Gemini reject images in
+	// system or assistant messages); providers that do not support images
+	// ignore them.
+	Images []Image
 	// Reasoning is the model's chain-of-thought (deepseek's reasoning_content)
 	// that accompanied this message, produced only when thinking mode is on.
 	// It is kept in the history and sent back to the API for assistant messages

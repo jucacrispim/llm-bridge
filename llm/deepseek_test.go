@@ -758,6 +758,67 @@ func TestModel(t *testing.T) {
 	}
 }
 
+func TestChatSendsImageContentParts(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewDeepSeekProvider("key", server.URL, "deepseek-v4-flash")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: RoleUser, Content: "what is this?", Images: []Image{
+				{MIME: "image/png", Data: "AAAA", Detail: "high"},
+				{URL: "https://example.com/x.jpg"},
+			}},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A message with images serializes content as the multimodal parts array:
+	// text first, then one image_url per image (inline data URL / pass-through).
+	want := `"content":[{"type":"text","text":"what is this?"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"high"}},` +
+		`{"type":"image_url","image_url":{"url":"https://example.com/x.jpg"}}]`
+	if !strings.Contains(gotBody, want) {
+		t.Fatalf("expected multimodal content in request body, got %s", gotBody)
+	}
+}
+
+func TestChatIgnoresImagesOnNonUserRole(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewDeepSeekProvider("key", server.URL, "deepseek-v4-flash")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: RoleAssistant, Content: "hi", Images: []Image{{MIME: "image/png", Data: "AAAA"}}},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Images are only valid on user messages, so an image on an assistant
+	// message is dropped and the content stays a plain string.
+	if strings.Contains(gotBody, "image_url") {
+		t.Fatalf("images on non-user role should be ignored, got %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"content":"hi"`) {
+		t.Fatalf("expected plain string content, got %s", gotBody)
+	}
+}
+
 func TestChatSendsToolCallsInMessage(t *testing.T) {
 	var gotBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

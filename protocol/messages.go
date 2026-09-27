@@ -54,6 +54,30 @@ type PromptParams struct {
 	System string `json:"system,omitempty"`
 	// SystemPrompt is an alias for System.
 	SystemPrompt string `json:"system_prompt,omitempty"`
+	// Images are optional image attachments for this prompt. Each image may be
+	// given by path (a local file, resolved against the current cwd), by url
+	// (an external http(s) link passed through to the provider) or inline as
+	// base64 data / data URL (used for clipboard-pasted images).
+	Images []ImageParam `json:"images,omitempty"`
+}
+
+// ImageParam describes one image attached to a prompt. The bridge resolves it
+// into an inline image (path/data) or a pass-through URL and then maps it to
+// the active provider's wire format.
+type ImageParam struct {
+	// Path is a local file path: absolute, or relative to the current cwd.
+	Path string `json:"path,omitempty"`
+	// URL is an external http(s) image URL, passed through to the provider.
+	URL string `json:"url,omitempty"`
+	// Data is inline base64 image data: raw base64, or a full data: URL
+	// (data:<mime>;base64,<payload>). Used for clipboard-pasted images.
+	Data string `json:"data,omitempty"`
+	// MIME optionally declares the media type (image/png, image/jpeg,
+	// image/gif, image/webp); otherwise it is detected from the bytes.
+	MIME string `json:"mime_type,omitempty"`
+	// Detail optionally controls image processing ("low"/"high"/"original"/
+	// "auto" for DeepSeek). Ignored by providers without the concept.
+	Detail string `json:"detail,omitempty"`
 }
 
 type ToolResultParams struct {

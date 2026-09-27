@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -634,4 +635,173 @@ func TestGoogleThoughtTraceLog(t *testing.T) {
 	_, _ = p.Chat(context.Background(), ChatRequest{
 		Messages: []Message{{Role: RoleUser, Content: "hi"}},
 	}, nil)
+}
+
+func TestGoogleChatImageParts(t *testing.T) {
+	srv, lastBody := googleTestServer(t, []string{`data: [DONE]`})
+	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "what?", Images: []Image{
+			{MIME: "image/png", Data: "AAAA"},
+			{URL: "https://example.com/x.jpg", MIME: "image/jpeg"},
+		}}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var gReq googleRequest
+	_ = json.Unmarshal([]byte(*lastBody), &gReq)
+	if len(gReq.Contents) != 1 {
+		t.Fatalf("contents = %d, want 1", len(gReq.Contents))
+	}
+	parts := gReq.Contents[0].Parts
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want 3 (text + inline + file)", len(parts))
+	}
+	if parts[0].Text != "what?" {
+		t.Errorf("parts[0].Text = %q, want what?", parts[0].Text)
+	}
+	if parts[1].InlineData == nil || parts[1].InlineData.MIMEType != "image/png" || parts[1].InlineData.Data != "AAAA" {
+		t.Errorf("parts[1] inline image = %+v", parts[1])
+	}
+	if parts[2].FileData == nil || parts[2].FileData.FileURI != "https://example.com/x.jpg" {
+		t.Errorf("parts[2] url image = %+v", parts[2])
+	}
+}
+
+func TestGoogleChatURLImageInlineFallback(t *testing.T) {
+	png, err := base64.StdEncoding.DecodeString(onePixelPNGBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(png)
+	}))
+	defer imgSrv.Close()
+
+	var bodies []string
+	gemSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Reject a URL-based image (fileData) as the real API may do for an
+		// arbitrary public URL; accept everything else.
+		if strings.Contains(string(b), "fileData") {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"invalid fileUri","code":400}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"described"}]},"finishReason":"STOP"}]}` + "\n\ndata: [DONE]\n\n"))
+	}))
+	defer gemSrv.Close()
+
+	p := NewGoogleProvider("key", gemSrv.URL+"/v1beta", "gemini-2.5-flash")
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "describe", Images: []Image{
+			{URL: imgSrv.URL + "/img.png", MIME: "image/png"},
+		}}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Content != "described" {
+		t.Errorf("Content = %q, want described", resp.Content)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("requests = %d, want 2 (fileUri attempt + inline fallback)", len(bodies))
+	}
+	if !strings.Contains(bodies[0], "fileData") {
+		t.Errorf("first attempt should use fileData, got %s", bodies[0])
+	}
+	if !strings.Contains(bodies[1], "inlineData") {
+		t.Errorf("fallback attempt should use inlineData, got %s", bodies[1])
+	}
+}
+
+func TestGoogleChatURLImageFallbackDownloadFailure(t *testing.T) {
+	// The image URL returns 404, so the inline fallback cannot fetch it and the
+	// original HTTP 400 must be reported.
+	badImg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusNotFound)
+	}))
+	defer badImg.Close()
+	gemSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid fileUri","code":400}}`))
+	}))
+	defer gemSrv.Close()
+
+	p := NewGoogleProvider("key", gemSrv.URL+"/v1beta", "gemini-2.5-flash")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "describe", Images: []Image{
+			{URL: badImg.URL + "/img.png"},
+		}}},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error when the fallback download fails")
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error = %q, want to contain 400", err.Error())
+	}
+}
+
+func TestInlineImageURLsNoURLs(t *testing.T) {
+	if _, ok := inlineImageURLs([]Message{{Role: RoleUser, Images: []Image{{Data: "AAAA"}}}}); ok {
+		t.Error("expected ok=false when there is no URL image")
+	}
+	if _, ok := inlineImageURLs([]Message{{Role: RoleUser, Content: "hi"}}); ok {
+		t.Error("expected ok=false when there are no images")
+	}
+}
+
+func TestInlineImageURLsMIMEFallback(t *testing.T) {
+	// The downloaded bytes are not a recognizable image, so the declared MIME
+	// type is used as a fallback.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("not an image"))
+	}))
+	defer srv.Close()
+	msgs, ok := inlineImageURLs([]Message{{Role: RoleUser, Images: []Image{{URL: srv.URL, MIME: "image/png"}}}})
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	got := msgs[0].Images[0]
+	if got.URL != "" || got.MIME != "image/png" {
+		t.Fatalf("unexpected inline image: %+v", got)
+	}
+	if got.Data != base64.StdEncoding.EncodeToString([]byte("not an image")) {
+		t.Fatalf("unexpected data: %q", got.Data)
+	}
+}
+
+func TestDownloadImage(t *testing.T) {
+	png, err := base64.StdEncoding.DecodeString(onePixelPNGBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(png)
+	}))
+	defer srv.Close()
+	got, err := downloadImage(srv.URL)
+	if err != nil {
+		t.Fatalf("downloadImage: %v", err)
+	}
+	if string(got) != string(png) {
+		t.Errorf("downloaded bytes differ from the served image")
+	}
+
+	// non-200 response
+	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer errSrv.Close()
+	if _, err := downloadImage(errSrv.URL); err == nil {
+		t.Error("expected error for non-200 download")
+	}
+
+	// unreachable host
+	if _, err := downloadImage("http://127.0.0.1:1/x"); err == nil {
+		t.Error("expected error for unreachable host")
+	}
 }

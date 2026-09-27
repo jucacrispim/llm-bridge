@@ -39,7 +39,14 @@ func StripEphemeral(content string) string {
 }
 
 func AppendUser(hist *[]llm.Message, content string) {
-	*hist = append(*hist, llm.Message{Role: llm.RoleUser, Content: content})
+	AppendUserWithImages(hist, content, nil)
+}
+
+// AppendUserWithImages appends a user message carrying optional image
+// attachments. Images are only meaningful on user messages (both DeepSeek and
+// Gemini reject images elsewhere).
+func AppendUserWithImages(hist *[]llm.Message, content string, images []llm.Image) {
+	*hist = append(*hist, llm.Message{Role: llm.RoleUser, Content: content, Images: images})
 }
 
 func AppendAssistant(hist *[]llm.Message, resp *llm.ChatResponse) {

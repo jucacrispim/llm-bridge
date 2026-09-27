@@ -10,6 +10,7 @@ lets the bridge translate that into whichever provider is active.
 .. toctree::
    :maxdepth: 2
 
+   overview
    installation
 
 .. toctree::
@@ -32,7 +33,6 @@ lets the bridge translate that into whichever provider is active.
 .. toctree::
    :maxdepth: 2
 
-   overview
    hacking/index
 
 Indices and tables

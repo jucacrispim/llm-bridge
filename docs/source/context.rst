@@ -1,56 +1,35 @@
 Context
 =======
 
-The bridge loads context files that are injected into the conversation. These
-are Markdown files read from two sources:
+The bridge can load context files that are injected into the conversation, so
+the model starts every session already knowing the project conventions you
+care about. These are plain Markdown files read from two sources:
 
 - **General context**: ``~/.llm-bridge/*.md`` — applies to all conversations.
 - **Local context**: ``<cwd>/.llm-bridge/*.md`` — applies to the current
   project/directory.
 
 The general context comes **before** the local one. Within each directory the
-files are sorted **alphabetically**. Each file becomes a persistent
-(non-ephemeral) user message that keeps its original path.
+files are sorted **alphabetically**. Each file is injected as a persistent
+message at the very top of the conversation, keeping its original path so the
+model can tell where each block came from.
 
-Rendering
----------
+When it is loaded
+-----------------
 
-Each file is wrapped in the context markers and injected as a single user
-message:
-
-.. code-block:: text
-
-   --- CONTEXT ENTRY BEGIN ---
-   [<path>]
-   <content>
-   --- CONTEXT ENTRY END ---
-
-The ``[<path>]`` line carries the file's original path, so the model can tell
-where each block came from.
-
-Load logic
-----------
-
-Implemented in ``context/context.go``:
-
-- ``Load(cwd)`` reads the general directory (``~/.llm-bridge``) first and then
-  the local one (``<cwd>/.llm-bridge``), concatenating the entries in that
-  order.
-- ``readDir(dir)`` globs ``*.md``, sorts them alphabetically and reads each
-  file's content (trimmed of surrounding whitespace). A missing directory is
-  ignored without error; a file that fails to read is skipped with a log.
-- If ``cwd`` is empty, ``Load`` falls back to the process's current working
-  directory.
-
-How it is used
---------------
-
-On the **first turn** (see :doc:`architecture`), the server loads the context
-and appends each entry as a user message at the top of the history, right
-before the user's first prompt. On that same first turn it also appends a
-one-line note about the project knowledge base when the KB is enabled. The
-context is only loaded once — afterwards it is just part of the conversation
-history.
+The context is loaded on the **first turn** of the conversation (see
+:doc:`architecture`), right before your first prompt, and only once —
+afterwards it is just part of the conversation history. No extra event is
+emitted for it; the usual ``ready`` already signals the bridge is up.
 
 The project/general lookup mirrors how :doc:`hooks` scripts are resolved
-(project first, then the user's home).
+(project directory first, then your home).
+
+.. note::
+
+   This is separate from the :doc:`knowledge` base. Context files are
+   pre-configured steering you write by hand; the knowledge base is content the
+   model stores and retrieves during the conversation.
+
+Implementation details (the ``context`` package, load order and rendering) live
+in :doc:`hacking`.

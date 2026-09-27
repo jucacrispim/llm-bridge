@@ -21,10 +21,18 @@ lets the bridge translate that into whichever provider is active.
 .. toctree::
    :maxdepth: 2
 
+   context
+
+.. toctree::
+   :maxdepth: 2
+
+   knowledge
+
+.. toctree::
+   :maxdepth: 2
+
    providers
    hooks
-   knowledge
-   context
 
 .. toctree::
    :maxdepth: 2
@@ -32,6 +40,7 @@ lets the bridge translate that into whichever provider is active.
    overview
    architecture
    development
+   hacking
 
 Indices and tables
 ------------------

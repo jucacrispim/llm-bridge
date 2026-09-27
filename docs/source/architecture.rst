@@ -48,12 +48,12 @@ The bridge is organized into focused packages:
 ``knowledge``
     The per-project knowledge base: index, ONNX embedder (``Embedder``,
     ``LazyEmbedder``, ``DisabledEmbedder``), the ``Manager`` and the seed
-    handling. See :doc:`knowledge`.
+    handling. See :doc:`hacking`.
 
 ``context``
     Loads the Markdown context files (``~/.llm-bridge/*.md`` plus
     ``<cwd>/.llm-bridge/*.md``) that are injected on the first turn. See
-    :doc:`context`.
+    :doc:`hacking`.
 
 ``history``
     Helpers to sanitize/manage the conversation history slice.
@@ -193,4 +193,4 @@ On ``set_cwd``, the server builds the per-project ``knowledge.Manager`` lazily
 from ``kbBaseDir/<project>/data.json`` (clearing it when disabled). The
 ``knowledge`` tool calls are resolved locally inside ``runToolCycle`` so they
 never wait on the client. A one-line note about the project's KB is injected on
-the first turn when the KB is enabled. See :doc:`knowledge`.
+the first turn when the KB is enabled. See :doc:`hacking`.

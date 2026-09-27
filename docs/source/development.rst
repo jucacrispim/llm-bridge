@@ -40,11 +40,11 @@ they fit together):
 
 ``knowledge``
     The per-project knowledge base: index, embedders, ``Manager`` and seed
-    handling (see :doc:`knowledge`).
+    handling (see :doc:`hacking`).
 
 ``context``
     Loads the Markdown context files injected on the first turn (see
-    :doc:`context`).
+    :doc:`hacking`).
 
 ``history``
     Helpers to manage the conversation history slice (append/sanitize,

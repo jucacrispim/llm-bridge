@@ -42,7 +42,8 @@ Every command has the shape:
            "thinking": true,
            "reasoning_effort": "high",
            "system": "optional overriding system prompt",
-           "system_prompt": "alias for system"
+           "system_prompt": "alias for system",
+           "images": [{"path": "screenshot.png"}]
          }
        }
 
@@ -56,6 +57,54 @@ Every command has the shape:
     - ``reasoning_effort`` — reasoning effort for DeepSeek, or a numeric
       thinking budget for Google.
     - ``system`` / ``system_prompt`` — override the system prompt.
+
+    ``images`` attaches one or more images to the prompt (see `Images`_ below).
+
+.. _Images:
+
+Images
+~~~~~~
+
+A prompt may carry images via the ``images`` array. Each entry is resolved in
+this order of precedence:
+
+- ``url`` — an external ``http(s)`` link, passed through to the provider, which
+  downloads it (DeepSeek supports this natively; Gemini receives it as a
+  ``fileData`` URI and the bridge falls back to downloading and inlining the
+  image if the API rejects it).
+- ``data`` — inline base64 image data, either raw base64 or a full data URL
+  (``data:<mime>;base64,<payload>``). Use this for images that only exist in the
+  client (e.g. a clipboard paste), which have no file on disk the bridge could
+  read.
+- ``path`` — a local file path, read by the bridge and embedded inline.
+  Relative paths are resolved against the current cwd.
+
+``mime_type`` optionally declares the media type and ``detail`` optionally
+controls image processing for DeepSeek (``low`` / ``high`` / ``original`` /
+``auto``). Supported formats (verified from the image bytes, not the name or
+declared type) are PNG, JPEG, GIF and WebP. Images are attached to user
+messages; the active model must support vision (on DeepSeek this is the Flash
+model).
+
+.. code-block:: json
+
+   {
+     "method": "prompt",
+     "params": {
+       "text": "What is in this screenshot?",
+       "images": [{"path": "screenshot.png", "detail": "high"}]
+     }
+   }
+
+.. code-block:: json
+
+   {
+     "method": "prompt",
+     "params": {
+       "text": "Describe this.",
+       "images": [{"url": "https://example.com/image.jpg"}]
+     }
+   }
 
 ``tool_result``
     Reply to a ``tool_call`` the model requested. Sent after the client runs

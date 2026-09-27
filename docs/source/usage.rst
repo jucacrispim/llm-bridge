@@ -54,6 +54,15 @@ provider or change the model on the fly.
 
    {"method": "prompt", "params": {"text": "add a test for parseHook"}}
 
+A prompt can also carry **images** via the ``images`` array, given by local
+``path``, external ``url`` or inline base64 ``data`` (the last is what a client
+uses for a clipboard paste). See :ref:`Images <Images>` in :doc:`protocol` for
+the field-by-field details and provider support.
+
+.. code-block:: json
+
+   {"method": "prompt", "params": {"text": "what is in this?", "images": [{"path": "screenshot.png"}]}}
+
 **2. Hooks.** A prompt whose text starts with ``#`` is **not** sent to the LLM;
 it runs a local script instead. See :doc:`hooks`.
 

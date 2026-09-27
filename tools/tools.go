@@ -26,7 +26,7 @@ func All() []llm.Tool {
 		},
 		{
 			Name:        "grep",
-			Description: "Search for a pattern in files",
+			Description: "Search file contents for a POSIX extended regular expression (like 'grep -E'). The pattern is a regex: to match a literal string, escape regex metacharacters ('.', '[', ']', '(', ')', '{', '}', '+', '?', '|', '*', '^', '$', '\\'). Returns matching lines as 'file:line:text'.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
 		},
 		{

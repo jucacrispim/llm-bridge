@@ -9,20 +9,17 @@ lets the bridge translate that into whichever provider is active.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Installation
 
    installation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Usage
 
    usage
    protocol
 
 .. toctree::
    :maxdepth: 2
-   :caption: Reference
 
    providers
    hooks
@@ -31,7 +28,6 @@ lets the bridge translate that into whichever provider is active.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Internals
 
    overview
    architecture

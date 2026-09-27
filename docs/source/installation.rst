@@ -8,6 +8,7 @@ page covers the prerequisites and both builds.
 Prerequisites
 -------------
 
+- **Git** — to clone the repository (see `Getting the source`_ below).
 - **Go** and ``make``. See ``go.mod`` for the required toolchain version.
 - A **C compiler** is only needed for the knowledge base build
   (``make build-kb`` sets ``CGO_ENABLED=1``).
@@ -19,6 +20,18 @@ build:
 
 - ``DEEPSEEK_API_KEY`` — for the DeepSeek provider.
 - ``GOOGLE_API_KEY`` (or ``GEMINI_API_KEY``) — for the Google/Gemini provider.
+
+Getting the source
+------------------
+
+The source lives on GitHub. Clone it and enter the repository:
+
+.. code-block:: sh
+
+   $ git clone https://github.com/jucacrispim/llm-bridge.git
+   $ cd llm-bridge
+
+All the build commands below are run from inside the repository.
 
 Plain build (no knowledge base)
 -------------------------------

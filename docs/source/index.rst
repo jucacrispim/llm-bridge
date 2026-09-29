@@ -36,6 +36,11 @@ lets the bridge translate that into whichever provider is active.
 
    hacking/index
 
+.. toctree::
+   :maxdepth: 2
+
+   changelog
+
 Indices and tables
 ------------------
 

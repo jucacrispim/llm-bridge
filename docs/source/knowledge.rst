@@ -9,8 +9,12 @@ similarity search, scoped to the current working directory.
 Using the ``knowledge`` tool
 ----------------------------
 
-The model drives the KB through the ``knowledge`` tool, whose ``command`` field
-selects the operation:
+The model is encouraged to consult the KB before reasoning from scratch for
+questions about how the project works, its architecture, or past decisions —
+and to record durable, non-obvious findings with ``add`` — through the system
+prompt and the tool description (both static, so they sit early in the prompt
+and stay cache-friendly). The model drives the KB through the ``knowledge``
+tool, whose ``command`` field selects the operation:
 
 - ``show`` — lists the stored labels (a human-readable summary).
 - ``search <query>`` — returns the most similar notes with their scores.

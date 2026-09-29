@@ -758,8 +758,9 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			}
 			// When the knowledge base is enabled, surface a single minimal line
 			// about the project's KB (not its contents) so the model knows the
-			// `knowledge` tool is available. Only the cwd project is mentioned —
-			// other bases are noise, and the search is already scoped to cwd.
+			// `knowledge` tool is available and is nudged to consult it. Only
+			// the cwd project is mentioned — other bases are noise, and the
+			// search is already scoped to cwd.
 			if st.kb != nil {
 				kbName := st.projectKBName()
 				if kbName == "" && st.cwd != "" {
@@ -767,9 +768,9 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 				}
 				line := "Knowledge base"
 				if kbName != "" {
-					line += " do projeto \"" + kbName + "\""
+					line += " for project \"" + kbName + "\""
 				}
-				line += " disponível (tool: knowledge)."
+				line += " available (tool: knowledge). Search it before answering questions about this project's architecture or past decisions."
 				st.appendUser(line)
 			}
 			st.firstTurn = false

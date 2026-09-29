@@ -25,5 +25,14 @@ When you need to inspect or modify the project, use the specific tool instead of
 
 Reserve `shell` for commands with real side effects that have no dedicated tool (builds, tests, git, dependency installs, etc.). Whenever a tool already covers the task, prefer it over the shell — it's more reliable and saves tokens.
 
+## Project knowledge base (tool: `knowledge`)
+
+The bridge keeps a small per-project knowledge base for the current working directory (architecture, design decisions, gotchas). Consult it before reasoning from scratch:
+
+- Before answering questions about **how this project works, its architecture, or past decisions** — and before exploring the source to figure that out — call `knowledge` with `command:"search"` and a natural-language query.
+- If you are unsure what is stored, call `command:"show"` once.
+- When you learn something non-obvious and durable, persist it with `command:"add"` (upsert by label) instead of leaving it only in the conversation.
+- Skip it for things already visible in the code you are reading; use it for cross-session knowledge.
+
 ## File States and Deltas
 When working with files, prior reads, writes, and replaces may appear in your history as user messages with `<State path datetime>content</State>` or `<Replace path datetime>search → replace</Replace>` tags. These are immutable file state snapshots and deltas from previous turns; use them as the known state of files instead of rereading them unnecessarily.

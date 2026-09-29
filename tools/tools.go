@@ -58,7 +58,7 @@ func All() []llm.Tool {
 		},
 		{
 			Name:        "knowledge",
-			Description: "Manage the project's local knowledge base (scoped to the current working directory). Commands: 'show' lists stored items; 'search' with a query finds relevant notes; 'add' with a label and text stores or UPDATES a note (label is the key: re-adding an existing label replaces it); 'delete' with a label removes a note; 'reset' clears the KB and rebuilds it from the curated seed. Use it to store/update/remove notes about what you learn here.",
+			Description: "Use this to recall or record project knowledge across sessions. The KB holds short durable notes (architecture, design decisions, gotchas, conventions) about the project at the current working directory. Call 'search' with a natural-language query BEFORE answering questions or making changes that depend on how this project works or why it is the way it is; call 'show' once if unsure what is stored. Call 'add' (upsert by label: re-adding a label REPLACES its text) as soon as you learn something non-obvious and durable. 'delete' with a label removes a note; 'reset' clears the KB and rebuilds it from the curated seed. Runs locally inside the bridge — no client round-trip, effectively free.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["show","search","add","delete","reset"]},"query":{"type":"string"},"label":{"type":"string"},"text":{"type":"string"},"limit":{"type":"integer"}},"required":["command"]}`),
 		},
 	}

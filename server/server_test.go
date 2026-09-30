@@ -131,7 +131,7 @@ func TestHandleLinePromptSuccess(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
@@ -165,6 +165,53 @@ func TestHandleLineTurnEndReportsCacheUsage(t *testing.T) {
 	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
 	if got := w.String(); !strings.Contains(got, `"input_tokens":150,"output_tokens":5,"total_tokens":155,"cache_hit_tokens":120,"cache_miss_tokens":30`) {
 		t.Fatalf("turn_end did not report summed cache usage, got %q", got)
+	}
+}
+
+func TestHandleLineTurnEndReportsContextUsage(t *testing.T) {
+	// context_tokens is the prompt of the LAST provider call of the turn (the
+	// full context sent), not the sum over the turn. context_window comes from
+	// the static per-model table (llm.ContextWindow) and context_pct is their
+	// ratio.
+	provider := &fakeProvider{
+		name:  "fake",
+		model: "deepseek-flash",
+		responses: []*llm.ChatResponse{
+			{
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{PromptTokens: 100, CompletionTokens: 2},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+			},
+			{
+				Content:    "done",
+				StopReason: "END_TURN",
+				Usage:      &llm.Usage{PromptTokens: 250_000, CompletionTokens: 3},
+			},
+		},
+	}
+	st := &state{provider: provider}
+	var w bytes.Buffer
+	_, _ = handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	w.Reset()
+	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
+	want := `"context_pct":0.25,"context_tokens":250000,"context_window":1000000,"model":"deepseek-flash"`
+	if got := w.String(); !strings.Contains(got, want) {
+		t.Fatalf("turn_end context fields mismatch, got %q, want substring %q", got, want)
+	}
+}
+
+func TestHandleLineTurnEndContextUnknownModel(t *testing.T) {
+	// An unknown model reports context_pct null (and window 0) instead of
+	// guessing a window.
+	st := &state{provider: &fakeProvider{resp: &llm.ChatResponse{
+		StopReason: "END_TURN",
+		Usage:      &llm.Usage{PromptTokens: 1_234, CompletionTokens: 5},
+	}}}
+	var w bytes.Buffer
+	_, _ = handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
+	want := `"context_pct":null,"context_tokens":1234,"context_window":0,"model":"fake"`
+	if got := w.String(); !strings.Contains(got, want) {
+		t.Fatalf("unknown-model turn_end context mismatch, got %q, want substring %q", got, want)
 	}
 }
 
@@ -209,7 +256,7 @@ func TestHandleLinePromptNoChunk(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
@@ -653,7 +700,7 @@ func TestRunWithProviderBasic(t *testing.T) {
 	got := out.String()
 	expected := `{"event":"ready"}` + "\n" +
 		`{"event":"chunk","text":"Hi"}` + "\n" +
-		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" +
+		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" +
 		`{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if got != expected {
 		t.Errorf("runWithProvider output:\n got: %q\nwant: %q", got, expected)

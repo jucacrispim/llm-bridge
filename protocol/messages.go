@@ -108,15 +108,3 @@ type ToolCallResult struct {
 	Name  string                 `json:"name"`
 	Input map[string]interface{} `json:"input"`
 }
-
-type ChunkEvent struct {
-	Event Event  `json:"event"`
-	Text  string `json:"text"`
-}
-
-type TurnEndEvent struct {
-	Event      Event    `json:"event"`
-	StopReason string   `json:"stop_reason"`
-	ContextPct *float64 `json:"context_pct"`
-	Model      string   `json:"model"`
-}

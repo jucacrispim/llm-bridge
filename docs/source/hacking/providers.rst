@@ -111,7 +111,7 @@ Implemented in ``llm/google.go``. The provider calls Gemini's
 Model resolution (``resolveModel``)
     Per-request model → provider model (``--model`` when google is the default,
     then ``GOOGLE_MODEL`` / ``GEMINI_MODEL``, then the default
-    ``gemini-2.5-flash``). Unlike DeepSeek, the model is **not** derived from
+    ``gemini-3-flash``). Unlike DeepSeek, the model is **not** derived from
     the thinking mode.
 
 Request shape (``googleRequest``)
@@ -145,6 +145,41 @@ Tool results as objects
 Environment variables
     ``GOOGLE_API_KEY`` (required; ``GEMINI_API_KEY`` also honored),
     ``GOOGLE_URL`` (default ``https://generativelanguage.googleapis.com/v1beta``),
-    ``GOOGLE_MODEL`` / ``GEMINI_MODEL`` (default ``gemini-2.5-flash``),
+    ``GOOGLE_MODEL`` / ``GEMINI_MODEL`` (default ``gemini-3-flash``),
     ``GOOGLE_THINKING`` (default ``true``) and ``GOOGLE_THINKING_BUDGET``
     (default ``1024``).
+
+.. _providers-context-window:
+
+Context window
+--------------
+
+Providers do not expose a model's context window over the API, so the bridge
+keeps a static per-model table in ``llm/contextwindow.go``. The ``turn_end``
+event reports ``context_tokens`` (the prompt of the last provider call of the
+turn), ``context_window`` and their ratio ``context_pct``. Lookup is exact
+first, then by the **longest matching prefix**, so versioned ids such as
+``gemini-2.5-flash-001`` resolve to their base entry. A model absent from the
+table reports ``context_pct: null`` and ``context_window: 0`` instead of a
+guessed window.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 60 40
+
+   * - Model id (or prefix)
+     - Context window
+   * - ``deepseek-flash``, ``deepseek-chat``, ``deepseek-reasoner``
+     - 1,000,000
+   * - ``deepseek-v4-flash``, ``deep-v4-pro``
+     - 1,000,000
+   * - ``gemini-3.8-flash``, ``gemini-3.1-pro``
+     - 1,000,000
+   * - ``gemini-3-flash``
+     - 200,000
+   * - ``gemini-2.5-pro``, ``gemini-2.5-flash``, ``gemini-1.5-flash``
+     - 1,000,000
+   * - ``gemini-1.5-pro``
+     - 2,000,000
+   * - ``gemma-4``
+     - 128,000

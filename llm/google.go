@@ -40,7 +40,7 @@ import (
 const DefaultGoogleThinkingBudget = 1024
 
 // DefaultGoogleModel is used when no explicit model is configured.
-const DefaultGoogleModel = "gemini-2.5-flash"
+const DefaultGoogleModel = "gemini-3-flash"
 
 type GoogleProvider struct {
 	apiKey   string
@@ -89,7 +89,7 @@ func GoogleThinkingFromEnv(def bool) bool {
 //
 //	GOOGLE_API_KEY         (required; GEMINI_API_KEY also honored)
 //	GOOGLE_URL             (optional, default https://generativelanguage.googleapis.com/v1beta)
-//	GOOGLE_MODEL           (optional, default gemini-2.5-flash; GEMINI_MODEL also honored)
+//	GOOGLE_MODEL           (optional, default gemini-3-flash; GEMINI_MODEL also honored)
 //	GOOGLE_THINKING        (optional, default true — thinking mode)
 //	GOOGLE_THINKING_BUDGET (optional, default 1024 — thinkingConfig.thinkingBudget)
 func NewGoogleProviderFromEnv() *GoogleProvider {

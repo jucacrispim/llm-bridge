@@ -57,13 +57,20 @@ type ToolCallEvent struct {
 }
 
 type TurnEnd struct {
-	Event        Event    `json:"event"`
-	StopReason   string   `json:"stop_reason"`
-	ContextPct   *float64 `json:"context_pct"`
-	Model        string   `json:"model,omitempty"`
-	InputTokens  int      `json:"input_tokens"`
-	OutputTokens int      `json:"output_tokens"`
-	TotalTokens  int      `json:"total_tokens"`
+	Event      Event    `json:"event"`
+	StopReason string   `json:"stop_reason"`
+	ContextPct *float64 `json:"context_pct"`
+	// ContextTokens is the size of the context actually sent on the last
+	// provider call of the turn (the full prompt: system prompt, history,
+	// tool results and images), and ContextWindow is that model's static
+	// context window. ContextPct is ContextTokens/ContextWindow, or null when
+	// the model's window is unknown.
+	ContextTokens int    `json:"context_tokens"`
+	ContextWindow int    `json:"context_window"`
+	Model         string `json:"model,omitempty"`
+	InputTokens   int    `json:"input_tokens"`
+	OutputTokens  int    `json:"output_tokens"`
+	TotalTokens   int    `json:"total_tokens"`
 	// CacheHitTokens/CacheMissTokens are the prompt cache accounting for the
 	// whole turn, summed over every provider call made in it (the turn may
 	// include several tool-cycle round trips). Providers without cache
@@ -123,9 +130,10 @@ func NewToolCall(id, name string, input any) ([]byte, error) {
 	return json.Marshal(evt)
 }
 
-func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens int) []byte {
+func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens, contextTokens, contextWindow int) []byte {
 	evt := TurnEnd{Event: EventTurnEnd, StopReason: stopReason,
-		ContextPct: contextPct, Model: model,
+		ContextPct: contextPct, ContextTokens: contextTokens, ContextWindow: contextWindow,
+		Model:       model,
 		InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens,
 		CacheHitTokens: cacheHitTokens, CacheMissTokens: cacheMissTokens}
 	b, _ := json.Marshal(evt)

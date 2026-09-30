@@ -79,16 +79,16 @@ func TestNewToolCallMarshalError(t *testing.T) {
 
 func TestNewTurnEnd(t *testing.T) {
 	ctx := 2.5
-	got := string(NewTurnEnd("END_TURN", &ctx, "model-x", 10, 5, 15, 80, 20))
-	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":2.5,"model":"model-x","input_tokens":10,"output_tokens":5,"total_tokens":15,"cache_hit_tokens":80,"cache_miss_tokens":20}`
+	got := string(NewTurnEnd("END_TURN", &ctx, "model-x", 10, 5, 15, 80, 20, 50_000, 1_000_000))
+	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":2.5,"context_tokens":50000,"context_window":1000000,"model":"model-x","input_tokens":10,"output_tokens":5,"total_tokens":15,"cache_hit_tokens":80,"cache_miss_tokens":20}`
 	if got != want {
 		t.Errorf("NewTurnEnd() = %s, want %s", got, want)
 	}
 }
 
 func TestNewTurnEndNilContext(t *testing.T) {
-	got := string(NewTurnEnd("END_TURN", nil, "", 0, 0, 0, 0, 0))
-	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}`
+	got := string(NewTurnEnd("END_TURN", nil, "", 0, 0, 0, 0, 0, 0, 0))
+	want := `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}`
 	if got != want {
 		t.Errorf("NewTurnEnd(nil) = %s, want %s", got, want)
 	}

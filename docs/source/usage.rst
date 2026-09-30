@@ -170,7 +170,7 @@ The bridge reads these from the environment at runtime.
 * ``GOOGLE_API_KEY`` — API key (required).
 * ``GEMINI_API_KEY`` — alternative API key, used when ``GOOGLE_API_KEY`` is unset.
 * ``GOOGLE_URL`` — API endpoint base (default ``https://generativelanguage.googleapis.com/v1beta``).
-* ``GOOGLE_MODEL`` — explicit model; when unset, falls back to ``GEMINI_MODEL`` then ``gemini-2.5-flash``.
+* ``GOOGLE_MODEL`` — explicit model; when unset, falls back to ``GEMINI_MODEL`` then ``gemini-3-flash``.
 * ``GEMINI_MODEL`` — alternative explicit model, used when ``GOOGLE_MODEL`` is unset.
 * ``GOOGLE_THINKING`` — enable thinking mode (default ``true``).
 * ``GOOGLE_THINKING_BUDGET`` — thinking token budget when thinking is on (default ``1024``).

@@ -118,6 +118,10 @@ type state struct {
 
 	turnPromptTokens     int
 	turnCompletionTokens int
+	// lastPromptTokens is the prompt_tokens of the last provider call in the
+	// current turn (assigned, not summed): the size of the full context sent
+	// in that request. Used to report context usage on the turn_end event.
+	lastPromptTokens int
 	// turnCacheHitTokens/turnCacheMissTokens sum the provider's prompt cache
 	// accounting over every call in the current turn, surfaced to the client
 	// in the turn_end event. Reset at the start of each prompt.
@@ -802,6 +806,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		}
 		st.turnPromptTokens = 0
 		st.turnCompletionTokens = 0
+		st.lastPromptTokens = 0
 		st.turnCacheHitTokens = 0
 		st.turnCacheMissTokens = 0
 		st.turnFilesChanged = nil
@@ -984,6 +989,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		if resp.Usage != nil {
 			st.turnCacheHitTokens += resp.Usage.CacheHitTokens
 			st.turnCacheMissTokens += resp.Usage.CacheMissTokens
+			st.lastPromptTokens = resp.Usage.PromptTokens
 		}
 		totalTokensThisCall := inputTokens + outputTokens
 		st.totalTokens += totalTokensThisCall
@@ -1043,15 +1049,28 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		}
 
 		if len(resp.ToolCalls) == 0 {
-			contextPct := 0.0
 			model := resp.Model
 			if model == "" {
 				model = st.activeProvider().Model()
 			}
+			// Context usage: the size of the last prompt sent in the turn (the
+			// full context: system prompt, history, tool results and images)
+			// over the model's static context window. Unknown models report a
+			// null context_pct instead of guessing a window.
+			contextTokens := st.lastPromptTokens
+			contextWindow := 0
+			var contextPct *float64
+			if win, ok := llm.ContextWindow(model); ok && win > 0 {
+				contextWindow = win
+				pct := float64(contextTokens) / float64(win)
+				contextPct = &pct
+			}
+			logger.Tracef("context model=%s used=%d window=%d", model, contextTokens, contextWindow)
 			turnTotalTokens := st.turnPromptTokens + st.turnCompletionTokens
-			newEnd := protocol.NewTurnEnd(resp.StopReason, &contextPct,
+			newEnd := protocol.NewTurnEnd(resp.StopReason, contextPct,
 				model, st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens,
-				st.turnCacheHitTokens, st.turnCacheMissTokens)
+				st.turnCacheHitTokens, st.turnCacheMissTokens,
+				contextTokens, contextWindow)
 			_ = st.write(w, string(newEnd)+"\n")
 			// Report the files modified during this turn (write/search_replace)
 			// so the client can refresh them. Sorted for deterministic output.

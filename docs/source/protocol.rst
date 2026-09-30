@@ -182,10 +182,16 @@ Events (bridge → client)
 
 ``turn_end``
     End of a turn, with the stop reason, the model used and token counts.
-    ``context_pct`` may be ``null``. ``cache_hit_tokens`` / ``cache_miss_tokens``
-    are the prompt cache accounting summed over every provider call made in the
-    turn (a tool-calling turn makes several); providers without cache reporting
-    leave them at ``0``.
+    ``context_tokens`` is the size of the context actually sent on the **last**
+    provider call of the turn (the full prompt: system prompt, history, tool
+    results and images), and ``context_window`` is that model's static context
+    window. ``context_pct`` is ``context_tokens / context_window``, a fraction
+    between ``0`` and ``1``. When the model is not in the static per-model table
+    (see :ref:`providers-context-window`) ``context_pct`` is ``null`` and
+    ``context_window`` is ``0``, rather than guessing a window.
+    ``cache_hit_tokens`` / ``cache_miss_tokens`` are the prompt cache accounting
+    summed over every provider call made in the turn (a tool-calling turn makes
+    several); providers without cache reporting leave them at ``0``.
 
     .. code-block:: json
 
@@ -193,6 +199,8 @@ Events (bridge → client)
          "event": "turn_end",
          "stop_reason": "stop",
          "context_pct": 0.42,
+         "context_tokens": 420000,
+         "context_window": 1000000,
          "model": "deepseek-flash",
          "input_tokens": 1024,
          "output_tokens": 512,

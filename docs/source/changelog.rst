@@ -4,8 +4,8 @@ Changelog
 All notable changes to llm-bridge are documented here. The format loosely
 follows `Keep a Changelog <https://keepachangelog.com/>`_.
 
-v0.2 (unreleased)
------------------
+v0.3
+----
 
 Added
 ~~~~~
@@ -20,6 +20,9 @@ Changed
 ~~~~~~~
 
 - The default Google model is now ``gemini-3-flash``.
+
+v0.2.0
+------
 
 Improved
 ~~~~~~~~

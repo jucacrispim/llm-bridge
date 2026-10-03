@@ -1,11 +1,8 @@
 Changelog
 =========
 
-All notable changes to llm-bridge are documented here. The format loosely
-follows `Keep a Changelog <https://keepachangelog.com/>`_.
-
-Unreleased
-----------
+v0.4.0
+------
 
 Changed
 ~~~~~~~
@@ -35,8 +32,8 @@ Added
   ``tools.IsReadOnly`` helper; the bridge implementation of the tools
   (``tools/exec.go``).
 
-v0.3
-----
+v0.3.0
+------
 
 Added
 ~~~~~

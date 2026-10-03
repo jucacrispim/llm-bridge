@@ -226,7 +226,9 @@ type openAIMessage struct {
 	Role string `json:"role"`
 	// Content is a plain JSON string for text-only messages (the previous wire
 	// format, byte-identical) or an array of content parts when the message
-	// carries images. Omitted entirely when empty.
+	// carries images. Omitted when empty, EXCEPT for role "tool", where the
+	// DeepSeek API requires the field to be present (see the Chat loop, which
+	// forces it to "" when nil).
 	Content          json.RawMessage         `json:"content,omitempty"`
 	ReasoningContent string                  `json:"reasoning_content,omitempty"`
 	ToolCalls        []openAIMessageToolCall `json:"tool_calls,omitempty"`
@@ -359,9 +361,20 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 		msgs = append(msgs, openAIMessage{Role: RoleSystem, Content: openAIContent(RoleSystem, req.System, nil)})
 	}
 	for _, m := range req.Messages {
+		content := openAIContent(m.Role, m.Content, m.Images)
+		// A "tool" message MUST always carry the content field, even when the
+		// tool produced no output: the DeepSeek API rejects a message without
+		// it (HTTP 422 "missing field content"). The bridge's tool executor can
+		// legitimately return an empty result (glob/grep with no match, an
+		// empty file read, a shell command with no output), which openAIContent
+		// renders as nil — and the `content,omitempty` tag would drop the field
+		// entirely. Force an explicit empty string for tool messages.
+		if content == nil && m.Role == "tool" {
+			content = json.RawMessage(`""`)
+		}
 		msg := openAIMessage{
 			Role:       m.Role,
-			Content:    openAIContent(m.Role, m.Content, m.Images),
+			Content:    content,
 			ToolCallID: m.ToolCallID,
 		}
 		// DeepSeek's thinking mode requires the assistant's reasoning_content to

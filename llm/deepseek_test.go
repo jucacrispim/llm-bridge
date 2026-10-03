@@ -864,6 +864,43 @@ func TestChatSendsToolCallsInMessage(t *testing.T) {
 	}
 }
 
+func TestChatToolMessageAlwaysHasContent(t *testing.T) {
+	var gotBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	p := NewDeepSeekProvider("key", server.URL, "model")
+	// A read-only tool (glob/grep/etc.) executed by the bridge may produce an
+	// empty result. The stored tool message then has empty Content, which used
+	// to omit the field and make DeepSeek reject the whole request with
+	// "missing field content" (HTTP 422). The content field must always be
+	// present for a tool message, even when empty.
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: RoleUser, Content: "find files"},
+			{
+				Role:      RoleAssistant,
+				ToolCalls: []ToolCall{{ID: "call_1", Name: "glob", Arguments: `{"pattern":"*.nope"}`}},
+			},
+			{Role: "tool", ToolCallID: "call_1", Content: ""},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotBody, `"role":"tool"`) {
+		t.Fatalf("expected a tool message in request body, got %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"content":""`) {
+		t.Fatalf("expected explicit empty content in tool message, got %s", gotBody)
+	}
+}
+
 func TestChatSendsReasoningBackForToolCallAssistant(t *testing.T) {
 	var gotBody string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

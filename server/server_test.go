@@ -271,7 +271,7 @@ func TestHandleLineHook(t *testing.T) {
 
 	st := newTestState()
 	st.cwd = dir
-	var w bytes.Buffer
+	var w syncBuffer
 	line := `{"method":"prompt","params":{"text":"#algo parametro"}}`
 	_, quit := handleLine(line, st, &w)
 	if quit {
@@ -300,7 +300,7 @@ func TestHandleLineHook(t *testing.T) {
 
 func TestHandleLineHookMissing(t *testing.T) {
 	st := newTestState()
-	var w bytes.Buffer
+	var w syncBuffer
 	line := `{"method":"prompt","params":{"text":"#naoexiste"}}`
 	resp, _ := handleLine(line, st, &w)
 	if resp != "" {
@@ -2909,5 +2909,51 @@ func TestResolvePromptImagesNoParams(t *testing.T) {
 	images, err := resolvePromptImages("/tmp", nil)
 	if err != nil || images != nil {
 		t.Fatalf("resolvePromptImages(nil) = %v, %v; want nil, nil", images, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cancelled-turn guards (executeTool / tool_confirm)
+// ---------------------------------------------------------------------------
+
+// TestExecuteToolCancelledSkipsResult verifies the executeTool guard: when the
+// turn was already cancelled while the tool ran, its result must NOT be
+// appended to the history (the assistant message was sanitized away, so an
+// appended tool result would be an orphan the provider rejects).
+func TestExecuteToolCancelledSkipsResult(t *testing.T) {
+	st := &state{cwd: t.TempDir()}
+	st.setCancelled(true)
+	st.executeTool(llm.ToolCall{ID: "c1", Name: "glob", Arguments: `{"pattern":"*.go"}`})
+	if st.historyLen() != 0 {
+		t.Fatalf("cancelled tool appended a result: %+v", st.history)
+	}
+}
+
+// TestToolConfirmAfterCancelIgnored verifies the MethodToolConfirm guard: an
+// approval that executes while the turn is cancelled neither resumes the turn
+// nor leaves any output (the cancelled turn is not going to continue).
+func TestToolConfirmAfterCancelIgnored(t *testing.T) {
+	st := &state{
+		cwd:              t.TempDir(),
+		inToolCycle:      true,
+		pendingApprovals: map[string]llm.ToolCall{"call_1": {ID: "call_1", Name: "glob", Arguments: `{"pattern":"*.go"}`}},
+	}
+	st.setCancelled(true)
+	var w bytes.Buffer
+	resp, quit := handleLine(`{"method":"tool_confirm","params":{"id":"call_1"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_confirm should not quit")
+	}
+	if resp != "" {
+		t.Fatalf("approval during a cancelled turn should produce no response, got %q", resp)
+	}
+	if w.Len() != 0 {
+		t.Fatalf("approval during a cancelled turn should produce no output, got %q", w.String())
+	}
+	if st.historyLen() != 0 {
+		t.Fatalf("cancelled approval must not append a result, got %+v", st.history)
+	}
+	if st.hasPendingApproval("call_1") {
+		t.Fatal("the approved id should have been removed from pendingApprovals")
 	}
 }

@@ -180,3 +180,26 @@ func TestSanitizeKeepsAnsweredToolCalls(t *testing.T) {
 		t.Fatalf("len = %d, want 2", len(h))
 	}
 }
+
+// TestSanitizeDropsOrphanedToolMessage verifies that a "tool" result whose id
+// does not belong to any surviving (complete) assistant tool_calls message is
+// discarded, while a "tool" message without an id is left untouched. This is
+// the residue left when a turn is cancelled after some read-only tools ran but
+// before the mutating ones were approved.
+func TestSanitizeDropsOrphanedToolMessage(t *testing.T) {
+	h := []llm.Message{
+		{Role: llm.RoleUser, Content: "hi"},
+		{Role: "tool", ToolCallID: "orphan", Content: "leftover"},
+		{Role: "tool", Content: "no id"},
+	}
+	Sanitize(&h)
+	if len(h) != 2 {
+		t.Fatalf("len = %d, want 2 (orphaned tool dropped, id-less kept)", len(h))
+	}
+	if h[0].Role != llm.RoleUser || h[0].Content != "hi" {
+		t.Fatalf("history[0] should be the user message, got %+v", h[0])
+	}
+	if h[1].Role != "tool" || h[1].Content != "no id" {
+		t.Fatalf("history[1] should be the id-less tool message, got %+v", h[1])
+	}
+}

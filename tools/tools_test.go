@@ -35,3 +35,21 @@ func TestAllReturnsSevenTools(t *testing.T) {
 		}
 	}
 }
+
+// TestIsReadOnly verifies the read-only classification: read-only tools report
+// true, mutating tools report false, and an unknown tool is treated as mutating.
+func TestIsReadOnly(t *testing.T) {
+	for _, name := range []string{"read", "grep", "glob", "knowledge"} {
+		if !IsReadOnly(name) {
+			t.Errorf("IsReadOnly(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"write", "shell", "search_replace"} {
+		if IsReadOnly(name) {
+			t.Errorf("IsReadOnly(%q) = true, want false", name)
+		}
+	}
+	if IsReadOnly("does-not-exist") {
+		t.Errorf("IsReadOnly(unknown) = true, want false")
+	}
+}

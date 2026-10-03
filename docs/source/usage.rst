@@ -70,12 +70,14 @@ it runs a local script instead. See :doc:`hooks`.
 
    {"method": "prompt", "params": {"text": "#algo foo bar"}}
 
-**3. Tool results and control commands.** When the model requests an external
-tool (``read``, ``write``, ``shell``, ``grep``, ``glob``, ``search_replace``)
-the client runs it locally and replies with a ``tool_result``. The client can
-also ``cancel`` an in-flight turn, ``set_cwd`` to move the working directory
-(which also rebuilds the project knowledge base), ``set_knowledge_bases`` to
-choose the active bases, and ``quit`` to shut down.
+**3. Tool approval and control commands.** The bridge runs the tools itself.
+Read-only tools (``read``, ``grep``, ``glob``) run without asking; for a
+mutating tool (``shell``, ``write``, ``search_replace``) the bridge emits a
+``tool_confirm`` event and the client replies with a ``tool_confirm`` command to
+approve it (or ``cancel`` to abort). The client can also ``cancel`` an
+in-flight turn, ``set_cwd`` to move the working directory (which also rebuilds
+the project knowledge base), ``set_knowledge_bases`` to choose the active bases,
+and ``quit`` to shut down.
 
 **4. Standalone knowledge-base population.** A mode that does not run the
 server at all — it fully rebuilds a project's knowledge base from a seed

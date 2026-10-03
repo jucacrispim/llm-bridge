@@ -23,13 +23,29 @@ import (
 	"llm-bridge/llm"
 )
 
-// All returns the tools that the bridge exposes to the LLM.
+// IsReadOnly reports whether the named tool is classified as read-only (runs
+// without confirmation). Unknown tools are treated as mutating (not read-only).
+func IsReadOnly(name string) bool {
+	for _, t := range All() {
+		if t.Name == name {
+			return t.ReadOnly
+		}
+	}
+	return false
+}
+
+// All returns the tools that the bridge exposes to the LLM. Each tool carries a
+// ReadOnly classification: read-only tools (read/grep/glob/knowledge) are run
+// by the bridge without confirmation, while mutating tools (shell/write/
+// search_replace) are sent to the client for approval before the bridge runs
+// them.
 func All() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        "read",
 			Description: "Read a file from disk. Optional 'offset' (0-based line index to start at) and 'limit' (max number of lines to return) select a slice of the file by lines; without them the whole file is returned.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}`),
+			ReadOnly:    true,
 		},
 		{
 			Name:        "write",
@@ -45,11 +61,13 @@ func All() []llm.Tool {
 			Name:        "grep",
 			Description: "Search file contents for a POSIX extended regular expression (like 'grep -E'). The pattern is a regex: to match a literal string, escape regex metacharacters ('.', '[', ']', '(', ')', '{', '}', '+', '?', '|', '*', '^', '$', '\\'). Returns matching lines as 'file:line:text'.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
+			ReadOnly:    true,
 		},
 		{
 			Name:        "glob",
 			Description: "Find files matching a glob pattern",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}`),
+			ReadOnly:    true,
 		},
 		{
 			Name:        "search_replace",
@@ -60,6 +78,7 @@ func All() []llm.Tool {
 			Name:        "knowledge",
 			Description: "Use this to recall or record project knowledge across sessions. The KB holds short durable notes (architecture, design decisions, gotchas, conventions) about the project at the current working directory. Call 'search' with a natural-language query BEFORE answering questions or making changes that depend on how this project works or why it is the way it is; call 'show' once if unsure what is stored. Call 'add' (upsert by label: re-adding a label REPLACES its text) as soon as you learn something non-obvious and durable. 'delete' with a label removes a note; 'reset' clears the KB and rebuilds it from the curated seed. Runs locally inside the bridge — no client round-trip, effectively free.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["show","search","add","delete","reset"]},"query":{"type":"string"},"label":{"type":"string"},"text":{"type":"string"},"limit":{"type":"integer"}},"required":["command"]}`),
+			ReadOnly:    true,
 		},
 	}
 }

@@ -77,11 +77,15 @@ type state struct {
 	// providerName is the currently active provider in the registry.
 	providerName string
 
-	pendingToolIDs     []string
-	pendingToolResults map[string]json.RawMessage
-	history            []llm.Message
-	inToolCycle        bool
-	firstTurn          bool
+	// pendingApprovals holds the mutating tool calls of the current turn that
+	// are still waiting on the client's approval (a `tool_confirm` command).
+	// Each approval executes its tool immediately; when the map is empty the
+	// turn resumes with the next provider call. Read-only tools never enter
+	// this map (the bridge runs them itself, in the same turn).
+	pendingApprovals map[string]llm.ToolCall
+	history          []llm.Message
+	inToolCycle      bool
+	firstTurn        bool
 
 	modelOverride           string
 	thinkingOverride        *bool
@@ -226,6 +230,34 @@ func (st *state) resolveKnowledge(id, args string) {
 	st.appendToolResult(id, out)
 }
 
+// executeTool runs a single tool call inside the bridge and appends its real
+// result to the history. The `knowledge` tool resolves against the project
+// knowledge base; every other tool runs through the filesystem/shell executor
+// against the current cwd (relative paths resolved against it). The execution
+// is cancelable: a `cancel` interrupts a running shell/grep process. If the
+// turn was cancelled while the tool ran, no result is appended (the assistant
+// message was already sanitized away, so an appended tool result would be an
+// orphan).
+func (st *state) executeTool(tc llm.ToolCall) {
+	if tc.Name == "knowledge" {
+		st.resolveKnowledge(tc.ID, tc.Arguments)
+		return
+	}
+	exec := tools.NewExecutor(st.cwd)
+	ctx, cancel := context.WithCancel(context.Background())
+	st.setCancel(cancel)
+	out, err := exec.Execute(ctx, tc.Name, tc.Arguments)
+	st.setCancel(nil)
+	cancel()
+	if err != nil {
+		out = "error: " + err.Error()
+	}
+	if st.isCancelled() {
+		return
+	}
+	st.appendToolResult(tc.ID, out)
+}
+
 // kbBaseMetadata is the subset of a knowledge base's client-reported metadata
 // (set_knowledge_bases) that we use to link a base to the current project: its
 // display name and its path. Other fields (id, type, description) are ignored.
@@ -315,15 +347,11 @@ func (st *state) historyLen() int {
 	return len(st.history)
 }
 
-// hasPendingToolID reports whether the current tool cycle is still waiting on a
-// tool_result for id.
-func (st *state) hasPendingToolID(id string) bool {
-	for _, pid := range st.pendingToolIDs {
-		if pid == id {
-			return true
-		}
-	}
-	return false
+// hasPendingApproval reports whether the current turn is still waiting on the
+// client to approve the mutating tool call with the given id.
+func (st *state) hasPendingApproval(id string) bool {
+	_, ok := st.pendingApprovals[id]
+	return ok
 }
 
 // recordFileChanged adds path to the current turn's files_changed list if it is
@@ -674,8 +702,7 @@ func (st *state) cancelTurn() {
 	st.cancelActive()
 	st.setCancelled(true)
 	st.inToolCycle = false
-	st.pendingToolIDs = nil
-	st.pendingToolResults = nil
+	st.pendingApprovals = nil
 	// Drop any orphaned assistant message with tool_calls that never received
 	// a tool result. Cancelling mid-tool-cycle leaves such a message in the
 	// history (runToolCycle appended it before waiting for the results); if it
@@ -696,9 +723,8 @@ type setKnowledgeBasesParams struct {
 	Bases []json.RawMessage `json:"bases"`
 }
 
-type toolResultParams struct {
-	ID     string          `json:"id"`
-	Result json.RawMessage `json:"result"`
+type toolConfirmParams struct {
+	ID string `json:"id"`
 }
 
 func handleLine(line string, st *state, w io.Writer) (string, bool) {
@@ -842,50 +868,43 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		return "", false
 
 	case string(protocol.MethodToolResult):
-		if !st.inToolCycle || len(st.pendingToolIDs) == 0 {
-			// A tool_result that arrives after the turn was cancelled is
-			// silently ignored: some clients (e.g. when the user denies a tool)
-			// queue a tool_result right before their own cancel, and the reader
-			// goroutine may have already processed the cancel by the time the
-			// main loop reaches this tool_result. Erroring here is confusing
-			// and useless, since the cancelled turn is not going to continue.
-			if st.isCancelled() {
-				return "", false
-			}
-			return string(protocol.NewError("tool_result without pending tool call")), false
-		}
-		var p toolResultParams
+		// The bridge now executes every tool itself, so a tool_result from the
+		// client is no longer meaningful. It is accepted and ignored for
+		// backwards compatibility with clients built before the migration
+		// (they would send it for a tool the bridge already ran).
+		return "", false
+
+	case string(protocol.MethodToolConfirm):
+		// The client approved a mutating tool call the bridge offered via a
+		// `tool_confirm` event. Execute that tool right away (one at a time,
+		// mirroring the client's per-call confirmation), append its real result
+		// and, when no approval is left pending, resume the turn.
+		var p toolConfirmParams
 		if err := json.Unmarshal(cmd.Params, &p); err != nil {
-			return string(protocol.NewError("invalid tool_result params: " + err.Error())), false
+			return string(protocol.NewError("invalid tool_confirm params: " + err.Error())), false
 		}
-		// Only accept a result for a tool call this turn is actually waiting on.
-		// A tool_result whose id is not pending — e.g. a late result from a
-		// command the client kept running after the turn was cancelled, or a
-		// stale result racing into a newer turn's tool cycle — must be ignored:
-		// appending it would leave an orphaned "tool" message with no matching
-		// assistant tool_call, which the provider rejects on the next request
-		if !st.hasPendingToolID(p.ID) {
+		if !st.inToolCycle || len(st.pendingApprovals) == 0 {
+			// An approval for a turn that was cancelled meanwhile (the reader
+			// goroutine may have processed the cancel first): ignore it, like a
+			// late tool_result.
 			return "", false
 		}
-		if _, ok := st.pendingToolResults[p.ID]; ok {
-			return string(protocol.NewError("duplicate tool_result for id " + p.ID)), false
-		}
-		st.pendingToolResults[p.ID] = p.Result
-		st.appendToolResult(p.ID, string(p.Result))
-		allDone := true
-		for _, id := range st.pendingToolIDs {
-			if _, ok := st.pendingToolResults[id]; !ok {
-				allDone = false
-				break
-			}
-		}
-		if !allDone {
+		tc, ok := st.pendingApprovals[p.ID]
+		// Only accept an approval for a tool call this turn is actually waiting
+		// on: a stale/late approval racing into a newer turn must be ignored.
+		if !ok {
 			return "", false
 		}
-		st.pendingToolIDs = nil
-		st.pendingToolResults = nil
-		st.inToolCycle = false
-		return runToolCycle(st, w)
+		delete(st.pendingApprovals, p.ID)
+		st.executeTool(tc)
+		if st.isCancelled() {
+			return "", false
+		}
+		if len(st.pendingApprovals) == 0 {
+			st.inToolCycle = false
+			return runToolCycle(st, w)
+		}
+		return "", false
 
 	case string(protocol.MethodQuit):
 		return "", true
@@ -1026,21 +1045,43 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 		st.appendAssistant(resp)
 
+		// Surface each tool call to the client and run the read-only ones right
+		// away, in the same turn. Read-only tools (read/grep/glob/knowledge)
+		// run internally and are emitted as a `tool_call` display event;
+		// mutating tools (shell/write/search_replace) are emitted as
+		// `tool_confirm` and only run once the client approves them (handled by
+		// the MethodToolConfirm case).
+		st.pendingApprovals = make(map[string]llm.ToolCall)
 		for _, tc := range resp.ToolCalls {
+			if st.isCancelled() {
+				return "", false
+			}
 			var input any = map[string]any{}
 			if tc.Arguments != "" {
 				input = json.RawMessage(tc.Arguments)
 			}
-			evt, err := protocol.NewToolCall(tc.ID, tc.Name, input)
+			if tools.IsReadOnly(tc.Name) {
+				evt, err := protocol.NewToolCall(tc.ID, tc.Name, input)
+				if err == nil {
+					_ = st.write(w, string(evt)+"\n")
+				}
+				// Execute the read-only tool now and append its real result so
+				// the turn keeps moving without a client round-trip.
+				st.executeTool(tc)
+				continue
+			}
+			evt, err := protocol.NewToolConfirm(tc.ID, tc.Name, input)
 			if err == nil {
 				_ = st.write(w, string(evt)+"\n")
 			}
-			// Track files written/modified this turn so the client is notified
-			// via a files_changed event when the turn ends.
+			// Track files the tool is about to modify (write/search_replace) so
+			// the client is notified via a files_changed event when the turn
+			// ends.
 			switch tc.Name {
 			case "write", "search_replace":
 				st.recordFileChanged(filePathFromArgs(tc.Arguments))
 			}
+			st.pendingApprovals[tc.ID] = tc
 		}
 
 		if len(resp.ToolCalls) > 0 {
@@ -1095,31 +1136,17 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			}
 			st.sanitizeHistory()
 			st.inToolCycle = false
-			st.pendingToolIDs = nil
-			st.pendingToolResults = nil
+			st.pendingApprovals = nil
 			st.historyLenBeforeTurn = 0
 			return "", false
 		}
 
-		st.pendingToolIDs = make([]string, 0, len(resp.ToolCalls))
-		st.pendingToolResults = make(map[string]json.RawMessage)
-		// Knowledge tool calls resolve locally and never wait for the client:
-		// execute immediately and append the real result so the turn keeps
-		// moving without a round-trip. Only non-knowledge calls go to
-		// pendingToolIDs.
-		for _, tc := range resp.ToolCalls {
-			if tc.Name == "knowledge" {
-				st.resolveKnowledge(tc.ID, tc.Arguments)
-				continue
-			}
-			st.pendingToolIDs = append(st.pendingToolIDs, tc.ID)
-		}
-		if len(st.pendingToolIDs) > 0 {
+		if len(st.pendingApprovals) > 0 {
 			st.inToolCycle = true
 			return "", false
 		}
-		// Every tool call was internal (knowledge): loop back and call Chat
-		// again with the results already appended to the history.
+		// Every tool call was read-only (executed above) or knowledge: loop
+		// back and call Chat again with the results already in the history.
 		continue
 	}
 }

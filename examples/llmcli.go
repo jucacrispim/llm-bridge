@@ -26,15 +26,19 @@
 //     The client MUST consume/wait for this `ready` event before sending any command.
 //  3. Commands are sent as JSON lines to the bridge's stdin:
 //     - Prompt: `{"method": "prompt", "params": {"text": "..."}}`
-//     - Tool result: `{"method": "tool_result", "params": {"id": "...", "result": ...}}`
+//     - Approve tool: `{"method": "tool_confirm", "params": {"id": "..."}}`
 //     - Cancel: `{"method": "cancel"}`
 //     - Quit: `{"method": "quit"}`
 //  4. Events stream back from the bridge's stdout as JSON lines:
-//     - `ready`, `thinking`, `chunk`, `tool_call`, `turn_end`, `files_changed`,
-//       `hook_action`, `error`, `cancelled`.
+//     - `ready`, `thinking`, `chunk`, `tool_call`, `tool_confirm`, `turn_end`,
+//       `files_changed`, `hook_action`, `error`, `cancelled`.
 //
-// This reference CLI handles all these events, implements local file/shell tools,
-// displays thinking blocks, and supports interactive tool approval.
+// The bridge runs the tools itself. Read-only tools (`read`/`grep`/`glob`) run
+// without asking and are surfaced as `tool_call` events (display only); the
+// mutating tools (`shell`/`write`/`search_replace`) are offered for approval via
+// a `tool_confirm` event. This reference CLI displays thinking blocks, shows
+// tool calls, asks the user to approve mutating tools, and cancels the turn when
+// a tool is denied.
 package main
 
 import (
@@ -45,183 +49,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
-	"llm-bridge/llm"
 	"llm-bridge/protocol"
 )
-
-// ============================================================================
-// 1. Local Tool Implementations
-// ============================================================================
-// When the LLM requests a tool call (e.g. read, write, shell, grep, glob,
-// search_replace), the client executes it locally on disk and sends the result
-// back to the bridge via the `tool_result` command.
-
-func executeToolCall(tc llm.ToolCall) (string, error) {
-	switch tc.Name {
-	case "read":
-		var args struct {
-			Path   string `json:"path"`
-			Offset *int   `json:"offset"`
-			Limit  *int   `json:"limit"`
-		}
-		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
-			return "", err
-		}
-		data, err := os.ReadFile(args.Path)
-		if err != nil {
-			return "", err
-		}
-		// If offset/limit are provided, slice lines accordingly
-		if args.Offset != nil || args.Limit != nil {
-			lines := strings.Split(string(data), "\n")
-			start := 0
-			if args.Offset != nil && *args.Offset > 0 {
-				start = *args.Offset
-				if start > len(lines) {
-					start = len(lines)
-				}
-			}
-			end := len(lines)
-			if args.Limit != nil && *args.Limit >= 0 {
-				end = start + *args.Limit
-				if end > len(lines) {
-					end = len(lines)
-				}
-			}
-			lines = lines[start:end]
-			return strings.Join(lines, "\n"), nil
-		}
-		return string(data), nil
-
-	case "write":
-		var args struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
-			return "", err
-		}
-		if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(args.Path, []byte(args.Content), 0644); err != nil {
-			return "", err
-		}
-		return "ok", nil
-
-	case "shell":
-		var args struct {
-			Command string `json:"command"`
-		}
-		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
-			return "", err
-		}
-		cmd := exec.Command("bash", "-c", args.Command)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return string(out) + "\n" + err.Error(), err
-		}
-		return string(out), nil
-
-	case "grep":
-		var args struct {
-			Pattern string `json:"pattern"`
-			Path    string `json:"path"`
-		}
-		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
-			return "", err
-		}
-		if args.Pattern == "" {
-			return "", fmt.Errorf("missing pattern")
-		}
-		searchPath := args.Path
-		if searchPath == "" {
-			searchPath = "."
-		}
-		var matches []string
-		_ = filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			if info.IsDir() {
-				// skip common heavy dirs
-				if info.Name() == ".git" || info.Name() == "node_modules" || info.Name() == "build" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			data, rErr := os.ReadFile(path)
-			if rErr != nil {
-				return nil
-			}
-			if strings.Contains(string(data), args.Pattern) {
-				matches = append(matches, path)
-			}
-			return nil
-		})
-		return strings.Join(matches, "\n"), nil
-
-	case "glob":
-		var args struct {
-			Pattern string `json:"pattern"`
-			Path    string `json:"path"`
-		}
-		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
-			return "", err
-		}
-		pattern := args.Pattern
-		if args.Path != "" {
-			pattern = filepath.Join(args.Path, pattern)
-		}
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			return "", err
-		}
-		return strings.Join(matches, "\n"), nil
-
-	case "search_replace":
-		var args struct {
-			Path    string `json:"path"`
-			Search  string `json:"search"`
-			Replace string `json:"replace"`
-		}
-		if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil {
-			return "", err
-		}
-		if args.Path == "" || args.Search == "" {
-			return "", fmt.Errorf("missing path or search string")
-		}
-		data, err := os.ReadFile(args.Path)
-		if err != nil {
-			return "", err
-		}
-		content := string(data)
-		if !strings.Contains(content, args.Search) {
-			return "", fmt.Errorf("string %q not found in %s", args.Search, args.Path)
-		}
-		newContent := strings.Replace(content, args.Search, args.Replace, 1)
-		if err := os.WriteFile(args.Path, []byte(newContent), 0644); err != nil {
-			return "", err
-		}
-		return "ok", nil
-
-	default:
-		return "", fmt.Errorf("unknown tool %q", tc.Name)
-	}
-}
-
-// isReadOnlyTool reports whether a tool only reads data (never mutates the filesystem).
-func isReadOnlyTool(name string) bool {
-	switch name {
-	case "read", "grep", "glob":
-		return true
-	default:
-		return false
-	}
-}
 
 func askConfirmation(reader *bufio.Reader, prompt string) bool {
 	fmt.Print(prompt)
@@ -231,7 +62,7 @@ func askConfirmation(reader *bufio.Reader, prompt string) bool {
 }
 
 // ============================================================================
-// 2. Protocol Helpers (Commands & Tool Results)
+// 2. Protocol Helpers (Commands)
 // ============================================================================
 
 func sendPrompt(w io.Writer, text string) error {
@@ -242,14 +73,12 @@ func sendPrompt(w io.Writer, text string) error {
 	})
 }
 
-func sendToolResult(w io.Writer, id, result, status string) error {
-	params, _ := json.Marshal(protocol.ToolResultParams{
-		ID:     id,
-		Result: json.RawMessage(result),
-		Status: status,
-	})
+// sendToolConfirm approves a mutating tool the bridge offered via a
+// `tool_confirm` event. The bridge then runs the tool itself.
+func sendToolConfirm(w io.Writer, id string) error {
+	params, _ := json.Marshal(map[string]string{"id": id})
 	return json.NewEncoder(w).Encode(protocol.Command{
-		Method: protocol.MethodToolResult,
+		Method: protocol.MethodToolConfirm,
 		Params: params,
 	})
 }
@@ -370,7 +199,7 @@ func main() {
 	}()
 
 	scanner := bufio.NewScanner(stdout)
-	// Support large tool results up to 8MB per JSON line
+	// Support large payloads up to 8MB per JSON line
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
 	// ------------------------------------------------------------------------
@@ -470,36 +299,24 @@ func main() {
 				fmt.Print(ev.Text)
 
 			case string(protocol.EventToolCall):
+				// Read-only tool the bridge already ran (display only).
 				thinking.flush()
-				fmt.Printf("\n\n⚙️ [Tool Call Requested]\n  ID:    %s\n  Name:  %s\n  Input: %s\n", ev.ID, ev.Name, string(ev.Input))
+				fmt.Printf("\n\n⚙️ [Tool Call — already run by the bridge]\n  ID:    %s\n  Name:  %s\n  Input: %s\n",
+					ev.ID, ev.Name, string(ev.Input))
 
-				// Auto-approve read-only tools; prompt user for mutating tools
-				approved := isReadOnlyTool(ev.Name)
-				if approved {
-					fmt.Println("  (auto-approved read-only tool)")
+			case string(protocol.EventToolConfirm):
+				// Mutating tool awaiting approval. Approve to let the bridge run
+				// it; deny to cancel the turn.
+				thinking.flush()
+				fmt.Printf("\n\n⚙️ [Tool Approval Requested]\n  ID:    %s\n  Name:  %s\n  Input: %s\n",
+					ev.ID, ev.Name, string(ev.Input))
+				if askConfirmation(reader, "  Approve this tool? (y/N) ") {
+					fmt.Println("  ✅ Approved — the bridge will run it.")
+					_ = sendToolConfirm(stdin, ev.ID)
 				} else {
-					approved = askConfirmation(reader, "  Execute this tool? (y/N) ")
-				}
-
-				if approved {
-					result, err := executeToolCall(llm.ToolCall{
-						ID:        ev.ID,
-						Name:      ev.Name,
-						Arguments: string(ev.Input),
-					})
-					if err != nil {
-						fmt.Printf("  ❌ Tool execution failed: %v\n", err)
-						resultJSON, _ := json.Marshal(map[string]any{"error": err.Error()})
-						_ = sendToolResult(stdin, ev.ID, string(resultJSON), "error")
-					} else {
-						fmt.Println("  ✅ Tool executed successfully.")
-						resultJSON, _ := json.Marshal(map[string]any{"result": result})
-						_ = sendToolResult(stdin, ev.ID, string(resultJSON), "success")
-					}
-				} else {
-					fmt.Println("  🚫 Tool call denied by user.")
-					resultJSON, _ := json.Marshal(map[string]any{"error": "user denied tool call"})
-					_ = sendToolResult(stdin, ev.ID, string(resultJSON), "error")
+					fmt.Println("  🚫 Denied — cancelling the turn.")
+					_ = json.NewEncoder(stdin).Encode(protocol.Command{Method: protocol.MethodCancel})
+					// the bridge replies with a `cancelled` event, handled below
 				}
 
 			case string(protocol.EventFilesChanged):

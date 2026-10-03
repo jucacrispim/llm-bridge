@@ -119,10 +119,9 @@ main loop is blocked inside a streaming ``Chat``:
 - Every other line is forwarded over a buffered channel (``cmdCh``) to the
   main loop, which processes commands serially via ``handleLine``.
 
-The scanner is configured with an 8 MB per-line limit, because a single
-``tool_result`` can be large (a whole file read, a ``grep`` with many matches,
-or a ``shell`` with lots of output). The default 64 KB limit would otherwise
-kill the whole bridge on a big tool result.
+The scanner is configured with an 8 MB per-line limit, because a single command
+line can be large (e.g. ``set_knowledge_bases`` metadata). The default 64 KB
+limit would otherwise kill the whole bridge on a big line.
 
 The request flow
 ----------------
@@ -135,14 +134,18 @@ The request flow
    current history snapshot, all tools and the effective system prompt. It
    publishes the cancel function so the reader goroutine can interrupt the
    stream, then relays streaming ``chunk``/``thinking`` events to the client.
-#. If the model returned tool calls, they are emitted as ``tool_call`` events.
-   **Internal** tools (``knowledge``) are resolved locally right away and their
-   results appended to the history; **external** tools are queued in
-   ``pendingToolIDs`` and the loop returns, waiting for the client to send a
-   ``tool_result``.
-#. When ``tool_result`` arrives, ``handleLine`` appends it to the history and
-   calls ``runToolCycle`` again. The loop repeats until the model produces a
-   final answer with no tool calls.
+#. If the model returned tool calls, the bridge classifies each one. **Read-only**
+   tools (``read``/``grep``/``glob``, plus the fully internal ``knowledge``) are
+   run by the bridge right away — the result is appended to the history and a
+   ``tool_call`` event is emitted for display only. **Mutating** tools
+   (``shell``/``write``/``search_replace``) are emitted as ``tool_confirm``
+   events and queued in ``pendingApprovals``; the loop returns, waiting for the
+   client to approve each one.
+#. When a ``tool_confirm`` approval arrives, ``handleLine`` runs that tool
+   (``executeTool``), appends its result and — once ``pendingApprovals`` is empty
+   — calls ``runToolCycle`` again. The loop repeats until the model produces a
+   final answer with no tool calls. A denied tool is signalled with ``cancel``
+   (which aborts the turn).
 #. On a final answer, the bridge emits ``turn_end`` (with stop reason, model
    and token counts), a ``files_changed`` event listing any paths written this
    turn, and a final ``usage_delta``. It then runs the optional pruning
@@ -160,7 +163,8 @@ for the model to finish talking.
 If ``Chat`` returns ``context.Canceled``, the partial thinking/content that was
 streamed before the interruption is still preserved in the history (so the
 cancelled turn's context is kept for the next prompt), and a stale
-``tool_result`` from a cancelled turn is silently ignored instead of erroring.
+``tool_confirm`` approval (or legacy ``tool_result``) from a cancelled turn is
+silently ignored instead of erroring.
 
 Hooks
 -----

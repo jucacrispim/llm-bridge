@@ -16,17 +16,17 @@ between and gives the client a single, stable surface that a plain provider SDK
 does not:
 
 - **Unified API across providers**: one JSON-lines protocol for every provider.
-  ``prompt``, ``tool_result``, ``cancel`` and the rest mean the same thing no
+  ``prompt``, ``tool_confirm``, ``cancel`` and the rest mean the same thing no
   matter whether the active provider is **DeepSeek** or **Google/Gemini**; the
   bridge translates the request/response format, streaming style,
   authentication and thinking mode for each one.
-- **Tool calls handled by the client**: the models already know how to call
-  tools, so the bridge only advertises the tool schemas and relays each
-  ``tool_call`` event to the client, waiting for the matching ``tool_result``.
-  The tools themselves — ``read``, ``write``, ``search_replace``, ``grep``,
-  ``glob`` and ``shell`` — are implemented by the **client**, which has direct
-  access to the host and the project on disk, turning a chat client into a
-  coding assistant.
+- **Tool calls executed by the bridge**: the models already know how to call
+  tools, so the bridge advertises the tool schemas *and runs the tools itself* —
+  ``read``, ``write``, ``search_replace``, ``grep``, ``glob`` and ``shell`` —
+  directly on the host and the project on disk, turning a chat client into a
+  coding assistant. Read-only tools run without confirmation; the mutating ones
+  (``shell`` / ``write`` / ``search_replace``) are offered to the client for
+  approval via a ``tool_confirm`` event before the bridge runs them.
 - **Image support (multimodal)**: a prompt can carry images by ``path`` (read
   by the bridge), ``url`` (passed through to the provider) or ``data`` (inline
   base64, e.g. pasted into the chat). The bridge normalizes them to each
@@ -55,12 +55,14 @@ Basic conversation flow
 #. It calls the active provider (default from ``--provider``, switchable via
    the ``provider`` override).
 #. The provider's streamed output is relayed back to the client as events:
-   ``chunk`` (content), ``thinking`` (chain-of-thought), ``tool_call``,
-   ``usage_delta``, and finally ``turn_end``.
-#. If the model requests a tool, the bridge emits a ``tool_call`` event and
-   waits for the client to run the tool and reply with a ``tool_result``. The
-   tool loop (``runToolCycle``) keeps the tool calls and results in the
-   history and repeats until the model produces a final answer.
+   ``chunk`` (content), ``thinking`` (chain-of-thought), ``tool_call`` (a
+   read-only tool, already run by the bridge), ``tool_confirm`` (a mutating tool
+   awaiting approval), ``usage_delta``, and finally ``turn_end``.
+#. If the model requests a tool, the bridge runs the read-only ones immediately
+   and, for the mutating ones, emits a ``tool_confirm`` event and waits for the
+   client's approval before running them. The tool loop (``runToolCycle``) keeps
+   the tool calls and results in the history and repeats until the model
+   produces a final answer.
 #. When the model finishes, the turn ends. If the tool loop wrote files via
    the ``write``/``search_replace`` tools, the paths are reported to the client
    as a ``files_changed`` event (used, for example, to trigger automated
@@ -69,7 +71,7 @@ Basic conversation flow
 Because the protocol is line-based, the bridge stays simple: a main loop reads
 one command per line and writes one event per line. Long-running work — a
 streaming chat or a hook script — runs off the main loop so the bridge keeps
-responding to ``cancel``, ``tool_result`` and new prompts.
+responding to ``cancel``, ``tool_confirm`` and new prompts.
 
 Where it runs and how the client connects
 -----------------------------------------

@@ -161,8 +161,6 @@ func TestHandleLineTurnEndReportsCacheUsage(t *testing.T) {
 	st := &state{provider: provider}
 	var w bytes.Buffer
 	_, _ = handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
-	w.Reset()
-	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
 	if got := w.String(); !strings.Contains(got, `"input_tokens":150,"output_tokens":5,"total_tokens":155,"cache_hit_tokens":120,"cache_miss_tokens":30`) {
 		t.Fatalf("turn_end did not report summed cache usage, got %q", got)
 	}
@@ -192,8 +190,6 @@ func TestHandleLineTurnEndReportsContextUsage(t *testing.T) {
 	st := &state{provider: provider}
 	var w bytes.Buffer
 	_, _ = handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
-	w.Reset()
-	_, _ = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
 	want := `"context_pct":0.25,"context_tokens":250000,"context_window":1000000,"model":"deepseek-flash"`
 	if got := w.String(); !strings.Contains(got, want) {
 		t.Fatalf("turn_end context fields mismatch, got %q, want substring %q", got, want)
@@ -328,13 +324,16 @@ func TestHandleLineHookMissing(t *testing.T) {
 func TestHandleLinePromptToolCall(t *testing.T) {
 	st := &state{provider: &fakeProvider{
 		name: "fake",
-		resp: &llm.ChatResponse{
-			Content:    "",
-			StopReason: "tool_calls",
-			Usage:      &llm.Usage{},
-			ToolCalls: []llm.ToolCall{
-				{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`},
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`},
+				},
 			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
 		},
 	}}
 	var w bytes.Buffer
@@ -358,13 +357,16 @@ func TestHandleLinePromptToolCall(t *testing.T) {
 func TestHandleLinePromptToolCallNoArgs(t *testing.T) {
 	st := &state{provider: &fakeProvider{
 		name: "fake",
-		resp: &llm.ChatResponse{
-			Content:    "",
-			StopReason: "tool_calls",
-			Usage:      &llm.Usage{},
-			ToolCalls: []llm.ToolCall{
-				{ID: "call_2", Name: "glob", Arguments: ""},
+		responses: []*llm.ChatResponse{
+			{
+				Content:    "",
+				StopReason: "tool_calls",
+				Usage:      &llm.Usage{},
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_2", Name: "glob", Arguments: ""},
+				},
 			},
+			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
 		},
 	}}
 	var w bytes.Buffer
@@ -544,15 +546,21 @@ func TestHandleLineSetKnowledgeBasesInvalid(t *testing.T) {
 	}
 }
 
-func TestHandleLineToolResult(t *testing.T) {
+// TestHandleLineToolResultIgnored verifies that a tool_result from the client is
+// accepted and ignored: the bridge now executes every tool itself, so the
+// command is only kept for backwards compatibility with older clients.
+func TestHandleLineToolResultIgnored(t *testing.T) {
 	st := newTestState()
 	var w bytes.Buffer
 	resp, quit := handleLine(`{"method":"tool_result","params":{"id":"a"}}`, st, &w)
 	if quit {
 		t.Fatal("tool_result should not quit")
 	}
-	if resp != `{"event":"error","message":"tool_result without pending tool call"}` {
-		t.Errorf("tool_result response mismatch: %q", resp)
+	if resp != "" {
+		t.Errorf("tool_result should be ignored, got %q", resp)
+	}
+	if w.Len() != 0 {
+		t.Errorf("tool_result should produce no output, got %q", w.String())
 	}
 }
 
@@ -564,10 +572,9 @@ func TestHandleLineToolResult(t *testing.T) {
 // would surface a confusing "tool_result without pending tool call".
 func TestHandleLineToolResultAfterCancelIgnored(t *testing.T) {
 	st := newTestState()
-	// simulate an in-flight tool cycle awaiting a tool result
+	// simulate an in-flight tool cycle awaiting the client's approval
 	st.inToolCycle = true
-	st.pendingToolIDs = []string{"shell"}
-	st.pendingToolResults = map[string]json.RawMessage{}
+	st.pendingApprovals = map[string]llm.ToolCall{"shell": {ID: "shell", Name: "shell"}}
 
 	// cancel clears the tool cycle and marks the turn cancelled
 	var w bytes.Buffer
@@ -578,7 +585,7 @@ func TestHandleLineToolResultAfterCancelIgnored(t *testing.T) {
 	if resp != `{"event":"cancelled"}` {
 		t.Fatalf("expected cancelled, got %q", resp)
 	}
-	if st.inToolCycle || len(st.pendingToolIDs) != 0 {
+	if st.inToolCycle || len(st.pendingApprovals) != 0 {
 		t.Fatal("cancel should clear the pending tool cycle")
 	}
 
@@ -593,6 +600,15 @@ func TestHandleLineToolResultAfterCancelIgnored(t *testing.T) {
 	}
 	if w.Len() != 0 {
 		t.Fatalf("expected no output for ignored tool_result, got %q", w.String())
+	}
+	// a tool_confirm (approval) for the cancelled turn is likewise ignored
+	w.Reset()
+	resp, quit = handleLine(`{"method":"tool_confirm","params":{"id":"shell"}}`, st, &w)
+	if quit {
+		t.Fatal("tool_confirm should not quit")
+	}
+	if resp != "" || w.Len() != 0 {
+		t.Fatalf("approval for a cancelled turn should be ignored, got resp=%q out=%q", resp, w.String())
 	}
 }
 
@@ -735,27 +751,20 @@ func TestHandleLinePromptToolCallThenResult(t *testing.T) {
 		t.Fatalf("expected empty response after prompt, got %q", resp)
 	}
 	got := w.String()
+	// the read-only tool runs inline and a `tool_call` display event is emitted
 	if !strings.Contains(got, `"event":"tool_call"`) || !strings.Contains(got, `"id":"call_1"`) {
-		t.Fatalf("expected tool_call event in initial output, got %q", got)
+		t.Fatalf("expected tool_call event in output, got %q", got)
 	}
-	if strings.Contains(got, `"event":"turn_end"`) {
-		t.Fatalf("should not emit turn_end before tool_result, got %q", got)
-	}
-	// now send tool_result
-	w.Reset()
-	resp, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
-	if quit {
-		t.Fatal("tool_result should not quit")
-	}
-	if resp != "" {
-		t.Fatalf("expected empty response after tool_result, got %q", resp)
-	}
-	got = w.String()
+	// the turn keeps moving on its own: the final answer follows in the SAME
+	// turn, with no client round-trip.
 	if !strings.Contains(got, `"event":"chunk"`) || !strings.Contains(got, `"text":"done"`) {
-		t.Fatalf("expected chunk 'done' after tool_result, got %q", got)
+		t.Fatalf("expected chunk 'done' in the same turn, got %q", got)
 	}
 	if !strings.Contains(got, `"event":"turn_end"`) {
-		t.Fatalf("expected turn_end after tool_result, got %q", got)
+		t.Fatalf("expected turn_end, got %q", got)
+	}
+	if provider.callCount != 2 {
+		t.Fatalf("provider callCount = %d, want 2 (read resolved internally)", provider.callCount)
 	}
 }
 
@@ -804,39 +813,48 @@ func TestHandleLinePromptInToolCycle(t *testing.T) {
 	}
 }
 
-func TestHandleLineToolResultInvalidParams(t *testing.T) {
+func TestHandleLineToolConfirmInvalidParams(t *testing.T) {
 	st := &state{
-		inToolCycle:        true,
-		pendingToolIDs:     []string{"call_1"},
-		pendingToolResults: map[string]json.RawMessage{},
+		inToolCycle:      true,
+		pendingApprovals: map[string]llm.ToolCall{"call_1": {ID: "call_1", Name: "write"}},
 	}
 	var w bytes.Buffer
-	resp, quit := handleLine(`{"method":"tool_result","params":"bad"}`, st, &w)
+	resp, quit := handleLine(`{"method":"tool_confirm","params":"bad"}`, st, &w)
 	if quit {
-		t.Fatal("tool_result should not quit")
+		t.Fatal("tool_confirm should not quit")
 	}
-	if !strings.Contains(resp, `"event":"error"`) || !strings.Contains(resp, "invalid tool_result params") {
+	if !strings.Contains(resp, `"event":"error"`) || !strings.Contains(resp, "invalid tool_confirm params") {
 		t.Fatalf("expected invalid params error, got %q", resp)
 	}
 }
 
-func TestHandleLineToolResultDuplicate(t *testing.T) {
+// TestHandleLineToolConfirmUnknownIDIgnored verifies that an approval whose id
+// is not among the pending mutating tool calls (a stale/late approval racing
+// into a newer turn) is silently ignored, leaving the real pending approval in
+// place.
+func TestHandleLineToolConfirmUnknownIDIgnored(t *testing.T) {
 	st := &state{
-		inToolCycle:        true,
-		pendingToolIDs:     []string{"call_1"},
-		pendingToolResults: map[string]json.RawMessage{"call_1": json.RawMessage(`"existing"`)},
+		inToolCycle:      true,
+		pendingApprovals: map[string]llm.ToolCall{"call_1": {ID: "call_1", Name: "write"}},
 	}
 	var w bytes.Buffer
-	resp, quit := handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"new"}}`, st, &w)
+	resp, quit := handleLine(`{"method":"tool_confirm","params":{"id":"call_2"}}`, st, &w)
 	if quit {
-		t.Fatal("tool_result should not quit")
+		t.Fatal("tool_confirm should not quit")
 	}
-	if !strings.Contains(resp, `"event":"error"`) || !strings.Contains(resp, "duplicate tool_result for id call_1") {
-		t.Fatalf("expected duplicate error, got %q", resp)
+	if resp != "" {
+		t.Fatalf("unknown-id approval should be ignored, got %q", resp)
+	}
+	if w.Len() != 0 {
+		t.Fatalf("expected no output for ignored approval, got %q", w.String())
+	}
+	if !st.hasPendingApproval("call_1") {
+		t.Fatal("still awaiting the real pending approval")
 	}
 }
 
-func TestHandleLineToolResultPartialWait(t *testing.T) {
+func TestHandleLineToolConfirmPartialWait(t *testing.T) {
+	dir := t.TempDir()
 	provider := &fakeProvider{
 		name: "fake",
 		responses: []*llm.ChatResponse{
@@ -845,8 +863,8 @@ func TestHandleLineToolResultPartialWait(t *testing.T) {
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
 				ToolCalls: []llm.ToolCall{
-					{ID: "call_1", Name: "read", Arguments: `{}`},
-					{ID: "call_2", Name: "glob", Arguments: `{}`},
+					{ID: "call_1", Name: "write", Arguments: `{"path":"` + dir + `/a","content":"1"}`},
+					{ID: "call_2", Name: "write", Arguments: `{"path":"` + dir + `/b","content":"2"}`},
 				},
 			},
 		},
@@ -864,9 +882,9 @@ func TestHandleLineToolResultPartialWait(t *testing.T) {
 		t.Fatalf("expected provider called once, got %d", provider.callCount)
 	}
 	w.Reset()
-	resp, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"ok"}}`, st, &w)
+	resp, quit = handleLine(`{"method":"tool_confirm","params":{"id":"call_1"}}`, st, &w)
 	if quit {
-		t.Fatal("tool_result should not quit")
+		t.Fatal("tool_confirm should not quit")
 	}
 	if resp != "" {
 		t.Fatalf("expected empty response after partial tool_result, got %q", resp)
@@ -1089,8 +1107,9 @@ func TestCancelPreservesContext(t *testing.T) {
 	writeTestFile(t, filepath.Join(home, ".llm-bridge", "a.md"), "GENERAL")
 	writeTestFile(t, filepath.Join(cwd, ".llm-bridge", "b.md"), "LOCAL")
 
-	// provider returns a tool call so the turn stays in progress and the
-	// historyLenBeforeTurn marker is not reset by a completed turn
+	// provider returns a mutating tool call so the turn stays in progress
+	// (waiting for the client's approval) and the historyLenBeforeTurn marker
+	// is not reset by a completed turn
 	st := &state{
 		firstTurn: true,
 		provider: &fakeProvider{
@@ -1100,7 +1119,7 @@ func TestCancelPreservesContext(t *testing.T) {
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
 				ToolCalls: []llm.ToolCall{
-					{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`},
+					{ID: "call_1", Name: "write", Arguments: `{"path":"/tmp/x","content":"y"}`},
 				},
 			},
 		},
@@ -1166,7 +1185,7 @@ func TestPromptAfterCancelDuringToolCycle(t *testing.T) {
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "write", Arguments: `{"path":"/tmp/x","content":"y"}`}},
 			},
 			{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
 		},
@@ -1779,13 +1798,8 @@ func TestAggressivePruneCollapsesToolTurn(t *testing.T) {
 	if quit {
 		t.Fatal("prompt should not quit")
 	}
-	if !st.inToolCycle {
-		t.Fatal("expected to be in tool cycle")
-	}
-	w.Reset()
-	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file content"}}`, st, &w)
-	if quit {
-		t.Fatal("tool_result should not quit")
+	if st.inToolCycle {
+		t.Fatal("read-only tool should have completed the turn (no wait)")
 	}
 
 	// history is now [earlier, previous answer, hi(user), final answer(done)]
@@ -2043,7 +2057,7 @@ func TestFirstTurnInjectsKnowledgeBaseLine(t *testing.T) {
 }
 
 // TestKnowledgeToolResolvedInternally verifies that a `knowledge` tool call is
-// resolved internally (fire-and-forget) and never enters pendingToolIDs: the
+// resolved internally (fire-and-forget) and never enters pendingApprovals: the
 // turn keeps moving and Chat is called again without any client round-trip.
 func TestKnowledgeToolResolvedInternally(t *testing.T) {
 	provider := &fakeProvider{
@@ -2072,8 +2086,8 @@ func TestKnowledgeToolResolvedInternally(t *testing.T) {
 	if st.inToolCycle {
 		t.Fatal("should not be in tool cycle after internal knowledge resolution")
 	}
-	if len(st.pendingToolIDs) != 0 {
-		t.Fatalf("knowledge tool should not be pending, got %v", st.pendingToolIDs)
+	if len(st.pendingApprovals) != 0 {
+		t.Fatalf("knowledge tool should not be pending, got %v", st.pendingApprovals)
 	}
 	last := st.history[len(st.history)-1]
 	if last.Role != llm.RoleAssistant || last.Content != "done" {
@@ -2194,6 +2208,8 @@ func TestLoadKBProjectFallbackOnError(t *testing.T) {
 // snapshot in the pruned history, with the content taken from the write
 // argument (the most faithful snapshot of the whole file).
 func TestPruneWriteToolCreatesState(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/new.go"
 	provider := &fakeProvider{
 		name: "fake",
 		responses: []*llm.ChatResponse{
@@ -2201,7 +2217,7 @@ func TestPruneWriteToolCreatesState(t *testing.T) {
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "w1", Name: "write", Arguments: `{"path":"/tmp/new.go","content":"package main"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "w1", Name: "write", Arguments: `{"path":"` + path + `","content":"package main"}`}},
 			},
 			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
 		},
@@ -2213,11 +2229,11 @@ func TestPruneWriteToolCreatesState(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 	if !st.inToolCycle {
-		t.Fatal("expected to be in tool cycle")
+		t.Fatal("expected to be waiting for approval")
 	}
-	_, quit = handleLine(`{"method":"tool_result","params":{"id":"w1","result":"ok"}}`, st, &w)
+	_, quit = handleLine(`{"method":"tool_confirm","params":{"id":"w1"}}`, st, &w)
 	if quit {
-		t.Fatal("tool_result should not quit")
+		t.Fatal("tool_confirm should not quit")
 	}
 	if st.inToolCycle {
 		t.Fatal("expected tool cycle to finish")
@@ -2227,7 +2243,7 @@ func TestPruneWriteToolCreatesState(t *testing.T) {
 		t.Fatalf("history len = %d, want 3 (prompt + State + answer), got %+v", len(st.history), st.history)
 	}
 	stateMsg := st.history[1]
-	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, "<State /tmp/new.go ") || !strings.Contains(stateMsg.Content, ">package main</State>") {
+	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, "<State "+path+" ") || !strings.Contains(stateMsg.Content, ">package main</State>") {
 		t.Fatalf("history[1] should be a <State> from the write content, got %+v", stateMsg)
 	}
 }
@@ -2258,9 +2274,9 @@ func TestPruneReplaceOnlyAppendsDelta(t *testing.T) {
 	if !st.inToolCycle {
 		t.Fatal("expected to be in tool cycle")
 	}
-	_, quit = handleLine(`{"method":"tool_result","params":{"id":"s1","result":"ok"}}`, st, &w)
+	_, quit = handleLine(`{"method":"tool_confirm","params":{"id":"s1"}}`, st, &w)
 	if quit {
-		t.Fatal("tool_result should not quit")
+		t.Fatal("tool_confirm should not quit")
 	}
 	if st.inToolCycle {
 		t.Fatal("expected tool cycle to finish")
@@ -2359,6 +2375,9 @@ func TestRunWithOptionsPruneAndAggressive(t *testing.T) {
 // answer], with all intermediate tool_calls, tool results, and reasoning dropped
 // and no assistant message carrying a tool_call left behind (DeepSeek-safe).
 func TestPruneCollapsesToolTurnIntoSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/a.go"
+	writeTestFile(t, path, "file body")
 	provider := &fakeProvider{
 		name: "fake",
 		responses: []*llm.ChatResponse{
@@ -2366,13 +2385,13 @@ func TestPruneCollapsesToolTurnIntoSnapshots(t *testing.T) {
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/a.go"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"` + path + `"}`}},
 			},
 			{
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "call_2", Name: "search_replace", Arguments: `{"path":"/tmp/a.go","search":"old","replace":"new"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "call_2", Name: "search_replace", Arguments: `{"path":"` + path + `","search":"old","replace":"new"}`}},
 			},
 			{
 				Content:    "done",
@@ -2395,20 +2414,12 @@ func TestPruneCollapsesToolTurnIntoSnapshots(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 	if !st.inToolCycle {
-		t.Fatal("expected to be in tool cycle after read tool call")
+		t.Fatal("expected to be waiting for approval on the search_replace")
 	}
-	// deliver read result
-	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_1","result":"file body"}}`, st, &w)
+	// approve the search_replace (call_2); the read (call_1) already ran inline
+	_, quit = handleLine(`{"method":"tool_confirm","params":{"id":"call_2"}}`, st, &w)
 	if quit {
-		t.Fatal("tool_result should not quit")
-	}
-	if !st.inToolCycle {
-		t.Fatal("expected to be in tool cycle after search_replace tool call")
-	}
-	// deliver search_replace result
-	_, quit = handleLine(`{"method":"tool_result","params":{"id":"call_2","result":"ok"}}`, st, &w)
-	if quit {
-		t.Fatal("tool_result should not quit")
+		t.Fatal("tool_confirm should not quit")
 	}
 	if st.inToolCycle {
 		t.Fatal("expected tool cycle to finish")
@@ -2428,12 +2439,12 @@ func TestPruneCollapsesToolTurnIntoSnapshots(t *testing.T) {
 	}
 	// <State> snapshot for the read (content from the tool_result)
 	stateMsg := st.history[3]
-	if stateMsg.Role != llm.RoleUser || !strings.HasPrefix(stateMsg.Content, "<State /tmp/a.go ") || !strings.HasSuffix(stateMsg.Content, ">\"file body\"</State>") {
+	if stateMsg.Role != llm.RoleUser || !strings.HasPrefix(stateMsg.Content, "<State "+path+" ") || !strings.HasSuffix(stateMsg.Content, ">file body</State>") {
 		t.Fatalf("history[3] should be a <State> snapshot, got %+v", stateMsg)
 	}
 	// <Replace> delta for the search_replace
 	replaceMsg := st.history[4]
-	if replaceMsg.Role != llm.RoleUser || !strings.HasPrefix(replaceMsg.Content, "<Replace /tmp/a.go ") || !strings.Contains(replaceMsg.Content, "search:\nold\n---\nreplace:\nnew") || !strings.HasSuffix(replaceMsg.Content, "</Replace>") {
+	if replaceMsg.Role != llm.RoleUser || !strings.HasPrefix(replaceMsg.Content, "<Replace "+path+" ") || !strings.Contains(replaceMsg.Content, "search:\nold\n---\nreplace:\nnew") || !strings.HasSuffix(replaceMsg.Content, "</Replace>") {
 		t.Fatalf("history[4] should be a <Replace> delta, got %+v", replaceMsg)
 	}
 	// final answer
@@ -2460,6 +2471,9 @@ func TestPruneCollapsesToolTurnIntoSnapshots(t *testing.T) {
 // only it plus the replace after it survive (the first read and first replace are
 // dropped as redundant). See the `-prune` reduction table.
 func TestPruneReductionKeepsBaselinePlusLaterReplaces(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/a.go"
+	writeTestFile(t, path, "body-a")
 	provider := &fakeProvider{
 		name: "fake",
 		responses: []*llm.ChatResponse{
@@ -2467,25 +2481,25 @@ func TestPruneReductionKeepsBaselinePlusLaterReplaces(t *testing.T) {
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "r1", Name: "read", Arguments: `{"path":"/tmp/a.go"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "r1", Name: "read", Arguments: `{"path":"` + path + `"}`}},
 			},
 			{
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "s1", Name: "search_replace", Arguments: `{"path":"/tmp/a.go","search":"a","replace":"b"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "s1", Name: "search_replace", Arguments: `{"path":"` + path + `","search":"a","replace":"b"}`}},
 			},
 			{
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "r2", Name: "read", Arguments: `{"path":"/tmp/a.go"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "r2", Name: "read", Arguments: `{"path":"` + path + `"}`}},
 			},
 			{
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "s2", Name: "search_replace", Arguments: `{"path":"/tmp/a.go","search":"c","replace":"d"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "s2", Name: "search_replace", Arguments: `{"path":"` + path + `","search":"c","replace":"d"}`}},
 			},
 			{
 				Content:    "done",
@@ -2501,13 +2515,13 @@ func TestPruneReductionKeepsBaselinePlusLaterReplaces(t *testing.T) {
 	if quit {
 		t.Fatal("prompt should not quit")
 	}
-	for _, id := range []string{"r1", "s1", "r2", "s2"} {
+	for _, id := range []string{"s1", "s2"} {
 		if !st.inToolCycle {
-			t.Fatalf("expected in tool cycle before delivering %s", id)
+			t.Fatalf("expected to be waiting for approval of %s", id)
 		}
-		_, quit = handleLine(`{"method":"tool_result","params":{"id":"`+id+`","result":"body-`+id+`"}}`, st, &w)
+		_, quit = handleLine(`{"method":"tool_confirm","params":{"id":"`+id+`"}}`, st, &w)
 		if quit {
-			t.Fatalf("tool_result %s should not quit", id)
+			t.Fatalf("tool_confirm %s should not quit", id)
 		}
 	}
 	if st.inToolCycle {
@@ -2523,7 +2537,7 @@ func TestPruneReductionKeepsBaselinePlusLaterReplaces(t *testing.T) {
 		t.Fatalf("history[0] should be the user prompt, got %+v", st.history[0])
 	}
 	stateMsg := st.history[1]
-	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, ">\"body-r2\"</State>") {
+	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, ">body-b</State>") {
 		t.Fatalf("history[1] should be the baseline <State> from the 2nd read, got %+v", stateMsg)
 	}
 	replaceMsg := st.history[2]
@@ -2539,6 +2553,9 @@ func TestPruneReductionKeepsBaselinePlusLaterReplaces(t *testing.T) {
 // leave no trace in the pruned history: only file read/write/replace produce
 // snapshots. A shell tool result is dropped entirely.
 func TestPruneDropsNonFileTools(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/b.go"
+	writeTestFile(t, path, "b body")
 	provider := &fakeProvider{
 		name: "fake",
 		responses: []*llm.ChatResponse{
@@ -2548,7 +2565,7 @@ func TestPruneDropsNonFileTools(t *testing.T) {
 				Usage:      &llm.Usage{},
 				ToolCalls: []llm.ToolCall{
 					{ID: "sh1", Name: "shell", Arguments: `{"command":"ls"}`},
-					{ID: "r1", Name: "read", Arguments: `{"path":"/tmp/b.go"}`},
+					{ID: "r1", Name: "read", Arguments: `{"path":"` + path + `"}`},
 				},
 			},
 			{
@@ -2566,16 +2583,12 @@ func TestPruneDropsNonFileTools(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 	if !st.inToolCycle {
-		t.Fatal("expected to be in tool cycle")
+		t.Fatal("expected to be waiting for approval of the shell tool")
 	}
-	// both tools go to pending; deliver them in any order
-	_, quit = handleLine(`{"method":"tool_result","params":{"id":"sh1","result":"ls output"}}`, st, &w)
+	// the read (r1) runs inline; only the shell (sh1) needs approval
+	_, quit = handleLine(`{"method":"tool_confirm","params":{"id":"sh1"}}`, st, &w)
 	if quit {
-		t.Fatal("tool_result should not quit")
-	}
-	_, quit = handleLine(`{"method":"tool_result","params":{"id":"r1","result":"b body"}}`, st, &w)
-	if quit {
-		t.Fatal("tool_result should not quit")
+		t.Fatal("tool_confirm should not quit")
 	}
 	if st.inToolCycle {
 		t.Fatal("expected tool cycle to finish")
@@ -2589,7 +2602,7 @@ func TestPruneDropsNonFileTools(t *testing.T) {
 		t.Fatalf("history[0] should be the user prompt, got %+v", st.history[0])
 	}
 	stateMsg := st.history[1]
-	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, ">\"b body\"</State>") {
+	if stateMsg.Role != llm.RoleUser || !strings.Contains(stateMsg.Content, ">b body</State>") {
 		t.Fatalf("history[1] should be the <State> from the read, got %+v", stateMsg)
 	}
 	if st.history[2].Role != llm.RoleAssistant || st.history[2].Content != "done" {
@@ -2668,9 +2681,8 @@ func TestPruneDefaultOff(t *testing.T) {
 // create an orphaned "tool" message the provider rejects.
 func TestHandleLineToolResultUnknownIDIgnored(t *testing.T) {
 	st := &state{
-		inToolCycle:        true,
-		pendingToolIDs:     []string{"call_1"},
-		pendingToolResults: map[string]json.RawMessage{},
+		inToolCycle:      true,
+		pendingApprovals: map[string]llm.ToolCall{"call_1": {ID: "call_1", Name: "write"}},
 	}
 	var w bytes.Buffer
 	resp, quit := handleLine(`{"method":"tool_result","params":{"id":"call_2","result":"late"}}`, st, &w)
@@ -2686,7 +2698,7 @@ func TestHandleLineToolResultUnknownIDIgnored(t *testing.T) {
 	if len(st.history) != 0 {
 		t.Fatalf("unknown-id tool_result must not be appended, got %+v", st.history)
 	}
-	if !st.inToolCycle || !st.hasPendingToolID("call_1") {
+	if !st.inToolCycle || !st.hasPendingApproval("call_1") {
 		t.Fatal("still awaiting the real pending tool call")
 	}
 }

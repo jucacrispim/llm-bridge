@@ -116,6 +116,7 @@ func Sanitize(hist *[]llm.Message) {
 			answered[m.ToolCallID] = true
 		}
 	}
+	complete := map[string]bool{}
 	clean := make([]llm.Message, 0, len(*hist))
 	for _, m := range *hist {
 		if m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0 {
@@ -129,8 +130,25 @@ func Sanitize(hist *[]llm.Message) {
 			if !allAnswered {
 				continue
 			}
+			for _, tc := range m.ToolCalls {
+				complete[tc.ID] = true
+			}
 		}
 		clean = append(clean, m)
 	}
-	*hist = clean
+	// Drop orphaned tool messages: a "tool" result whose id belongs to no
+	// surviving (complete) assistant tool_calls message. The provider rejects
+	// such a message (a "tool" message must follow the assistant tool_calls it
+	// answers). This arises when a turn is cancelled after some read-only tools
+	// were already executed but before the mutating ones were approved: the
+	// assistant message is dropped above and its executed results must go with
+	// it. A "tool" message without an id is left untouched.
+	final := make([]llm.Message, 0, len(clean))
+	for _, m := range clean {
+		if m.Role == "tool" && m.ToolCallID != "" && !complete[m.ToolCallID] {
+			continue
+		}
+		final = append(final, m)
+	}
+	*hist = final
 }

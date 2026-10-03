@@ -4,6 +4,37 @@ Changelog
 All notable changes to llm-bridge are documented here. The format loosely
 follows `Keep a Changelog <https://keepachangelog.com/>`_.
 
+Unreleased
+----------
+
+Changed
+~~~~~~~
+
+- **The bridge now runs the tools itself** (previously the client executed
+  them). Read-only tools (``read``, ``grep``, ``glob``, ``knowledge``) run
+  immediately, in the same turn, with no client round-trip and no confirmation.
+  Mutating tools (``shell``, ``write``, ``search_replace``) are offered to the
+  client for approval via a new ``tool_confirm`` **event**; the client approves
+  with a new ``tool_confirm`` **command** and the bridge then runs the tool. To
+  deny a tool the client sends ``cancel`` as before.
+
+  - New event ``tool_confirm`` (mutating tools awaiting approval). The
+    ``tool_call`` event now carries only read-only tools that were already run
+    by the bridge (display only).
+  - New command ``tool_confirm`` (``{"method":"tool_confirm","params":{"id":...}}``)
+    approving a pending mutating tool.
+  - The ``tool_result`` command is now a **no-op** (kept for backwards
+    compatibility); the bridge no longer waits on the client to execute tools.
+  - ``history.Sanitize`` also drops orphaned ``tool`` messages, so cancelling a
+    turn after only the read-only tools ran leaves a valid history.
+
+Added
+~~~~~
+
+- ``ReadOnly`` classification on the tool definitions (``llm.Tool``) and a
+  ``tools.IsReadOnly`` helper; the bridge implementation of the tools
+  (``tools/exec.go``).
+
 v0.3
 ----
 

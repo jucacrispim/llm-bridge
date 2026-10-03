@@ -130,6 +130,18 @@ func NewToolCall(id, name string, input any) ([]byte, error) {
 	return json.Marshal(evt)
 }
 
+// NewToolConfirm serializes a `tool_confirm` event asking the client to approve
+// a mutating tool call. It reuses the tool_call shape (id/name/input) with the
+// tool_confirm event name.
+func NewToolConfirm(id, name string, input any) ([]byte, error) {
+	rawInput, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	evt := ToolCallEvent{Event: EventToolConfirm, ID: id, Name: name, Input: rawInput}
+	return json.Marshal(evt)
+}
+
 func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens, contextTokens, contextWindow int) []byte {
 	evt := TurnEnd{Event: EventTurnEnd, StopReason: stopReason,
 		ContextPct: contextPct, ContextTokens: contextTokens, ContextWindow: contextWindow,

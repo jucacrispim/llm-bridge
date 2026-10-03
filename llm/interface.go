@@ -51,6 +51,13 @@ type Tool struct {
 	Name        string
 	Description string
 	Parameters  json.RawMessage
+	// ReadOnly marks a tool that does not modify any state and therefore runs
+	// without confirmation. The bridge executes read-only tools internally, in
+	// the same turn, without a client round-trip. Mutating tools are first sent
+	// to the client for approval (a `tool_confirm` event) and only executed by
+	// the bridge once the client approves. This field is a classification only;
+	// it is not sent to the LLM (providers build their own tool payloads).
+	ReadOnly bool
 }
 
 type ChatRequest struct {

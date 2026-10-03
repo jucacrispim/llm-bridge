@@ -13,10 +13,9 @@ stdout except these JSON-lines events.
 
 .. note::
 
-   ``set_knowledge_bases`` and ``tool_result`` commands can carry large
-   payloads (a whole file read, a ``grep`` with many matches or a ``shell``
-   with lots of output). The bridge's scanner accepts lines up to **8 MB** to
-   avoid killing the process on a big tool result.
+   A command line can carry large payloads (e.g. ``set_knowledge_bases``
+   metadata). The bridge's scanner accepts lines up to **8 MB** so a big line
+   does not kill the process.
 
 Commands (client → bridge)
 --------------------------
@@ -106,9 +105,19 @@ model).
      }
    }
 
-``tool_result``
-    Reply to a ``tool_call`` the model requested. Sent after the client runs
-    the tool (read/write/shell/grep/glob/search_replace) locally.
+``tool_confirm``
+    Approve a mutating tool the bridge offered via a ``tool_confirm`` event. The
+    bridge then runs the tool itself and appends its result. To deny a tool, send
+    a ``cancel`` instead.
+
+    .. code-block:: json
+
+       {"method": "tool_confirm", "params": {"id": "call_123"}}
+
+``tool_result`` *(legacy)*
+    Formerly the client's reply carrying the result of a tool it had run. The
+    bridge now runs the tools itself, so this command is **ignored** (a no-op),
+    kept only for backwards compatibility with older clients.
 
     .. code-block:: json
 
@@ -173,12 +182,21 @@ Events (bridge → client)
        {"event": "thinking", "text": "Let me check the tool loop..."}
 
 ``tool_call``
-    The model requested a tool. The client runs the tool and replies with a
-    ``tool_result``.
+    A **read-only** tool (``read`` / ``grep`` / ``glob``) that the bridge already
+    executed. Emitted for display only.
 
     .. code-block:: json
 
        {"event": "tool_call", "id": "call_123", "name": "read", "input": {"path": "server/server.go"}}
+
+``tool_confirm``
+    A **mutating** tool (``shell`` / ``write`` / ``search_replace``) the bridge is
+    offering for approval. The client replies with a ``tool_confirm`` command to
+    allow it (the bridge then runs it) or with ``cancel`` to abort the turn.
+
+    .. code-block:: json
+
+       {"event": "tool_confirm", "id": "call_123", "name": "shell", "input": {"command": "go test ./..."}}
 
 ``turn_end``
     End of a turn, with the stop reason, the model used and token counts.
@@ -244,7 +262,7 @@ Events (bridge → client)
 
     .. code-block:: json
 
-       {"event": "error", "message": "tool_result without pending tool call"}
+       {"event": "error", "message": "cannot send new prompt while awaiting tool results"}
 
 ``cancelled``
     Reply to a ``cancel`` command, confirming the turn was interrupted.

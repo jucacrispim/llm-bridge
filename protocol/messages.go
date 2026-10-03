@@ -27,7 +27,12 @@ const (
 	MethodSetCwd            Method = "set_cwd"
 	MethodSetKnowledgeBases Method = "set_knowledge_bases"
 	MethodToolResult        Method = "tool_result"
-	MethodQuit              Method = "quit"
+	// MethodToolConfirm is sent by the client to approve a mutating tool call
+	// the bridge offered via a `tool_confirm` event. Its params carry the tool
+	// call id; the bridge then executes the tool itself. A denied tool is not
+	// signalled with this method — the client sends `cancel` instead.
+	MethodToolConfirm Method = "tool_confirm"
+	MethodQuit        Method = "quit"
 )
 
 type Event string
@@ -37,6 +42,10 @@ const (
 	EventChunk        Event = "chunk"
 	EventThinking     Event = "thinking"
 	EventToolCall     Event = "tool_call"
+	// EventToolConfirm is emitted for a mutating tool call: the bridge asks the
+	// client to approve it before running it. Read-only tools are emitted as
+	// `tool_call` (already executed by the bridge) instead.
+	EventToolConfirm Event = "tool_confirm"
 	EventTurnEnd      Event = "turn_end"
 	EventError        Event = "error"
 	EventCancelled    Event = "cancelled"

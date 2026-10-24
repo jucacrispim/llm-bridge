@@ -154,6 +154,103 @@ CLI flags
     knowledge base from a seed directory and exit. Requires the ONNX embedder
     (``make build-kb``).
 
+Sandbox (caged)
+---------------
+
+The bridge confines itself and the tools it runs with `caged
+<https://docs.poraodojuca.dev/caged>`_, a small Landlock + seccomp sandbox. The
+sandbox is **on by default** and has
+two layers; Landlock rulesets stack by **intersection**, so the inner one can
+only tighten the outer:
+
+- **ceiling** — the bridge **re-executes itself** under caged at startup. The
+  ceiling grants the system trees, the bridge and caged binaries, the
+  knowledge-base locations (``~/.cache/llm-bridge`` read-only,
+  ``~/.local/share/llm-bridge`` writable), the log file (that file only, never
+  its directory) and network access (the bridge must reach the LLM API). It
+  does **not** grant the projects: where they live is the caller's business, so
+  the directories the bridge will work on have to be passed with
+  ``-sandbox-rw`` (the ceiling is frozen at startup while the project changes at
+  runtime via ``set_cwd``). When the bridge is already sandboxed at launch (the
+  client started it through caged), the re-exec is skipped, so the layers do not
+  duplicate.
+- **tools** — every **external process** the bridge spawns (the ``shell`` and
+  ``grep`` tools and the hooks) runs under caged with the **same filesystem
+  policy** as the bridge (minus the log file), so a tool works on the same
+  projects and knowledge base the bridge does. What a tool is denied, then, is
+  the environment (no API keys: only caged's small base set is inherited), the
+  IPC (unix sockets and SysV IPC) and the network. The in-process tools
+  (``read``, ``write``, ``glob``, ``search_replace``) do not exec anything and
+  are therefore only bounded by the bridge's own (ceiling) permissions.
+
+Because the sandbox is on by default, ``caged`` must be available (see its
+`documentation <https://docs.poraodojuca.dev/caged>`_ for building and
+installing it): a missing binary is a **startup error**, never a silent
+fallback to unsandboxed execution.
+
+``--disable-sandbox``
+    Turn both layers off (nothing is sandboxed).
+
+``--caged-bin <path>``
+    Path of the `caged binary <https://docs.poraodojuca.dev/caged>`_. Defaults
+    to ``$CAGED_BIN`` and then ``$PATH``.
+
+``--sandbox-ro`` / ``--sandbox-rw`` (repeatable)
+    Extra read-only / read-write paths, for the bridge **and** for the tools
+    (they share the filesystem policy). The projects root belongs here: without
+    ``-sandbox-rw ~/mysrc`` neither the bridge nor the tools can read or write
+    any project (and the knowledge base of a project cannot be stored). On a Go
+    project, ``-sandbox-rw ~/.cache/go-build`` (the ``GOCACHE``) and
+    ``-sandbox-rw ~/go/pkg/mod`` (the module cache; writable only really needed
+    for ``go get``) are what ``go build``/``go test`` need inside the sandbox.
+
+``--sandbox-network``
+    Give the tools network access (denied by default; without it, seccomp denies
+    creating a TCP socket at all, regardless of Landlock).
+
+``--sandbox-connect-port <port>`` (repeatable)
+    Restrict the tools' network to these TCP ports (requires
+    ``-sandbox-network``; without ports, any destination is allowed).
+
+``--sandbox-tmp <dir>``
+    Temporary directory granted read-write to the bridge **and** the tools, and
+    exported to them as ``TMPDIR``, ``GOTMPDIR``, ``TMP`` and ``TEMP`` (default
+    ``/tmp/llm-bridge``). It is created on startup (mode ``0700``), before the
+    sandbox is built — caged opens every granted path, so it has to exist.
+
+    ``/tmp`` itself is **not** granted: a shared scratch directory would let any
+    process read or replace another one's files. Pointing every
+    temporary-directory convention at a private directory is what makes programs
+    that need scratch space work under the sandbox: ``mkstemp``, ``gcc``,
+    ``git``, and the Go toolchain (``go build``/``go test`` use ``GOTMPDIR`` for
+    their work directory and ``TMPDIR`` for the rest), which otherwise fail with
+    ``mkdir /tmp/go-build…: permission denied``.
+
+    Non-empty values always win over the inherited variables: an exported
+    ``TMPDIR=/tmp`` is replaced, since ``/tmp`` is not reachable. Pass
+    ``-sandbox-tmp ""`` to leave the inherited variables alone (and grant no
+    temp directory). Note that ``-sandbox-tmp /tmp`` grants the whole ``/tmp``.
+
+A caged failure means *the sandbox did not apply* rather than *the command
+failed*. The bridge learns that from caged's ``--report-fd``, a descriptor caged
+writes its own diagnostics to and leaves empty when the sandbox was applied.
+The exit status cannot be used for it: caged ``execvp``\s into the command, so
+the two share the status space and a tool exiting ``2`` (an ``ls`` on a missing
+file, say) or ``125`` looks exactly like a broken sandbox.
+
+Such a failure is a hard error: it is logged and returned to the model as an
+error, never as the tool's output, because the command did not run confined (or
+did not run at all) and its status says nothing. For the same reason a ``caged``
+without ``--report-fd`` is a **startup error** — there is no safe way to guess.
+
+.. code-block:: sh
+
+   $ ./build/llm-bridge -sandbox-rw "$HOME/mysrc" -logfile /tmp/llm-bridge.log
+   $ ./build/llm-bridge -sandbox-rw "$HOME/mysrc" \
+         -sandbox-rw "$HOME/.cache/go-build" \
+         -sandbox-rw "$HOME/go/pkg/mod"
+   $ ./build/llm-bridge -disable-sandbox -logfile /tmp/llm-bridge.log
+
 Environment variables
 ---------------------
 

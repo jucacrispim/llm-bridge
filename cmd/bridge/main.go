@@ -52,6 +52,7 @@ func main() {
 	prune := flag.Bool("prune", false, "collapse reasoning and tool results, preserving file states (read/write/replace) as user snapshots. Off by default.")
 	populateKB := flag.String("populate-project-kb", "", "populate the knowledge base for -project from a seed directory and exit (standalone mode; requires the ONNX embedder). Mutually exclusive with running the server.")
 	projectName := flag.String("project", "", "project name; used with -populate-project-kb as the knowledge base key")
+	sbCfg := registerSandboxFlags()
 	flag.Parse()
 
 	// Standalone mode: populate a project's knowledge base from a seed dir and
@@ -66,6 +67,26 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+
+	if err := sbCfg.validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Sandbox ceiling: unless -disable-sandbox is given, re-execute the bridge
+	// under caged BEFORE opening the log file or starting any goroutine. caged
+	// closes every descriptor above stderr, so an already-open log fd would be
+	// silently lost, and it must be resolved while /proc is still reachable.
+	// On success syscall.Exec does not return.
+	if *logFile != "" {
+		sbCfg.logFile = *logFile
+	} else if *debug {
+		sbCfg.logFile = defaultLogFile
+	}
+	if err := sbCfg.enterCeiling(); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox setup failed: %v\n", err)
+		os.Exit(1)
 	}
 
 	if *aggressivePrune && *prune {
@@ -243,8 +264,17 @@ func main() {
 		logger.Infof("knowledge base disabled (flag -knowledge=false)")
 	}
 
+	// Tool sandbox: every external process the bridge spawns (shell, grep,
+	// hooks) runs under caged with a policy stricter than the bridge's own.
+	// nil (only with -disable-sandbox) means "run them as before".
+	sb, err := sbCfg.toolSandbox()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox setup failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	if err := server.RunWithKnowledgeBase(os.Stdin, os.Stdout, providers, *providerName,
-		systemPrompt, *aggressivePrune, *prune, kbBaseDir, kbEmbed); err != nil {
+		systemPrompt, *aggressivePrune, *prune, kbBaseDir, kbEmbed, sb); err != nil {
 		os.Exit(1)
 	}
 }

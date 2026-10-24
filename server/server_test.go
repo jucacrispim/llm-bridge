@@ -2117,7 +2117,7 @@ func TestRunWithKnowledgeWiresKB(t *testing.T) {
 {"method":"prompt","params":{"text":"hi"}}
 {"method":"quit"}
 `
-	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, t.TempDir(), knowledge.DisabledEmbedder{})
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, t.TempDir(), knowledge.DisabledEmbedder{}, nil)
 	if err != nil {
 		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}

@@ -1,6 +1,54 @@
 Changelog
 =========
 
+v0.5.0
+------
+
+Added
+~~~~~
+
+- **Sandbox via** `caged <https://docs.poraodojuca.dev/caged>`_: on startup the
+  bridge re-executes itself under ``caged`` (the *ceiling* layer) and every
+  command it runs — the ``shell`` and ``grep`` tools and the hooks — runs under
+  a second, stricter layer (*tool*). Landlock policies compose by intersection,
+  so ``bridge = ceiling ∩ tool``. What the tool layer restricts, beyond the
+  filesystem policy of the bridge itself, is the **environment** (no API keys
+  reach a command), **IPC** (unix sockets, SysV) and the **network** (denied
+  unless ``-sandbox-network`` is given).
+- Flags: ``-caged-bin`` (env ``CAGED_BIN``, else ``caged`` from ``PATH``),
+  ``-sandbox-ro``/``-sandbox-rw`` (repeatable; apply to the bridge and the
+  tools), ``-sandbox-network``, ``-sandbox-connect-port`` (repeatable),
+  ``-sandbox-tmp`` (private temporary directory, default
+  ``/tmp/llm-bridge``, exported as ``TMPDIR``/``GOTMPDIR``/``TMP``/``TEMP``)
+  and ``-disable-sandbox``.
+- New ``sandbox`` package (``Policy``/``Args``/``Validate``,
+  ``Sandbox.Command``/``Run``) with no cgo and no new dependencies.
+- New section "Sandbox (caged)" in the usage docs.
+
+Changed
+~~~~~~~
+
+- **The sandbox is on by default** and covers both layers at once; there is no
+  longer an intermediate "tools only" mode. ``-disable-sandbox`` turns both
+  layers off.
+- ``caged`` is now **required** (a missing ``caged``, or one without
+  ``--report-fd``, is a hard startup error — never a silent fallback).
+  ``caged`` v0.5.0 or newer is required.
+- A sandbox setup failure is detected **only** by the descriptor ``caged``
+  reports through ``--report-fd``, never guessed from the exit status (which
+  the command shares with ``caged``). A command exiting ``2`` is now just that
+  command's status.
+- ``hooks.RunContext`` takes a context (hooks are cancellable) and an optional
+  sandbox; ``hooks.Run`` is now a wrapper around it with
+  ``context.Background()``.
+- Cancelling a turn kills the whole process group of a command, so grandchildren
+  of ``bash -c`` (e.g. ``sleep 100 &``) do not survive.
+- ``~/.llm-bridge`` (context files and global hooks) and ``/dev/urandom`` are
+  read-only in the default policy, so context, hooks and TLS keep working
+  confined.
+- No project directory is granted by default: whoever starts the bridge decides
+  which trees are visible, via ``-sandbox-ro``/``-sandbox-rw``.
+
 v0.4.0
 ------
 

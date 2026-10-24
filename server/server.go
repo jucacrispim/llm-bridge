@@ -38,6 +38,7 @@ import (
 	"llm-bridge/llm"
 	"llm-bridge/logger"
 	"llm-bridge/protocol"
+	"llm-bridge/sandbox"
 	"llm-bridge/tools"
 )
 
@@ -67,6 +68,11 @@ type state struct {
 	// kb is the project-scoped knowledge base used to resolve `knowledge` tool
 	// calls locally for the current cwd. nil means disabled.
 	kb *knowledge.Manager
+	// sandbox wraps the external processes the bridge spawns (the shell/grep
+	// tools and hooks) in caged. nil means the tools run unsandboxed. The
+	// policy is built once at startup; the project cwd (which changes via
+	// set_cwd) is added per command.
+	sandbox *sandbox.Sandbox
 	// provider is the single fixed provider used when no registry is set
 	// (kept for the runWithProvider/Run entry points and existing tests).
 	provider llm.LLMProvider
@@ -243,7 +249,7 @@ func (st *state) executeTool(tc llm.ToolCall) {
 		st.resolveKnowledge(tc.ID, tc.Arguments)
 		return
 	}
-	exec := tools.NewExecutor(st.cwd)
+	exec := tools.NewExecutorWithSandbox(st.cwd, st.sandbox)
 	ctx, cancel := context.WithCancel(context.Background())
 	st.setCancel(cancel)
 	out, err := exec.Execute(ctx, tc.Name, tc.Arguments)
@@ -765,7 +771,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			// launched runs to completion (its output is simply written when done).
 			hookName, hookArgs := parseHook(text)
 			go func() {
-				out, err := hooks.Run(st.cwd, hookName, hookArgs)
+				out, err := hooks.RunContext(context.Background(), st.cwd, hookName, hookArgs, st.sandbox)
 				if err != nil {
 					_ = st.write(w, string(protocol.NewHook(hookName, "", err.Error()))+"\n")
 					return
@@ -1171,7 +1177,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
 
 	if len(providers) > 0 {
 		if defaultName == "" {
@@ -1191,8 +1197,14 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 	if prune {
 		logger.Infof("prune enabled: collapsing reasoning and preserving file snapshots")
 	}
+	if sb != nil {
+		logger.Infof("tool sandbox enabled (caged: %s)", sb.Bin)
+	}
 
-	st := &state{providers: providers, providerName: defaultName, systemPrompt: systemPrompt, firstTurn: true, aggressivePrune: aggressivePrune, prune: prune, kbBaseDir: kbBaseDir, kbEmbed: kbEmbed}
+	st := &state{providers: providers, providerName: defaultName,
+		systemPrompt: systemPrompt, firstTurn: true,
+		aggressivePrune: aggressivePrune, prune: prune,
+		kbBaseDir: kbBaseDir, kbEmbed: kbEmbed, sandbox: sb}
 
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
@@ -1258,9 +1270,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name(), "", false, false, "", nil)
+		return run(r, w, providers, provider.Name(), "", false, false, "", nil, nil)
 	}
-	return run(r, w, nil, "", "", false, false, "", nil)
+	return run(r, w, nil, "", "", false, false, "", nil, nil)
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -1281,7 +1293,7 @@ func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProv
 // and an initial global system prompt.
 func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, false, false, "", nil)
+	return run(r, w, providers, defaultName, systemPrompt, false, false, "", nil, nil)
 
 }
 
@@ -1289,7 +1301,7 @@ func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMP
 // initial global system prompt, and the aggressive-prune option (see state).
 func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", nil)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", nil, nil)
 }
 
 // RunWithKnowledgeBase starts the server loop like RunWithOptions, but also
@@ -1299,7 +1311,7 @@ func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvid
 // resolve locally (fire-and-forget) against the current project's KB. kbEmbed
 // nil (or empty base dir) keeps the knowledge base disabled. This is the entry
 // point used by cmd/bridge.
-func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder) error {
+func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbEmbed)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbEmbed, sb)
 }

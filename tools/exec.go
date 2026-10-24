@@ -20,11 +20,14 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"llm-bridge/sandbox"
 )
 
 // Executor runs the bridge's tools inside the bridge process, against a working
@@ -33,6 +36,10 @@ import (
 // behavior is unchanged after moving execution into the bridge.
 type Executor struct {
 	cwd string
+	// sandbox, when non-nil, wraps the external processes (shell, grep) in
+	// caged. The in-process file tools (read/write/glob/search_replace) do not
+	// exec anything, so they are only bounded by the bridge's own permissions.
+	sandbox *sandbox.Sandbox
 }
 
 // NewExecutor returns an Executor rooted at cwd. A relative path argument to
@@ -40,6 +47,40 @@ type Executor struct {
 // as-is and resolved by the process working directory).
 func NewExecutor(cwd string) *Executor {
 	return &Executor{cwd: cwd}
+}
+
+// NewExecutorWithSandbox returns an Executor rooted at cwd whose external
+// processes run under sb. A nil sb means "run unsandboxed", exactly like
+// NewExecutor. The sandbox policy is used as given: the tool works on the same
+// filesystem the bridge does, so the paths come from the bridge's own policy
+// (-sandbox-ro/-sandbox-rw), not from the cwd.
+func NewExecutorWithSandbox(cwd string, sb *sandbox.Sandbox) *Executor {
+	return &Executor{cwd: cwd, sandbox: sb}
+}
+
+// run executes name/args capturing the combined output. With a sandbox
+// configured it goes through Sandbox.Run, which proves from caged's report
+// descriptor whether the sandbox applied: a *sandbox.SetupError comes back
+// when it did not, so the caller must surface it as an error instead of the
+// tool's output.
+func (e *Executor) run(ctx context.Context, name string, args ...string) (string, error) {
+	if e.sandbox != nil {
+		out, err := e.sandbox.Run(ctx, e.cwd, name, args...)
+		return string(out), err
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	if e.cwd != "" {
+		cmd.Dir = e.cwd
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// isSetupError reports whether err means the sandbox did not apply, i.e. the
+// command never ran confined and its output must not be handed to the model.
+func isSetupError(err error) bool {
+	var se *sandbox.SetupError
+	return errors.As(err, &se)
 }
 
 // Execute runs the named tool with raw JSON arguments and returns its textual
@@ -181,18 +222,19 @@ func (e *Executor) shell(ctx context.Context, args map[string]any) (string, erro
 	if !ok {
 		return "", fmt.Errorf("Shell: missing 'command'")
 	}
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	if e.cwd != "" {
-		cmd.Dir = e.cwd
-	}
-	out, err := cmd.CombinedOutput()
+	out, err := e.run(ctx, "bash", "-c", command)
 	if err != nil {
+		// A caged failure is never the tool's result: the command did not run
+		// (confined or at all), so the model gets an error instead of output.
+		if isSetupError(err) {
+			return "", err
+		}
 		if ee, ok := err.(*exec.ExitError); ok {
-			return string(out) + fmt.Sprintf("\n[exited with status %d]", ee.ExitCode()), nil
+			return out + fmt.Sprintf("\n[exited with status %d]", ee.ExitCode()), nil
 		}
 		return "", err
 	}
-	return string(out), nil
+	return out, nil
 }
 
 // grep implements the `grep` tool: search PATTERN (a POSIX ERE) under PATH
@@ -207,21 +249,21 @@ func (e *Executor) grep(ctx context.Context, args map[string]any) (string, error
 	if path == "" {
 		path = "."
 	}
-	cmd := exec.CommandContext(ctx, "grep", "-rnEI", "--include=*", pattern, e.resolve(path))
-	if e.cwd != "" {
-		cmd.Dir = e.cwd
-	}
-	out, err := cmd.CombinedOutput()
+	out, err := e.run(ctx, "grep", "-rnEI", "--include=*", pattern, e.resolve(path))
 	if err != nil {
+		// A caged failure is never a grep result: the sandbox did not apply.
+		if isSetupError(err) {
+			return "", err
+		}
 		if _, ok := err.(*exec.ExitError); ok {
-			// Any grep exit status is surfaced as output: 0 matches / 1 no
-			// matches are normal results, and on error the model still sees
+			// Any other grep exit status is surfaced as output: 0 matches / 1
+			// no matches are normal results, and on error the model still sees
 			// whatever grep printed (mirroring the client).
-			return string(out), nil
+			return out, nil
 		}
 		return "", err
 	}
-	return string(out), nil
+	return out, nil
 }
 
 // glob implements the `glob` tool, emulating Emacs' `file-expand-wildcards`:

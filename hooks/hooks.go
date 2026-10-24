@@ -27,11 +27,15 @@
 package hooks
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+
+	"llm-bridge/sandbox"
 )
 
 // validName matches hook names allowed to become part of a filesystem path.
@@ -71,19 +75,45 @@ func Lookup(cwd, name string) (string, error) {
 // working directory and returns its combined stdout+stderr. It returns an
 // error when the script cannot be located or when the script exits non-zero.
 func Run(cwd, name string, args []string) (string, error) {
+	return RunContext(context.Background(), cwd, name, args, nil)
+}
+
+// RunContext is Run with a context and an optional sandbox. The context
+// cancels the script (and its process group); the sandbox, when non-nil, runs
+// it under caged with the policy it already carries (the same filesystem the
+// bridge has, minus the environment, the IPC and the network).
+//
+// A caged failure is returned as a *sandbox SetupError instead of being
+// mistaken for the script's own exit status: it means the sandbox did not
+// apply, which must never pass silently. It is proven by caged's report
+// descriptor, not guessed from the exit status (which the script shares with
+// caged).
+func RunContext(ctx context.Context, cwd, name string, args []string, sb *sandbox.Sandbox) (string, error) {
 	path, err := Lookup(cwd, name)
 	if err != nil {
 		return "", err
 	}
 	cmdArgs := append([]string{path}, args...)
-	cmd := exec.Command("bash", cmdArgs...)
 	// The script runs in the project's cwd so it sees the same working
 	// directory as the conversation. If cwd is unset/absent, the process's
 	// own working directory is used.
+	dir := ""
 	if cwd != "" {
 		if info, err := os.Stat(cwd); err == nil && info.IsDir() {
-			cmd.Dir = cwd
+			dir = cwd
 		}
+	}
+	if sb != nil {
+		out, err := sb.Run(ctx, dir, "bash", cmdArgs...)
+		var se *sandbox.SetupError
+		if errors.As(err, &se) {
+			return string(out), se
+		}
+		return string(out), err
+	}
+	cmd := exec.CommandContext(ctx, "bash", cmdArgs...)
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err

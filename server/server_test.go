@@ -34,6 +34,7 @@ import (
 
 	"llm-bridge/knowledge"
 	"llm-bridge/llm"
+	"llm-bridge/sandbox"
 )
 
 type fakeProvider struct {
@@ -2359,6 +2360,28 @@ func TestRunWithOptionsPruneAndAggressive(t *testing.T) {
 	err := RunWithOptions(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "", true, true)
 	if err != nil {
 		t.Fatalf("RunWithOptions error: %v", err)
+	}
+	if !strings.Contains(out.String(), `{"event":"turn_end"`) {
+		t.Fatalf("expected turn_end, got %q", out.String())
+	}
+}
+
+// TestRunWithSandboxLogsToolSandbox exercises the run() branch that reports the
+// tool sandbox at startup (covers the sb != nil logging path), and confirms a
+// turn still completes normally with a sandbox attached: a prompt without tool
+// calls never executes a command, so caged is not invoked.
+func TestRunWithSandboxLogsToolSandbox(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	var out bytes.Buffer
+	input := `{"method":"prompt","params":{"text":"hi"}}
+{"method":"quit"}
+`
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false, "", nil, &sandbox.Sandbox{Bin: "caged"})
+	if err != nil {
+		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}
 	if !strings.Contains(out.String(), `{"event":"turn_end"`) {
 		t.Fatalf("expected turn_end, got %q", out.String())

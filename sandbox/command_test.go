@@ -241,13 +241,68 @@ func TestCancelKillsProcessGroup(t *testing.T) {
 	}
 }
 
+// TestCancelWithoutProcessIsANoop checks Cancel is safe when the process never
+// started (cmd.Process is nil): there is no group to kill, and that is not an
+// error — CommandContext would not have a process to kill either.
+func TestCancelWithoutProcessIsANoop(t *testing.T) {
+	sb, err := New(fakeCaged(t, `exec "$@"`), Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := sb.Command(context.Background(), "true")
+	if err := cmd.Cancel(); err != nil {
+		t.Errorf("cancel without a process: %v", err)
+	}
+}
+
+// TestCancelAfterExitIsANoop checks that cancelling an already finished
+// process is not an error: kill(-pgid) returns ESRCH (the group is gone), and
+// it is the call to Wait that settles the result.
+func TestCancelAfterExitIsANoop(t *testing.T) {
+	sb, err := New(fakeCaged(t, `exec "$@"`), Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := sb.Command(context.Background(), "true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running true: %v", err)
+	}
+	if err := cmd.Cancel(); err != nil {
+		t.Errorf("cancel after exit: %v", err)
+	}
+}
+
+// functionalCaged picks the caged binary for the functional test: CAGED_BIN
+// when it is set, otherwise caged from PATH. The test is skipped when caged is
+// missing, or when it cannot be executed at all (EACCES, ENOEXEC, ENOENT): a
+// caged outside the policy the test itself runs under is not a caged failure,
+// so the test has nothing to say about it.
+func functionalCaged(t *testing.T) string {
+	t.Helper()
+	bin := os.Getenv("CAGED_BIN")
+	if bin == "" {
+		var err error
+		bin, err = exec.LookPath("caged")
+		if err != nil {
+			t.Skip("caged not found in PATH and CAGED_BIN unset")
+		}
+	}
+	// Prove the binary runs before the test body interprets its results. A
+	// non-zero exit is fine (an older caged may not know --version); only a
+	// failure to start at all means caged is unusable here.
+	if err := exec.Command(bin, "--version").Run(); err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Skipf("cannot execute caged %s: %v", bin, err)
+		}
+	}
+	return bin
+}
+
 // TestFunctionalDeniesRead is the single test against the real kernel: it
 // needs the caged binary installed, so it is skipped otherwise.
 func TestFunctionalDeniesRead(t *testing.T) {
-	bin, err := exec.LookPath("caged")
-	if err != nil {
-		t.Skip("caged not found in PATH")
-	}
+	bin := functionalCaged(t)
 	sb, err := New(bin, Policy{ReadOnly: []string{"/usr", "/bin", "/lib", "/lib64", "/etc"}})
 	if err != nil {
 		t.Fatal(err)

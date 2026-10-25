@@ -1,6 +1,40 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Added
+~~~~~
+
+- ``-kb-scope`` (``global``/``project``/``both``) selects which knowledge
+  base(s) are in use, and a prompt can change it for the rest of the
+  conversation with ``kb_scope`` (same persistence as ``model``/``provider``).
+- ``knowledge/set.go``: a ``Set`` merges one or two managers behind a single
+  ``Execute``. ``show`` and ``search`` cover every active KB (labels are
+  prefixed with the scope when more than one is active); ``add``, ``delete``
+  and ``reset`` take an optional ``scope`` and default to the global KB.
+- ``-populate-project-kb ... -project _global`` (re)builds the shared KB from
+  the global seeds only (there is no ``_global`` seed subdirectory).
+
+Changed
+~~~~~~~
+
+- **The knowledge base is now shared across projects by default.** The KB used
+  to follow ``set_cwd`` and store notes under ``knowledge_bases/<project>/``,
+  so a note learned in one project was invisible everywhere else. The default
+  is now a single KB under ``knowledge_bases/_global/``; ``-kb-scope project``
+  restores the previous behavior and ``both`` uses the shared KB plus the
+  project's.
+- Existing project KBs are left untouched: the scope only changes which ones
+  are read, nothing is migrated or discarded.
+- ``set_cwd`` reloads the KB in the ``project``/``both`` scopes only; in the
+  ``global`` scope it no longer rebuilds anything.
+- The ``knowledge`` tool schema documents the ``scope`` argument; the tool
+  stays read-only (``add``/``delete``/``reset`` are gated by the scope in the
+  set, not by ``tool_confirm``).
+- Docs and the system prompt describe the shared KB as the default.
+
 v0.5.0
 ------
 

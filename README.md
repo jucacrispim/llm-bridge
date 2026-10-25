@@ -1,5 +1,6 @@
 # llm-bridge
 
+
 **llm-bridge** is a bridge written in Go that mediates between a client (such as
 Emacs) and several LLM providers (**DeepSeek** and **Google/Gemini**), exposing
 them all through a single, unified JSON-lines protocol over stdio.

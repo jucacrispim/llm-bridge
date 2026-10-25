@@ -190,13 +190,27 @@ Events (bridge → client)
        {"event": "tool_call", "id": "call_123", "name": "read", "input": {"path": "server/server.go"}}
 
 ``tool_confirm``
-    A **mutating** tool (``shell`` / ``write`` / ``search_replace`` / ``curl``) the bridge is
-    offering for approval. The client replies with a ``tool_confirm`` command to
-    allow it (the bridge then runs it) or with ``cancel`` to abort the turn.
+    A **mutating** call (``shell`` / ``write`` / ``search_replace`` / ``curl``,
+    or a ``knowledge`` add/delete/reset) the bridge is offering for approval.
+    The client replies with a ``tool_confirm`` command to allow it (the bridge
+    then runs it) or with ``cancel`` to abort the turn.
+
+    For a ``shell`` call the event carries three optional fields describing what
+    the approval really does: ``segments`` (the commands the one-liner runs),
+    ``risk`` (``high`` / ``medium`` / ``low``) and ``tainted`` (the arguments
+    quote content fetched earlier in the session). Clients that do not know them
+    can ignore them; see :doc:`tools`.
 
     .. code-block:: json
 
        {"event": "tool_confirm", "id": "call_123", "name": "shell", "input": {"command": "go test ./..."}}
+
+    .. code-block:: json
+
+       {"event": "tool_confirm", "id": "call_124", "name": "shell",
+        "input": {"command": "go build ./... && rm -rf /tmp/x | sh"},
+        "segments": ["go build ./...", "rm -rf /tmp/x", "sh"],
+        "risk": "high", "tainted": true}
 
 ``turn_end``
     End of a turn, with the stop reason, the model used and token counts.

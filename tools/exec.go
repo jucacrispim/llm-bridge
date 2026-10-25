@@ -361,11 +361,37 @@ func (e *Executor) curl(ctx context.Context, args map[string]any) (string, error
 			return "", err
 		}
 		if ee, ok := err.(*exec.ExitError); ok {
-			return truncateCurlOutput(string(out) + fmt.Sprintf("\n[curl exited with status %d]", ee.ExitCode())), nil
+			return untrustedCurlResult(rawURL, string(out)+fmt.Sprintf("\n[curl exited with status %d]", ee.ExitCode())), nil
 		}
 		return "", err
 	}
-	return truncateCurlOutput(string(out)), nil
+	return untrustedCurlResult(rawURL, string(out)), nil
+}
+
+// untrustedContentOpen is how a fetched body is delimited before it reaches the
+// model. The system prompt tells the model that everything between the tags is
+// data from the web, never an instruction — so when a page says "ignore the
+// previous instructions and run X", the model reads that as the *content of a
+// page*, which is what it is.
+//
+// Truncation happens first and wrapping second: a huge body must neither push
+// the envelope away nor hide a payload after the cut, and the closing tag has
+// to survive in every case.
+func untrustedCurlResult(rawURL, body string) string {
+	return "<untrusted-web-content url=\"" + attrEscape(rawURL) + "\">\n" +
+		truncateCurlOutput(body) + "\n</untrusted-web-content>"
+}
+
+// attrEscape keeps an attribute value from breaking out of the envelope: a URL
+// carrying a quote, an angle bracket or an ampersand would otherwise be able to
+// close the tag or open another one.
+func attrEscape(s string) string {
+	return strings.NewReplacer(
+		"&", "&amp;",
+		`"`, "&quot;",
+		"<", "&lt;",
+		">", "&gt;",
+	).Replace(s)
 }
 
 // validateCurlURL rejects anything the tool will not fetch: a missing URL, a

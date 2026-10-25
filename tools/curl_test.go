@@ -239,6 +239,59 @@ func TestTruncateCurlOutput(t *testing.T) {
 	}
 }
 
+// TestTruncateCurlOutputCutsOnRuneBoundary covers the other side of the UTF-8
+// cut: when the limit lands *inside* a multi-byte rune, the cut has to walk back
+// to the rune start. Without that walk the model would receive a broken rune.
+func TestTruncateCurlOutputCutsOnRuneBoundary(t *testing.T) {
+	// One ASCII byte short of the limit, then 2-byte runes: byte at the limit
+	// is the continuation byte of the first "é".
+	long := strings.Repeat("a", curlMaxOutput-1) + strings.Repeat("é", 10)
+	got := truncateCurlOutput(long)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated output is not valid UTF-8: %q", got[len(got)-20:])
+	}
+	if !strings.HasPrefix(got, strings.Repeat("a", curlMaxOutput-1)) {
+		t.Fatal("truncated output lost the body prefix")
+	}
+	if !strings.Contains(got, "[output truncated") {
+		t.Fatal("truncated output is not marked as truncated")
+	}
+	// The cut walked back to the rune start, so nothing of the first "é" leaked.
+	if strings.Contains(strings.SplitN(got, "\n[output truncated", 2)[0], "é") {
+		t.Error("a partial rune survived the cut")
+	}
+}
+
+// TestStringList covers both accepted shapes: a decoded JSON array ([]any) and a
+// []string handed in directly, which is what an in-process caller passes.
+func TestStringList(t *testing.T) {
+	direct, err := stringList([]string{"-L", "--header=X: 1"})
+	if err != nil {
+		t.Fatalf("stringList([]string): %v", err)
+	}
+	if strings.Join(direct, "|") != "-L|--header=X: 1" {
+		t.Errorf("stringList([]string) = %v", direct)
+	}
+
+	if got, err := stringList(nil); err != nil || got != nil {
+		t.Errorf("stringList(nil) = (%v, %v), want (nil, nil)", got, err)
+	}
+
+	decoded, err := stringList([]any{"-L", "--compressed"})
+	if err != nil {
+		t.Fatalf("stringList([]any): %v", err)
+	}
+	if strings.Join(decoded, "|") != "-L|--compressed" {
+		t.Errorf("stringList([]any) = %v", decoded)
+	}
+
+	for _, bad := range []any{"-L", 3, []any{"-L", 1}} {
+		if _, err := stringList(bad); err == nil {
+			t.Errorf("stringList(%v) should error", bad)
+		}
+	}
+}
+
 // TestCurlDisabledWithoutSandbox covers the case where the tool is not
 // configured: the call fails instead of running curl unsandboxed.
 func TestCurlDisabledWithoutSandbox(t *testing.T) {

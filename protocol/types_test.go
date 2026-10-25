@@ -77,6 +77,31 @@ func TestNewToolCallMarshalError(t *testing.T) {
 	}
 }
 
+// TestNewToolConfirm covers the compatibility wrapper: a plain confirmation must
+// serialize exactly like a tool_call (no segments/risk/tainted keys at all), or
+// a client that predates the hardening would receive fields it never negotiated.
+func TestNewToolConfirm(t *testing.T) {
+	input := map[string]string{"command": "ls"}
+	gotBytes, err := NewToolConfirm("t1", "shell", input)
+	if err != nil {
+		t.Fatalf("NewToolConfirm error: %v", err)
+	}
+	got := string(gotBytes)
+	want := `{"event":"tool_confirm","id":"t1","name":"shell","input":{"command":"ls"}}`
+	if got != want {
+		t.Errorf("NewToolConfirm() = %s, want %s", got, want)
+	}
+}
+
+// TestNewToolConfirmMarshalError covers the failure path shared by both
+// constructors: an input that cannot be marshaled is an error, never a truncated
+// event (a client would otherwise approve a call it cannot see).
+func TestNewToolConfirmMarshalError(t *testing.T) {
+	if _, err := NewToolConfirmWithMeta("t1", "shell", make(chan int), ConfirmMeta{Risk: "high"}); err == nil {
+		t.Fatal("expected error for channel input")
+	}
+}
+
 func TestNewTurnEnd(t *testing.T) {
 	ctx := 2.5
 	got := string(NewTurnEnd("END_TURN", &ctx, "model-x", 10, 5, 15, 80, 20, 50_000, 1_000_000))

@@ -34,6 +34,7 @@ import (
 
 	"llm-bridge/knowledge"
 	"llm-bridge/llm"
+	"llm-bridge/logger"
 	"llm-bridge/sandbox"
 	"llm-bridge/tools"
 )
@@ -2069,7 +2070,7 @@ func TestKnowledgeToolResolvedInternally(t *testing.T) {
 				Content:    "",
 				StopReason: "tool_calls",
 				Usage:      &llm.Usage{},
-				ToolCalls:  []llm.ToolCall{{ID: "k1", Name: "knowledge", Arguments: `{"command":"add","label":"n","text":"t"}`}},
+				ToolCalls:  []llm.ToolCall{{ID: "k1", Name: "knowledge", Arguments: `{"command":"show"}`}},
 			},
 			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
 		},
@@ -2653,6 +2654,77 @@ func TestRunWithSandboxLogsToolSandbox(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `{"event":"turn_end"`) {
 		t.Fatalf("expected turn_end, got %q", out.String())
+	}
+}
+
+// TestRememberFetchedKeepsTail covers the bound on the taint buffer: the stored
+// text can never grow past fetchedTailLimit, and what is kept is the *end* of
+// the fetch (the part a later command would quote), not an arbitrary prefix.
+func TestRememberFetchedKeepsTail(t *testing.T) {
+	st := &state{}
+	if st.fetched != "" {
+		t.Fatalf("a fresh state should have no fetched content, got %q", st.fetched)
+	}
+
+	const marker = "TAIL-MARKER"
+	st.rememberFetched(strings.Repeat("a", fetchedTailLimit) + marker)
+	if len(st.fetched) != fetchedTailLimit {
+		t.Fatalf("fetched length = %d, want %d", len(st.fetched), fetchedTailLimit)
+	}
+	if !strings.HasSuffix(st.fetched, marker) {
+		t.Fatalf("fetched tail lost the end of the body: %q", st.fetched[len(st.fetched)-20:])
+	}
+
+	// A short body is stored as-is (the trim must not touch it).
+	st.rememberFetched("short body")
+	if st.fetched != "short body" {
+		t.Fatalf("fetched = %q, want the body untouched", st.fetched)
+	}
+}
+
+// TestRunWithSandboxLogsCurlSandbox exercises both curl startup-log branches:
+// with a host allowlist (the hosts are printed) and without one ("any"). The
+// line is the only place a human can see that the network-enabled sandbox came
+// up, so a silent regression there would be invisible.
+func TestRunWithSandboxLogsCurlSandbox(t *testing.T) {
+	var logs bytes.Buffer
+	logger.SetOutput(&logs)
+	defer logger.SetOutput(io.Discard)
+
+	runOnce := func(sbs Sandboxes) {
+		t.Helper()
+		fp := &fakeProvider{
+			name: "fake",
+			resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+		}
+		var out bytes.Buffer
+		input := `{"method":"prompt","params":{"text":"hi"}}
+{"method":"quit"}
+`
+		if err := RunWithKnowledgeBase(strings.NewReader(input), &out,
+			map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false,
+			"", knowledge.ScopeGlobal, nil, sbs); err != nil {
+			t.Fatalf("RunWithKnowledgeBase error: %v", err)
+		}
+	}
+
+	runOnce(Sandboxes{
+		Tools:     &sandbox.Sandbox{Bin: "caged"},
+		Curl:      &sandbox.Sandbox{Bin: "caged"},
+		CurlHosts: []string{"example.com", ".poraodojuca.dev"},
+	})
+	got := logs.String()
+	if !strings.Contains(got, "curl sandbox enabled") {
+		t.Fatalf("missing the curl sandbox startup line in %q", got)
+	}
+	if !strings.Contains(got, "example.com,.poraodojuca.dev") {
+		t.Fatalf("the startup line should list the allowed hosts, got %q", got)
+	}
+
+	logs.Reset()
+	runOnce(Sandboxes{Tools: &sandbox.Sandbox{Bin: "caged"}, Curl: &sandbox.Sandbox{Bin: "caged"}})
+	if !strings.Contains(logs.String(), "hosts: any") {
+		t.Fatalf("with no allowlist the startup line should say \"any\", got %q", logs.String())
 	}
 }
 

@@ -8,10 +8,19 @@ cycle, the protocol events involved and the tools the bridge exposes. The raw
 event and command schemas live in :doc:`protocol`; the knowledge-base tool is
 detailed in :doc:`knowledge`.
 
-The bridge classifies every tool as **read-only** (it never mutates any state:
-``read``, ``grep``, ``glob``, ``knowledge``) or **mutating** (``shell``,
-``write``, ``search_replace``, ``curl``). Read-only tools run **without
-confirmation**; mutating tools are first offered to the client for approval.
+The bridge classifies every call as **read-only** (it never mutates any state:
+``read``, ``grep``, ``glob``, and a ``knowledge`` lookup) or **mutating**
+(``shell``, ``write``, ``search_replace``, ``curl``, and a ``knowledge``
+write). Read-only calls run **without confirmation**; mutating calls are first
+offered to the client for approval.
+
+``knowledge`` is the one tool classified **per call**, not per tool: ``show``
+and ``search`` only read, while ``add``, ``delete`` and ``reset`` write to a
+persistent store that every later session reads. Classifying the tool as
+read-only would let a page plant a note with nobody watching; classifying it as
+always mutating would turn every lookup into a click. A malformed or unknown
+command is treated as mutating, so a call the bridge cannot classify is
+confirmed instead of executed.
 
 The tool-call cycle
 -------------------
@@ -127,10 +136,20 @@ internally (see :doc:`knowledge`).
     offered at all with ``-curl=false`` or ``-disable-sandbox``. See the
     "Sandbox (caged)" section of :doc:`usage`.
 
-``knowledge`` *(read-only)*
+    What comes back is handed to the model wrapped in
+    ``<untrusted-web-content url="...">...</untrusted-web-content>``: the body
+    is truncated first and wrapped second, so the envelope always closes and a
+    page can neither push it away nor hide a payload after the cut. The system
+    prompt tells the model that everything inside those tags is a page someone
+    else wrote — data, never an instruction — and that an instruction found
+    there must be reported to the user, not followed.
+
+``knowledge`` *(read-only for lookups, mutating for writes)*
     Manage the project's local knowledge base (``show`` / ``search`` / ``add`` /
     ``delete`` / ``reset``). Resolved **inside the bridge**, so it never needs a
-    client round-trip.
+    client round-trip. ``show`` and ``search`` run inline; ``add``, ``delete``
+    and ``reset`` are offered for confirmation like any other write, because
+    they persist a note that every later session will read.
 
 Rules and details
 -----------------
@@ -139,9 +158,30 @@ Rules and details
   cwd it was told via ``set_cwd`` (relative ``path`` arguments are resolved
   against it). The model's tools therefore operate on the project the client
   pointed the bridge at.
-- **Confirmation:** only mutating tools (``shell`` / ``write`` /
-  ``search_replace`` / ``curl``) are offered for approval via ``tool_confirm``;
-  read-only tools run without asking.
+- **Confirmation:** only mutating calls (``shell`` / ``write`` /
+  ``search_replace`` / ``curl``, and a ``knowledge`` write) are offered for
+  approval via ``tool_confirm``; read-only calls run without asking.
+- **What an approval really runs:** a ``tool_confirm`` event for ``shell``
+  carries three extra fields, because one keystroke can approve far more than it
+  looks like:
+
+  - ``segments`` — the commands the one-liner actually runs (split on ``;``,
+    ``&&``, ``||``, ``|`` and newlines, without splitting inside quotes), so a
+    client can show *three commands* instead of one line a human will not read;
+  - ``risk`` — ``high`` for a destructive, remote or privileged command
+    (``rm -rf``, ``dd of=``, ``curl``, ``git push``, ``sudo``, ``| sh`` …),
+    ``medium`` for a state-changing but ordinary one (``git commit``,
+    ``make install``) and ``low`` otherwise. A client can use it to demand a
+    typed confirmation instead of a keypress;
+  - ``tainted`` — the arguments reproduce text fetched earlier in the session by
+    ``curl``: the "read this page, then run what it says" shape. Advisory, and
+    deliberately blunt: a legitimate command that happens to quote the page also
+    matches, which is exactly the case worth showing.
+
+  A one-liner with more than **10** segments is **not offered at all**: the
+  bridge refuses it with an error result telling the model to split the command
+  into separate calls, one action per call. That is the hard limit; the rest is
+  detail for the human.
 - **Id matching:** the bridge only accepts a ``tool_confirm`` approval for an
   ``id`` it is currently offering. An approval for an unknown id (e.g. a late
   reply from a cancelled turn) is silently ignored.
@@ -149,8 +189,8 @@ Rules and details
   The read-only ones run inline; the bridge waits until *all* mutating ones have
   been approved before continuing. If one is denied the turn is cancelled.
 - **Internal tools:** ``knowledge`` is executed by the bridge and its result
-  appended immediately, so a step made only of ``knowledge`` calls never needs a
-  client round-trip.
+  appended immediately (after approval, for a write), so a step made only of
+  ``knowledge`` lookups never needs a client round-trip.
 - **Files changed:** a turn that used ``write`` or ``search_replace`` reports the
   touched paths in a ``files_changed`` event after ``turn_end`` (used, for
   example, to refresh buffers or trigger tests).

@@ -39,17 +39,48 @@ func TestAllReturnsEightTools(t *testing.T) {
 // TestIsReadOnly verifies the read-only classification: read-only tools report
 // true, mutating tools report false, and an unknown tool is treated as mutating.
 func TestIsReadOnly(t *testing.T) {
-	for _, name := range []string{"read", "grep", "glob", "knowledge"} {
+	for _, name := range []string{"read", "grep", "glob"} {
 		if !IsReadOnly(name) {
 			t.Errorf("IsReadOnly(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"write", "shell", "search_replace", "curl"} {
+	for _, name := range []string{"write", "shell", "search_replace", "curl", "knowledge"} {
 		if IsReadOnly(name) {
 			t.Errorf("IsReadOnly(%q) = true, want false", name)
 		}
 	}
 	if IsReadOnly("does-not-exist") {
 		t.Errorf("IsReadOnly(unknown) = true, want false")
+	}
+}
+
+// TestMutatesCallIsPerKnowledgeCommand pins the per-call classification: the
+// tool is statically mutating, but a lookup must not wait on a human. If this
+// ever flips, every session becomes a click-fest; if a write stops being
+// mutating, an injected page can plant a note with nobody watching.
+func TestMutatesCallIsPerKnowledgeCommand(t *testing.T) {
+	for _, cmd := range []string{"add", "delete", "reset"} {
+		if !MutatesCall("knowledge", `{"command":"`+cmd+`"}`) {
+			t.Errorf("knowledge %s must be mutating", cmd)
+		}
+	}
+	for _, cmd := range []string{"show", "search", " SHOW "} {
+		if MutatesCall("knowledge", `{"command":"`+cmd+`"}`) {
+			t.Errorf("knowledge %q is a read and must not ask for confirmation", cmd)
+		}
+	}
+	// Anything we cannot classify is confirmed rather than executed.
+	if !MutatesCall("knowledge", `not json`) {
+		t.Error("a malformed knowledge call must be treated as mutating")
+	}
+	if !MutatesCall("knowledge", `{"command":"bogus"}`) {
+		t.Error("an unknown knowledge command must be treated as mutating")
+	}
+	// Every other tool keeps its static classification.
+	if MutatesCall("read", `{"path":"x"}`) || MutatesCall("glob", `{"pattern":"*"}`) {
+		t.Error("read/glob are reads")
+	}
+	if !MutatesCall("shell", `{"command":"true"}`) || !MutatesCall("write", `{"path":"x"}`) {
+		t.Error("shell/write mutate")
 	}
 }

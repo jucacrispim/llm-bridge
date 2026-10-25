@@ -133,6 +133,12 @@ type state struct {
 	// storing tool calls or reasoning.
 	prune bool
 
+	// fetched holds the tail of what the curl tool has returned in this
+	// session (bounded), so a later mutating call can be checked for content
+	// copied from a fetched page: the "read this page, then run what it says"
+	// shape. Only the turn loop touches it, so it needs no lock.
+	fetched string
+
 	cancel context.CancelFunc
 	// cancelled reports whether the current turn was cancelled (as opposed to
 	// having completed). It is set by cancelTurn and cleared when a new prompt
@@ -278,6 +284,40 @@ func (st *state) availableTools() []llm.Tool {
 	return out
 }
 
+// fetchedTailLimit bounds what the taint check keeps: enough to cover a page
+// body, small enough that a long session does not grow without bound.
+const fetchedTailLimit = 64 << 10
+
+// rememberFetched keeps the tail of what the curl tool returned, so a later
+// mutating call can be checked for text copied from it. The wrapped result is
+// stored as-is (the envelope included): a match on the body is what matters,
+// and the extra header bytes only make the check marginally more sensitive.
+func (st *state) rememberFetched(out string) {
+	st.fetched = out
+	if len(st.fetched) > fetchedTailLimit {
+		st.fetched = st.fetched[len(st.fetched)-fetchedTailLimit:]
+	}
+}
+
+// confirmMeta builds the extra detail a `tool_confirm` carries: the commands a
+// shell one-liner really runs, a coarse risk label, and whether the arguments
+// reproduce content fetched earlier in the session.
+//
+// The point is the approval-fatigue defence: a human who approves "build the
+// project" is really approving every segment of the line, and the client can
+// only say so if the bridge tells it. Taint is advisory and deliberately
+// blunt — a legitimate command that happens to quote the page also matches,
+// which is precisely the case worth showing.
+func (st *state) confirmMeta(tc llm.ToolCall) protocol.ConfirmMeta {
+	meta := protocol.ConfirmMeta{Tainted: tools.Tainted(tools.Args(tc.Arguments), st.fetched)}
+	if tc.Name == "shell" {
+		command := tools.CommandOf(tc.Arguments)
+		meta.Segments = tools.Segments(command)
+		meta.Risk = tools.Risk(command, meta.Segments)
+	}
+	return meta
+}
+
 // executeTool runs a single tool call inside the bridge and appends its real
 // result to the history. The `knowledge` tool resolves against the project
 // knowledge base; every other tool runs through the filesystem/shell executor
@@ -297,13 +337,34 @@ func (st *state) executeTool(tc llm.ToolCall) {
 	out, err := exec.Execute(ctx, tc.Name, tc.Arguments)
 	st.setCancel(nil)
 	cancel()
+	if tc.Name == "curl" {
+		// Audit line: the fetch is the only thing the bridge does that leaves
+		// the machine, and its result is what a later injection feeds on. This
+		// goes to the log file only (-logfile), never to the protocol stream.
+		logger.Infof("curl url=%s bytes=%d ok=%t", curlURL(tc.Arguments), len(out), err == nil)
+	}
 	if err != nil {
 		out = "error: " + err.Error()
 	}
 	if st.isCancelled() {
 		return
 	}
+	if tc.Name == "curl" {
+		// Keep what came back, so a later call that quotes the page can be
+		// flagged as tainted. Recorded before the result is appended: the
+		// taint check runs when the *next* confirmation is built.
+		st.rememberFetched(out)
+	}
 	st.appendToolResult(tc.ID, out)
+}
+
+// curlURL extracts the url argument of a curl call, for the audit log.
+func curlURL(rawArgs string) string {
+	var a struct {
+		URL string `json:"url"`
+	}
+	_ = json.Unmarshal([]byte(rawArgs), &a)
+	return a.URL
 }
 
 // kbBaseMetadata is the subset of a knowledge base's client-reported metadata
@@ -1173,11 +1234,16 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		st.appendAssistant(resp)
 
 		// Surface each tool call to the client and run the read-only ones right
-		// away, in the same turn. Read-only tools (read/grep/glob/knowledge)
-		// run internally and are emitted as a `tool_call` display event;
-		// mutating tools (shell/write/search_replace) are emitted as
-		// `tool_confirm` and only run once the client approves them (handled by
+		// away, in the same turn. Tools that only read (read/grep/glob, and the
+		// knowledge tool's show/search) run internally and are emitted as a
+		// `tool_call` display event; anything that mutates (shell/write/
+		// search_replace/curl, and a knowledge add/delete/reset) is emitted as
+		// `tool_confirm` and only runs once the client approves it (handled by
 		// the MethodToolConfirm case).
+		//
+		// The classification is per call, not per tool: `knowledge` writes to a
+		// *persistent* store every later session reads, so a write must never
+		// run without a human, while a lookup must never wait for one.
 		st.pendingApprovals = make(map[string]llm.ToolCall)
 		for _, tc := range resp.ToolCalls {
 			if st.isCancelled() {
@@ -1187,7 +1253,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			if tc.Arguments != "" {
 				input = json.RawMessage(tc.Arguments)
 			}
-			if tools.IsReadOnly(tc.Name) {
+			if !tools.MutatesCall(tc.Name, tc.Arguments) {
 				evt, err := protocol.NewToolCall(tc.ID, tc.Name, input)
 				if err == nil {
 					_ = st.write(w, string(evt)+"\n")
@@ -1197,7 +1263,22 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 				st.executeTool(tc)
 				continue
 			}
-			evt, err := protocol.NewToolConfirm(tc.ID, tc.Name, input)
+			// A one-liner is approved with one keystroke, so it is the natural
+			// hiding place for extra work: refuse to offer an approval that
+			// would run dozens of commands at once and tell the model to split
+			// it. The refusal is a tool result, not an error, so the turn (and
+			// the model's chance to correct itself) survives.
+			if tc.Name == "shell" {
+				command := tools.CommandOf(tc.Arguments)
+				if segments := tools.Segments(command); len(segments) > tools.MaxShellSegments {
+					st.appendToolResult(tc.ID, fmt.Sprintf(
+						"error: too many segments (%d > %d): this command runs %d separate commands at once. "+
+							"Split it into separate calls, one action per call, so each one can be reviewed.",
+						len(segments), tools.MaxShellSegments, len(segments)))
+					continue
+				}
+			}
+			evt, err := protocol.NewToolConfirmWithMeta(tc.ID, tc.Name, input, st.confirmMeta(tc))
 			if err == nil {
 				_ = st.write(w, string(evt)+"\n")
 			}

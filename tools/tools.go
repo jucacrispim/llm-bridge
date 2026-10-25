@@ -35,10 +35,15 @@ func IsReadOnly(name string) bool {
 }
 
 // All returns the tools that the bridge exposes to the LLM. Each tool carries a
-// ReadOnly classification: read-only tools (read/grep/glob/knowledge) are run
-// by the bridge without confirmation, while mutating tools (shell/write/
-// search_replace) are sent to the client for approval before the bridge runs
-// them.
+// ReadOnly classification: read-only tools (read/grep/glob) are run by the
+// bridge without confirmation, while mutating tools (shell/write/
+// search_replace/curl) are sent to the client for approval before the bridge
+// runs them.
+//
+// The `knowledge` tool is a special case: it is classified as mutating because
+// it can add/delete/reset notes, which write to a persistent store every later
+// session reads — silently, and with no human in the loop. The per-call
+// decision is made by MutatesCall, which keeps `show`/`search` inline.
 func All() []llm.Tool {
 	return []llm.Tool{
 		{
@@ -83,7 +88,6 @@ func All() []llm.Tool {
 			Name:        "knowledge",
 			Description: "Use this to recall or record knowledge across sessions. The KB holds short durable notes (architecture, design decisions, gotchas, conventions). Depending on the configuration there is a shared global KB (notes valid across projects) and/or a project KB (notes about the project at the current working directory). Call 'search' with a natural-language query BEFORE answering questions or making changes that depend on how the project works or why it is the way it is; call 'show' once if unsure what is stored. Call 'add' (upsert by label: re-adding a label REPLACES its text) as soon as you learn something non-obvious and durable. 'delete' with a label removes a note; 'reset' clears the KB and rebuilds it from the curated seed. 'show' and 'search' cover every active KB; 'add'/'delete'/'reset' take an optional 'scope' (\"global\" or \"project\") defaulting to the global KB. Runs locally inside the bridge — no client round-trip, effectively free.",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","enum":["show","search","add","delete","reset"]},"query":{"type":"string"},"label":{"type":"string"},"text":{"type":"string"},"limit":{"type":"integer"},"scope":{"type":"string","enum":["global","project"],"description":"which knowledge base to write to (add/delete/reset); defaults to global"}},"required":["command"]}`),
-			ReadOnly:    true,
 		},
 	}
 }

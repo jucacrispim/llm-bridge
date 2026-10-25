@@ -33,7 +33,7 @@ import (
 // the kiro format ({id, payload:{label,text}, vector}) so data.json stays a
 // simple, proven shape; we are not required to be byte-compatible with kiro.
 type item struct {
-	ID      int    `json:"id"`
+	ID      int `json:"id"`
 	Payload struct {
 		Label string `json:"label"`
 		Text  string `json:"text"`

@@ -152,11 +152,11 @@ func TestExecuteErrors(t *testing.T) {
 	m := NewManager(fakeEmbedder{dim: 8}, "proj")
 	cases := []string{
 		`{"command":"bogus"}`,
-		`{"command":"search"}`,           // missing query
-		`{"command":"add","label":"x"}`,  // missing text
-		`{"command":"add","text":"x"}`,   // missing label
-		`{"command":"delete"}`,           // missing label
-		`not json`,                        // invalid args
+		`{"command":"search"}`,          // missing query
+		`{"command":"add","label":"x"}`, // missing text
+		`{"command":"add","text":"x"}`,  // missing label
+		`{"command":"delete"}`,          // missing label
+		`not json`,                      // invalid args
 	}
 	for _, c := range cases {
 		if _, err := m.Execute(json.RawMessage(c)); err == nil {

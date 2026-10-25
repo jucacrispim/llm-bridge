@@ -31,7 +31,7 @@
 //     - Quit: `{"method": "quit"}`
 //  4. Events stream back from the bridge's stdout as JSON lines:
 //     - `ready`, `thinking`, `chunk`, `tool_call`, `tool_confirm`, `turn_end`,
-//       `files_changed`, `hook_action`, `error`, `cancelled`.
+//     `files_changed`, `hook_action`, `error`, `cancelled`.
 //
 // The bridge runs the tools itself. Read-only tools (`read`/`grep`/`glob`) run
 // without asking and are surfaced as `tool_call` events (display only); the

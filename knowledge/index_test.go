@@ -74,7 +74,7 @@ func TestBruteForceSearchDefaultK(t *testing.T) {
 func TestBruteForceNormalization(t *testing.T) {
 	idx := NewBruteForce()
 	// Parallel and anti-parallel to the query.
-	idx.Add([]float32{3, 4}, "same", "") // length 5, normalized to {0.6,0.8}
+	idx.Add([]float32{3, 4}, "same", "")  // length 5, normalized to {0.6,0.8}
 	idx.Add([]float32{-3, -4}, "opp", "") // opposite direction
 
 	res := idx.Search([]float32{0.6, 0.8}, 2)

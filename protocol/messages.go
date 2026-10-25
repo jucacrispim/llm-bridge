@@ -38,14 +38,14 @@ const (
 type Event string
 
 const (
-	EventReady        Event = "ready"
-	EventChunk        Event = "chunk"
-	EventThinking     Event = "thinking"
-	EventToolCall     Event = "tool_call"
+	EventReady    Event = "ready"
+	EventChunk    Event = "chunk"
+	EventThinking Event = "thinking"
+	EventToolCall Event = "tool_call"
 	// EventToolConfirm is emitted for a mutating tool call: the bridge asks the
 	// client to approve it before running it. Read-only tools are emitted as
 	// `tool_call` (already executed by the bridge) instead.
-	EventToolConfirm Event = "tool_confirm"
+	EventToolConfirm  Event = "tool_confirm"
 	EventTurnEnd      Event = "turn_end"
 	EventError        Event = "error"
 	EventCancelled    Event = "cancelled"

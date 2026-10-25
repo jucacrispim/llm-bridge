@@ -174,6 +174,36 @@ func TestSetWriteRouting(t *testing.T) {
 	}
 }
 
+// TestSetSingleScopeResolve covers the single-KB shortcuts of resolve: with one
+// active KB every write lands there, whether the tool omits the scope, names it
+// or names the project key the model may pass instead, and only an unknown name
+// leaves a note. The reply keeps no scope suffix in that case (nothing to
+// disambiguate).
+func TestSetSingleScopeResolve(t *testing.T) {
+	g := NewManager(fakeEmbedder{dim: 8}, "proj")
+	s := NewSet(ScopeGlobal, Scope{Name: ScopeGlobal, M: g})
+
+	for _, scope := range []string{"", ScopeGlobal, "proj"} {
+		args := `{"command":"add","label":"x","text":"y"}`
+		if scope != "" {
+			args = `{"command":"add","label":"x","text":"y","scope":"` + scope + `"}`
+		}
+		out, err := s.Execute(json.RawMessage(args))
+		if err != nil {
+			t.Fatalf("scope %q: %v", scope, err)
+		}
+		if strings.Contains(out, "scope ") {
+			t.Fatalf("scope %q: reply should carry no scope note/suffix: %q", scope, out)
+		}
+		if g.Len() != 1 {
+			t.Fatalf("scope %q: global len = %d, want 1", scope, g.Len())
+		}
+		if _, err := s.Execute(json.RawMessage(`{"command":"delete","label":"x"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // TestSetUnknownScope verifies that a scope naming a KB that is not in the set
 // errors (listing the available ones) with two scopes, while a single-scope Set
 // still writes to its only KB and reports the mismatch as a note.

@@ -110,27 +110,33 @@ func (s *Set) find(name string) *Manager {
 	return nil
 }
 
-// resolve returns the manager a write should target: the scope named in the
-// tool arguments, or the default scope when none was given. In a single-scope
-// setup the only KB always wins (a scope argument naming a KB that is not
-// active is reported as a note, not an error); with two scopes an unknown name
-// is an error listing the available ones, so the model can correct itself.
-func (s *Set) resolve(name string) (*Manager, string, error) {
+// resolve returns the manager a write should target — the scope named in the
+// tool arguments, or the default scope when none was given — along with the
+// name it is registered under in the set and an optional note for the model. In
+// a single-scope setup the only KB always wins (a scope argument naming a KB
+// that is not active is reported as a note, not an error); with two scopes an
+// unknown name is an error listing the available ones, so the model can correct
+// itself.
+func (s *Set) resolve(name string) (*Manager, string, string, error) {
 	want := name
 	if name == "" {
 		name = s.def
 	}
 	if m := s.find(name); m != nil {
-		return m, "", nil
+		return m, name, "", nil
 	}
 	if len(s.scopes) == 1 {
+		// The only KB is the answer whatever was asked for: no scope at all, its
+		// own scope name, or the project key the model may have passed instead
+		// of the scope name.
 		only := s.scopes[0]
 		if want == "" || want == only.Name || want == only.M.Project() {
-			return only.M, "", nil
+			return only.M, only.Name, "", nil
 		}
-		return only.M, fmt.Sprintf(" (note: scope %q not active, used %q)", want, only.Name), nil
+		return only.M, only.Name,
+			fmt.Sprintf(" (note: scope %q not active, used %q)", want, only.Name), nil
 	}
-	return nil, "", fmt.Errorf("unknown knowledge scope %q (available: %s)",
+	return nil, "", "", fmt.Errorf("unknown knowledge scope %q (available: %s)",
 		name, strings.Join(s.Scopes(), ", "))
 }
 
@@ -155,7 +161,7 @@ func (s *Set) Execute(args json.RawMessage) (string, error) {
 		}
 		return formatResults(res), nil
 	case "add", "delete", "reset":
-		m, note, err := s.resolve(p.Scope)
+		m, name, note, err := s.resolve(p.Scope)
 		if err != nil {
 			return "", err
 		}
@@ -163,23 +169,15 @@ func (s *Set) Execute(args json.RawMessage) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// Only say which KB was written when there is a choice to be made;
+		// with a single active KB the reply stays as short as before.
 		if len(s.scopes) > 1 {
-			out += fmt.Sprintf(" (scope %q)", scopeNameOf(s, m))
+			out += fmt.Sprintf(" (scope %q)", name)
 		}
 		return out + note, nil
 	default:
 		return "", fmt.Errorf("unknown knowledge command %q", p.Command)
 	}
-}
-
-// scopeNameOf returns the scope name a Manager is registered under in s.
-func scopeNameOf(s *Set, m *Manager) string {
-	for _, sc := range s.scopes {
-		if sc.M == m {
-			return sc.Name
-		}
-	}
-	return m.Project()
 }
 
 // show renders the labels of every scope, grouped by scope name. A single

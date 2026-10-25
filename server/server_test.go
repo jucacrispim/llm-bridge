@@ -2333,6 +2333,35 @@ func TestLoadKBFallbackOnError(t *testing.T) {
 	}
 }
 
+// TestEffectiveKBScopeFallback verifies the scope in effect for a turn: the
+// per-prompt override wins over the configured -kb-scope, and an unknown value
+// on either side falls back to the global scope instead of leaking an invalid
+// scope name into loadKB.
+func TestEffectiveKBScopeFallback(t *testing.T) {
+	st := &state{kbScope: knowledge.ScopeProject}
+	if got := st.effectiveKBScope(); got != knowledge.ScopeProject {
+		t.Fatalf("effectiveKBScope() = %q, want project", got)
+	}
+
+	// A valid override wins over the configured scope.
+	st.kbScopeOverride = knowledge.ScopeBoth
+	if got := st.effectiveKBScope(); got != knowledge.ScopeBoth {
+		t.Fatalf("effectiveKBScope() = %q, want both", got)
+	}
+
+	// An invalid override falls back to global (never to the configured scope).
+	st.kbScopeOverride = "bogus"
+	if got := st.effectiveKBScope(); got != knowledge.ScopeGlobal {
+		t.Fatalf("effectiveKBScope() = %q, want global", got)
+	}
+
+	// Same for an invalid configured scope with no override.
+	st = &state{kbScope: "bogus"}
+	if got := st.effectiveKBScope(); got != knowledge.ScopeGlobal {
+		t.Fatalf("effectiveKBScope() = %q, want global", got)
+	}
+}
+
 // TestPromptKBScopeOverride verifies that a prompt's kb_scope switches (and
 // persists) the KB scope, reloading the managers for the new scope.
 func TestPromptKBScopeOverride(t *testing.T) {

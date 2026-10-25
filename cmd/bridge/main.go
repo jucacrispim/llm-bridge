@@ -282,8 +282,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Curl sandbox: the curl tool is the only one with network access, and it
+	// pays for it with a filesystem policy that grants no project, home or temp
+	// path (see sandboxConfig.curlSandbox). nil (sandbox off, or -curl=false)
+	// means the tool is not offered to the model.
+	curlSb, err := sbCfg.curlSandbox()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox setup failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	if err := server.RunWithKnowledgeBase(os.Stdin, os.Stdout, providers, *providerName,
-		systemPrompt, *aggressivePrune, *prune, kbBaseDir, *kbScope, kbEmbed, sb); err != nil {
+		systemPrompt, *aggressivePrune, *prune, kbBaseDir, *kbScope, kbEmbed,
+		server.Sandboxes{Tools: sb, Curl: curlSb, CurlHosts: sbCfg.curlHosts}); err != nil {
 		os.Exit(1)
 	}
 }

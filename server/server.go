@@ -53,6 +53,19 @@ var defaultSystemPrompt = func() string {
 	return strings.TrimSpace(string(b))
 }()
 
+// Sandboxes groups the sandboxes the server uses. Tools covers the external
+// processes the bridge spawns (the shell and grep tools and the hooks); Curl
+// covers the curl tool, which alone has network access and therefore runs under
+// a filesystem-minimal policy (no project, home or temp paths). A nil pointer
+// means "run unsandboxed"; a nil Curl also keeps the curl tool out of the tool
+// list, so the model is never offered a tool the bridge would refuse. CurlHosts,
+// when non-empty, restricts the curl tool to those hosts.
+type Sandboxes struct {
+	Tools     *sandbox.Sandbox
+	Curl      *sandbox.Sandbox
+	CurlHosts []string
+}
+
 type state struct {
 	cwd            string
 	knowledgeBases []json.RawMessage
@@ -76,11 +89,13 @@ type state struct {
 	// locally: one or two scoped managers (global and/or the current project).
 	// nil means disabled.
 	kb *knowledge.Set
-	// sandbox wraps the external processes the bridge spawns (the shell/grep
-	// tools and hooks) in caged. nil means the tools run unsandboxed. The
-	// policy is built once at startup; the project cwd (which changes via
-	// set_cwd) is added per command.
-	sandbox *sandbox.Sandbox
+	// sandboxes holds the sandbox of the external processes the bridge spawns
+	// (the shell/grep tools and hooks) and the separate one of the curl tool,
+	// the only tool with network access. A nil Tools means the tools run
+	// unsandboxed; a nil Curl means the curl tool is not offered. The policies
+	// are built once at startup; the project cwd (which changes via set_cwd) is
+	// added per command.
+	sandboxes Sandboxes
 	// provider is the single fixed provider used when no registry is set
 	// (kept for the runWithProvider/Run entry points and existing tests).
 	provider llm.LLMProvider
@@ -244,6 +259,25 @@ func (st *state) resolveKnowledge(id, args string) {
 	st.appendToolResult(id, out)
 }
 
+// availableTools returns the tools offered to the model. The curl tool is only
+// included when its sandbox exists: with the sandbox off, or with -curl=false,
+// there is nobody to run it, so offering it would only invite a call that can
+// never succeed.
+func (st *state) availableTools() []llm.Tool {
+	all := tools.All()
+	if st.sandboxes.Curl != nil {
+		return all
+	}
+	out := make([]llm.Tool, 0, len(all))
+	for _, tool := range all {
+		if tool.Name == "curl" {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
+}
+
 // executeTool runs a single tool call inside the bridge and appends its real
 // result to the history. The `knowledge` tool resolves against the project
 // knowledge base; every other tool runs through the filesystem/shell executor
@@ -257,7 +291,7 @@ func (st *state) executeTool(tc llm.ToolCall) {
 		st.resolveKnowledge(tc.ID, tc.Arguments)
 		return
 	}
-	exec := tools.NewExecutorWithSandbox(st.cwd, st.sandbox)
+	exec := tools.NewExecutorWithSandboxes(st.cwd, st.sandboxes.Tools, st.sandboxes.Curl, st.sandboxes.CurlHosts)
 	ctx, cancel := context.WithCancel(context.Background())
 	st.setCancel(cancel)
 	out, err := exec.Execute(ctx, tc.Name, tc.Arguments)
@@ -857,7 +891,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			// launched runs to completion (its output is simply written when done).
 			hookName, hookArgs := parseHook(text)
 			go func() {
-				out, err := hooks.RunContext(context.Background(), st.cwd, hookName, hookArgs, st.sandbox)
+				out, err := hooks.RunContext(context.Background(), st.cwd, hookName, hookArgs, st.sandboxes.Tools)
 				if err != nil {
 					_ = st.write(w, string(protocol.NewHook(hookName, "", err.Error()))+"\n")
 					return
@@ -1027,7 +1061,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		st.sanitizeHistory()
 		resp, err := st.activeProvider().Chat(ctx, llm.ChatRequest{
 			Messages:        st.historySnapshot(),
-			Tools:           tools.All(),
+			Tools:           st.availableTools(),
 			System:          st.effectiveSystem(),
 			Model:           st.modelOverride,
 			Thinking:        st.thinkingOverride,
@@ -1264,7 +1298,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sbs Sandboxes) error {
 
 	if len(providers) > 0 {
 		if defaultName == "" {
@@ -1284,14 +1318,21 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 	if prune {
 		logger.Infof("prune enabled: collapsing reasoning and preserving file snapshots")
 	}
-	if sb != nil {
-		logger.Infof("tool sandbox enabled (caged: %s)", sb.Bin)
+	if sbs.Tools != nil {
+		logger.Infof("tool sandbox enabled (caged: %s)", sbs.Tools.Bin)
+	}
+	if sbs.Curl != nil {
+		hosts := "any"
+		if len(sbs.CurlHosts) > 0 {
+			hosts = strings.Join(sbs.CurlHosts, ",")
+		}
+		logger.Infof("curl sandbox enabled (caged: %s, hosts: %s)", sbs.Curl.Bin, hosts)
 	}
 
 	st := &state{providers: providers, providerName: defaultName,
 		systemPrompt: systemPrompt, firstTurn: true,
 		aggressivePrune: aggressivePrune, prune: prune,
-		kbBaseDir: kbBaseDir, kbScope: kbScope, kbEmbed: kbEmbed, sandbox: sb}
+		kbBaseDir: kbBaseDir, kbScope: kbScope, kbEmbed: kbEmbed, sandboxes: sbs}
 
 	// Load the knowledge base up front so it is available even when the client
 	// never sends set_cwd (always the case for the global scope, whose KB does
@@ -1362,9 +1403,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name(), "", false, false, "", "", nil, nil)
+		return run(r, w, providers, provider.Name(), "", false, false, "", "", nil, Sandboxes{})
 	}
-	return run(r, w, nil, "", "", false, false, "", "", nil, nil)
+	return run(r, w, nil, "", "", false, false, "", "", nil, Sandboxes{})
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -1385,7 +1426,7 @@ func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProv
 // and an initial global system prompt.
 func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, false, false, "", "", nil, nil)
+	return run(r, w, providers, defaultName, systemPrompt, false, false, "", "", nil, Sandboxes{})
 
 }
 
@@ -1393,7 +1434,7 @@ func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMP
 // initial global system prompt, and the aggressive-prune option (see state).
 func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", "", nil, nil)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", "", nil, Sandboxes{})
 }
 
 // RunWithKnowledgeBase starts the server loop like RunWithOptions, but also
@@ -1404,7 +1445,7 @@ func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvid
 // a prompt changes the scope via kb_scope, so `knowledge` tool calls resolve
 // locally (fire-and-forget). kbEmbed nil (or empty base dir) keeps the
 // knowledge base disabled. This is the entry point used by cmd/bridge.
-func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
+func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sbs Sandboxes) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbScope, kbEmbed, sb)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbScope, kbEmbed, sbs)
 }

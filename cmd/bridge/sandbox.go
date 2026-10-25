@@ -37,6 +37,15 @@ package main
 // projects, so it needs what the bridge needs), while the environment (API
 // keys), the IPC and the network are what the tools are denied.
 //
+// The one exception is the curl tool: it is the ONLY tool with network access,
+// and it pays for it with a much narrower filesystem policy. curl runs under its
+// own caged policy that grants the system trees and nothing else (no projects,
+// no home, no temp directory), because network and "can read the user's files"
+// together are a data-exfiltration primitive: with no local file to read, a
+// fetch has nothing to leak beyond the conversation the model already has. A
+// port allowlist (and, optionally, a host allowlist enforced by the bridge)
+// bounds where it may go.
+//
 // -disable-sandbox turns both layers off. A missing caged binary is a startup
 // error rather than a silent fallback to unsandboxed execution.
 //
@@ -74,6 +83,10 @@ const defaultTempDir = "/tmp/llm-bridge"
 // for instance).
 var tempEnvNames = []string{"TMPDIR", "GOTMPDIR", "TMP", "TEMP"}
 
+// defaultCurlPorts are the destinations the curl tool may reach when no
+// -curl-port is given: HTTPS and HTTP, the two schemes the tool accepts.
+var defaultCurlPorts = []int{443, 80}
+
 // systemReadOnly are the trees a program needs to run at all: the binaries,
 // their shared libraries and the system configuration (CAs for TLS,
 // resolv.conf, nsswitch.conf, hosts).
@@ -91,11 +104,22 @@ type sandboxConfig struct {
 	// ro/rw extend the read-only/read-write lists shared by both layers.
 	ro []string
 	rw []string
-	// network gives the tools network access (they have none by default).
-	network bool
-	// connectPorts restricts the tools' network to these ports (empty means
-	// any TCP destination).
-	connectPorts []int
+	// curl exposes the curl tool, the only tool with network access.
+	curl bool
+	// curlPorts are the TCP ports the curl tool may connect to (default
+	// defaultCurlPorts; ignored with curlAnyPort).
+	curlPorts []int
+	// curlAnyPort lets the curl tool connect to any TCP port.
+	curlAnyPort bool
+	// curlHosts restricts the curl tool to these hosts (empty means any).
+	curlHosts []string
+	// legacyNetwork/legacyPorts are the removed -sandbox-network and
+	// -sandbox-connect-port flags: still parsed (so an old configuration gets
+	// a clear message instead of "flag provided but not defined") and rejected
+	// by validate. Giving the tools network access as a whole is gone: only
+	// the curl tool has it now.
+	legacyNetwork bool
+	legacyPorts   []int
 	// logFile is the bridge log file, granted read+write to the ceiling as a
 	// single file (never its directory).
 	logFile string
@@ -353,8 +377,9 @@ func reexecEnv(environ []string, tmpDir string) []string {
 // projects and on the knowledge base) but not the log file, and it is denied
 // what the bridge is not: the environment (no KeepEnv: caged's small base set
 // only, so the API keys never reach it), the IPC (unix sockets and SysV IPC are
-// denied by default) and the network (seccomp denies the socket families unless
-// -sandbox-network is given).
+// denied by default) and the network (seccomp denies the socket families: no
+// flag turns it on for these tools — network access belongs to the curl tool
+// alone, see curlSandbox).
 //
 // The one thing added to the environment is the temporary-directory block:
 // caged's base set has no TMPDIR, so without it programs that need a scratch
@@ -368,9 +393,6 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !c.network && len(c.connectPorts) > 0 {
-		return nil, fmt.Errorf("sandbox: -sandbox-connect-port requires -sandbox-network")
-	}
 	ro, rw := c.sharedPaths()
 	p := sandbox.Policy{
 		ReadOnly:  existing(ro),
@@ -378,14 +400,68 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 		// No KeepEnv on purpose: the tools run with caged's small base
 		// environment, so the API keys do not leak into them even though the
 		// bridge itself was started with --keep-env.
-		AllowNetworkSockets: c.network,
-		ConnectPorts:        c.connectPorts,
 		// The temporary-directory block, on top of caged's base env: no
 		// KeepEnv, so the API keys stay out, but tools still get a writable
 		// scratch dir instead of falling back to a denied /tmp.
 		Env: tempEnv(c.tmpDir),
 	}
 	return sandbox.New(caged, p)
+}
+
+// curlSandbox builds the sandbox for the curl tool: the only tool with network
+// access, and this policy is the reason it can be the only one.
+//
+// curl gets the system trees and nothing else. No project, no home directory, no
+// knowledge base, no temp dir: it cannot read a single file of the user's, so a
+// fetch has nothing local to leak (no "at file", no file://, no cookie file, no
+// config file). That is the whole point: network plus "can read the projects"
+// together is an exfiltration primitive — the answer can be sent inside a URL
+// path, a header or a DNS query, and no flag allowlist changes that. With
+// nothing to read, the only data left to leak is the conversation the model
+// already has.
+//
+// Writing is granted for /dev/null only: os/exec opens it for the child's stdin
+// when none is set, and inside Landlock that open fails without the grant.
+//
+// The destination is bounded twice: by port, in the kernel (Landlock
+// NET_CONNECT_TCP via -curl-port; Landlock has no host filtering at all, and a
+// UDP DNS query is not covered by the port rule) and, optionally, by host — the
+// bridge compares url.Hostname() with -curl-allow-host before exec.
+//
+// nil means "the curl tool is off" and it is not offered to the model.
+func (c *sandboxConfig) curlSandbox() (*sandbox.Sandbox, error) {
+	if c.disabled || !c.curl {
+		return nil, nil
+	}
+	caged, err := c.binary()
+	if err != nil {
+		return nil, err
+	}
+	ro := append([]string{}, systemReadOnly...)
+	ro = append(ro, "/dev/urandom")
+	p := sandbox.Policy{
+		ReadOnly:  existing(ro),
+		ReadWrite: existing([]string{"/dev/null"}),
+		// The socket families have to be allowed for any TCP connection to
+		// exist at all; the port rules (or -curl-any-port) then narrow where it
+		// may go. No KeepEnv on purpose: caged's base environment only, so the
+		// API keys and the bridge's proxy variables never reach a fetch.
+		AllowNetworkSockets: true,
+		ConnectTCP:          c.curlAnyPort,
+	}
+	if !c.curlAnyPort {
+		p.ConnectPorts = append([]int{}, c.curlPortsOrDefault()...)
+	}
+	return sandbox.New(caged, p)
+}
+
+// curlPortsOrDefault returns the TCP ports the curl tool may connect to:
+// -curl-port values, or the defaults (HTTPS and HTTP).
+func (c *sandboxConfig) curlPortsOrDefault() []int {
+	if len(c.curlPorts) == 0 {
+		return defaultCurlPorts
+	}
+	return c.curlPorts
 }
 
 // requireReportFD checks that the caged binary understands --report-fd, the
@@ -422,8 +498,13 @@ func (c *sandboxConfig) validate() error {
 	if err := requireReportFD(bin); err != nil {
 		return err
 	}
-	if !c.network && len(c.connectPorts) > 0 {
-		return fmt.Errorf("-sandbox-connect-port requires -sandbox-network")
+	if c.legacyNetwork || len(c.legacyPorts) > 0 {
+		return fmt.Errorf("-sandbox-network and -sandbox-connect-port were removed: only the curl tool has network access now (use -curl, -curl-port, -curl-any-port and -curl-allow-host)")
+	}
+	for _, port := range c.curlPorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("-curl-port %d out of range 1..65535", port)
+		}
 	}
 	if err := c.ensureTempDir(); err != nil {
 		return err
@@ -450,14 +531,32 @@ func registerSandboxFlags() *sandboxConfig {
 		c.rw = append(c.rw, v)
 		return nil
 	})
-	flag.BoolVar(&c.network, "sandbox-network", false,
-		"give the tools network access (denied by default)")
-	flag.Func("sandbox-connect-port", "restrict the tools' network to this TCP port (repeatable; requires -sandbox-network)", func(v string) error {
+	flag.BoolVar(&c.curl, "curl", true,
+		"expose the curl tool, the only one with network access; it runs in its own sandbox with no project, home or temp paths (so a fetch cannot read local files) and every call is confirmed by the client")
+	flag.Func("curl-port", "TCP port the curl tool may connect to (repeatable; default 443 and 80)", func(v string) error {
 		port, err := strconv.Atoi(v)
 		if err != nil {
 			return fmt.Errorf("invalid port %q: %w", v, err)
 		}
-		c.connectPorts = append(c.connectPorts, port)
+		c.curlPorts = append(c.curlPorts, port)
+		return nil
+	})
+	flag.BoolVar(&c.curlAnyPort, "curl-any-port", false,
+		"let the curl tool connect to any TCP port (default: only -curl-port, 443 and 80)")
+	flag.Func("curl-allow-host", "restrict the curl tool to this host (repeatable; a leading dot matches any subdomain; default: any host)", func(v string) error {
+		c.curlHosts = append(c.curlHosts, v)
+		return nil
+	})
+	// Removed flags, still parsed so an old configuration fails with a
+	// sentence instead of "flag provided but not defined".
+	flag.BoolVar(&c.legacyNetwork, "sandbox-network", false,
+		"removed: only the curl tool has network access now (use -curl/-curl-port)")
+	flag.Func("sandbox-connect-port", "removed: use -curl-port", func(v string) error {
+		port, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("invalid port %q: %w", v, err)
+		}
+		c.legacyPorts = append(c.legacyPorts, port)
 		return nil
 	})
 	return c

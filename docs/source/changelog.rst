@@ -7,6 +7,18 @@ Unreleased
 Added
 ~~~~~
 
+- New ``curl`` tool: fetch an http/https URL, with a small allowlist of options
+  (``-H``, ``-L``, ``-I``, ``-i``, ``--compressed``, ``-A``, ``-b``,
+  ``--max-time``, ``--connect-timeout``, ``--max-redirs``, ``--max-filesize``).
+  It is the **only** tool with network access and it is **mutating**, so every
+  call goes through ``tool_confirm``. It runs under its **own** caged policy that
+  grants the system trees and nothing else — no projects, no home, no knowledge
+  base, no temp directory — so a fetch cannot read a local file and therefore
+  cannot exfiltrate one through a URL, a header or a DNS query. Output is
+  truncated to 64 KiB.
+- Flags: ``-curl`` (default ``true``), ``-curl-port`` (repeatable, default 443
+  and 80), ``-curl-any-port`` and ``-curl-allow-host`` (repeatable; the host
+  filter is enforced by the bridge, since Landlock has no host rules).
 - ``-kb-scope`` (``global``/``project``/``both``) selects which knowledge
   base(s) are in use, and a prompt can change it for the rest of the
   conversation with ``kb_scope`` (same persistence as ``model``/``provider``).
@@ -20,6 +32,11 @@ Added
 Changed
 ~~~~~~~
 
+- **Network access is no longer a property of the tools in general.** The
+  ``-sandbox-network`` and ``-sandbox-connect-port`` flags were **removed** (an
+  old configuration fails at startup, pointing at the replacements): the
+  ``shell`` and ``grep`` tools and the hooks never have the network, and the new
+  ``curl`` tool always has it under its own, much narrower filesystem policy.
 - **The knowledge base is now shared across projects by default.** The KB used
   to follow ``set_cwd`` and store notes under ``knowledge_bases/<project>/``,
   so a note learned in one project was invisible everywhere else. The default

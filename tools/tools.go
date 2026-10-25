@@ -70,6 +70,11 @@ func All() []llm.Tool {
 			ReadOnly:    true,
 		},
 		{
+			Name:        "curl",
+			Description: "Fetch a URL over http/https with curl (GET only). 'url' is the URL to fetch. 'args' is an optional list of extra curl options, one per element (there is no shell involved). Allowed options: -H/--header, -L/--location, -I/--head, -i/--include, --compressed, -A/--user-agent, -b/--cookie (inline name=value only), --max-time, --connect-timeout, --max-redirs, --max-filesize. Nothing else is accepted: no uploads (-d/-F/-T), no file writes (-o/-O), no config files (-K), no other transport. This is the ONLY tool with network access: it runs in its own sandbox with no project, home or temp paths, so it cannot read local files, and every call is confirmed by the user first. Output is truncated to 64KiB.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"the URL to fetch (http or https)"},"args":{"type":"array","items":{"type":"string"},"description":"extra curl options, one per element"}},"required":["url"]}`),
+		},
+		{
 			Name:        "search_replace",
 			Description: "Search for an exact string in a file and replace the first occurrence with a new string",
 			Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"search":{"type":"string"},"replace":{"type":"string"}},"required":["path","search","replace"]}`),

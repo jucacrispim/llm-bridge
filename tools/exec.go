@@ -22,13 +22,58 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"llm-bridge/sandbox"
 )
+
+// curl defaults. They are fixed (not flags): the point of the tool is a small,
+// predictable GET, and the model can only tighten them, never open them up.
+const (
+	// curlMaxTime bounds a hung request so it cannot park the turn.
+	curlMaxTime = 30
+	// curlMaxTimeCap / curlMaxRedirsCap bound what the model may ask for.
+	curlMaxTimeCap   = 120
+	curlMaxRedirsCap = 10
+	// curlMaxRedirs is the default redirect budget (redirects are followed
+	// only when -L is given).
+	curlMaxRedirs = 5
+	// curlMaxOutput truncates the body: a whole page in the history burns
+	// tokens, breaks the provider's prefix cache and is an injection vector.
+	curlMaxOutput = 64 << 10
+)
+
+// curlFlags is the allowlist of curl options the tool accepts from the model,
+// mapped to whether the option takes a value. An allowlist (not a denylist) on
+// purpose: anything that uploads (-d/-F/-T), writes files (-o/-O), reads files
+// (-K/--config, a cookie file) or opens another transport (--unix-socket) is
+// simply not here, including options added by future curl releases.
+var curlFlags = map[string]bool{
+	"-H":                true,
+	"--header":          true,
+	"-L":                false,
+	"--location":        false,
+	"-I":                false,
+	"--head":            false,
+	"-i":                false,
+	"--include":         false,
+	"--compressed":      false,
+	"-A":                true,
+	"--user-agent":      true,
+	"-b":                true,
+	"--cookie":          true,
+	"--max-time":        true,
+	"--connect-timeout": true,
+	"--max-redirs":      true,
+	"--max-filesize":    true,
+}
 
 // Executor runs the bridge's tools inside the bridge process, against a working
 // directory (the current project's cwd, set by the client via `set_cwd`). It
@@ -40,6 +85,15 @@ type Executor struct {
 	// caged. The in-process file tools (read/write/glob/search_replace) do not
 	// exec anything, so they are only bounded by the bridge's own permissions.
 	sandbox *sandbox.Sandbox
+	// curlSandbox is the sandbox the curl tool runs under: same shape as
+	// sandbox, but with network access and WITHOUT the project/home paths, so
+	// a fetch cannot read local files (and therefore cannot exfiltrate them).
+	// nil means the curl tool is disabled.
+	curlSandbox *sandbox.Sandbox
+	// curlHosts restricts the curl tool to these hosts (empty means any host).
+	// Landlock only filters the destination port, never the host, so this is
+	// enforced here, before the command runs.
+	curlHosts []string
 }
 
 // NewExecutor returns an Executor rooted at cwd. A relative path argument to
@@ -56,6 +110,14 @@ func NewExecutor(cwd string) *Executor {
 // (-sandbox-ro/-sandbox-rw), not from the cwd.
 func NewExecutorWithSandbox(cwd string, sb *sandbox.Sandbox) *Executor {
 	return &Executor{cwd: cwd, sandbox: sb}
+}
+
+// NewExecutorWithSandboxes returns an Executor rooted at cwd whose external
+// processes run under sb and whose curl tool runs under curlSb (a separate,
+// network-enabled but filesystem-minimal sandbox). A nil curlSb keeps the curl
+// tool disabled. hosts, when non-empty, restricts the curl tool's destinations.
+func NewExecutorWithSandboxes(cwd string, sb, curlSb *sandbox.Sandbox, hosts []string) *Executor {
+	return &Executor{cwd: cwd, sandbox: sb, curlSandbox: curlSb, curlHosts: hosts}
 }
 
 // run executes name/args capturing the combined output. With a sandbox
@@ -103,6 +165,8 @@ func (e *Executor) Execute(ctx context.Context, name, rawArgs string) (string, e
 		return e.shell(ctx, args)
 	case "grep":
 		return e.grep(ctx, args)
+	case "curl":
+		return e.curl(ctx, args)
 	case "glob":
 		return e.glob(args)
 	case "search_replace":
@@ -264,6 +328,249 @@ func (e *Executor) grep(ctx context.Context, args map[string]any) (string, error
 		return "", err
 	}
 	return out, nil
+}
+
+// curl implements the `curl` tool: fetch URL (http/https) with the extra
+// options in ARGS, all of them validated against an allowlist and passed as an
+// argv (never through a shell). It is the only tool with network access, and it
+// runs under its own sandbox: filesystem-minimal (no project, no home, no temp
+// dir), so a fetch has nothing local to read — and therefore nothing local to
+// leak into a URL, a header or a DNS query.
+func (e *Executor) curl(ctx context.Context, args map[string]any) (string, error) {
+	rawURL, _ := args["url"].(string)
+	if err := validateCurlURL(rawURL, e.curlHosts); err != nil {
+		return "", err
+	}
+	extra, err := stringList(args["args"])
+	if err != nil {
+		return "", err
+	}
+	argv, err := curlArgv(rawURL, extra)
+	if err != nil {
+		return "", err
+	}
+	if e.curlSandbox == nil {
+		return "", fmt.Errorf("Curl: network access is disabled (the curl tool is off)")
+	}
+	// No cwd on purpose: with a minimal policy there is no relative path the
+	// command could legitimately touch, so it starts in the bridge's own.
+	out, err := e.curlSandbox.Run(ctx, "", "curl", argv...)
+	if err != nil {
+		// A caged failure is never the tool's result (see shell).
+		if isSetupError(err) {
+			return "", err
+		}
+		if ee, ok := err.(*exec.ExitError); ok {
+			return truncateCurlOutput(string(out) + fmt.Sprintf("\n[curl exited with status %d]", ee.ExitCode())), nil
+		}
+		return "", err
+	}
+	return truncateCurlOutput(string(out)), nil
+}
+
+// validateCurlURL rejects anything the tool will not fetch: a missing URL, a
+// scheme other than http/https (file:// would be a local read, ftp:// another
+// transport), credentials embedded in the URL (they would end up in the request
+// and in the log) and a host outside the allowlist.
+func validateCurlURL(raw string, hosts []string) error {
+	if raw == "" {
+		return fmt.Errorf("Curl: missing 'url'")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("Curl: invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("Curl: unsupported URL scheme %q (only http and https)", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("Curl: URL has no host")
+	}
+	if u.User != nil {
+		return fmt.Errorf("Curl: the URL must not carry credentials (use -H with your own header, if you must)")
+	}
+	if len(hosts) > 0 && !hostAllowed(u.Hostname(), hosts) {
+		return fmt.Errorf("Curl: host %q is not allowed (allowed: %s)",
+			u.Hostname(), strings.Join(hosts, ", "))
+	}
+	return nil
+}
+
+// hostAllowed reports whether host matches the configured allowlist. Entries are
+// matched case-insensitively; a leading "." (or "*.") makes it a suffix match,
+// so ".example.com" covers example.com and any subdomain.
+func hostAllowed(host string, allowed []string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, entry := range allowed {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		entry = strings.TrimPrefix(entry, "*")
+		if entry == "" {
+			continue
+		}
+		if entry == host {
+			return true
+		}
+		if strings.HasPrefix(entry, ".") && (host == entry[1:] || strings.HasSuffix(host, entry)) {
+			return true
+		}
+	}
+	return false
+}
+
+// stringList decodes a JSON array of strings into a []string. A missing value is
+// nil; anything else (a string, a number, an array with a non-string) is an
+// error, so the arguments are never re-parsed as a command line.
+func stringList(v any) ([]string, error) {
+	switch list := v.(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		return list, nil
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			s, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("Curl: 'args' must be a list of strings")
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("Curl: 'args' must be a list of strings")
+}
+
+// curlArgv builds the argv for the fetch: the fixed defaults first, then the
+// model's options, then the URL last (as --url, so a value can never be taken
+// for a flag).
+func curlArgv(rawURL string, extra []string) ([]string, error) {
+	opts, err := curlOptions(extra)
+	if err != nil {
+		return nil, err
+	}
+	argv := []string{
+		// -q ignores ~/.curlrc: the environment must not change what runs.
+		"-q",
+		// -sS is quiet about progress, loud about errors.
+		"-sS",
+		// Both the initial request and every redirect are pinned to http(s):
+		// a flag allowlist cannot express that.
+		"--proto", "=http,https",
+		"--proto-redir", "=http,https",
+		"--max-redirs", strconv.Itoa(curlMaxRedirs),
+		"--max-time", strconv.Itoa(curlMaxTime),
+	}
+	argv = append(argv, opts...)
+	return append(argv, "--url", rawURL), nil
+}
+
+// curlOptions validates the model's extra options against the allowlist and
+// normalizes them into a flag/value sequence (`--header=X` and `-H X` both
+// become `--header X`).
+func curlOptions(extra []string) ([]string, error) {
+	out := make([]string, 0, len(extra))
+	for i := 0; i < len(extra); i++ {
+		arg := extra[i]
+		name, value, hasValue := arg, "", false
+		if strings.HasPrefix(arg, "--") {
+			if eq := strings.Index(arg, "="); eq >= 0 {
+				name, value, hasValue = arg[:eq], arg[eq+1:], true
+			}
+		} else if !strings.HasPrefix(arg, "-") || arg == "-" {
+			return nil, fmt.Errorf("Curl: unexpected argument %q: 'args' holds curl options only (the URL goes in 'url')", arg)
+		}
+		takesValue, ok := curlFlags[name]
+		if !ok {
+			return nil, fmt.Errorf("Curl: option %q is not allowed (allowed: %s)", name, curlFlagNames())
+		}
+		if hasValue && !takesValue {
+			return nil, fmt.Errorf("Curl: option %q does not take a value", name)
+		}
+		if takesValue && !hasValue {
+			if i+1 >= len(extra) {
+				return nil, fmt.Errorf("Curl: option %q requires a value", name)
+			}
+			i++
+			value = extra[i]
+		}
+		if takesValue {
+			if err := validateCurlValue(name, value); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, name)
+		if takesValue {
+			out = append(out, value)
+		}
+	}
+	return out, nil
+}
+
+// curlFlagNames returns the allowlisted option names, sorted, for error messages.
+func curlFlagNames() string {
+	names := make([]string, 0, len(curlFlags))
+	for name := range curlFlags {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, " ")
+}
+
+// validateCurlValue rejects the values that turn an allowed option into a
+// different one: header/CRLF injection, @file indirection, a cookie file
+// (-b without "=" reads a file) and unbounded timeouts.
+func validateCurlValue(name, value string) error {
+	if strings.ContainsAny(value, "\x00\r\n") {
+		return fmt.Errorf("Curl: the value for %q must not contain NUL, CR or LF", name)
+	}
+	switch name {
+	case "-b", "--cookie":
+		// curl reads a cookie FILE when the value has no "=": inline only.
+		if !strings.Contains(value, "=") || strings.HasPrefix(value, "@") {
+			return fmt.Errorf("Curl: %s accepts an inline cookie only (name=value); reading a cookie file is not allowed", name)
+		}
+	case "-H", "--header", "-A", "--user-agent":
+		if strings.HasPrefix(value, "@") {
+			return fmt.Errorf("Curl: %s does not accept a file (@path)", name)
+		}
+	}
+	switch name {
+	case "--max-time", "--connect-timeout":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("Curl: %s needs a positive integer of seconds, got %q", name, value)
+		}
+		if n > curlMaxTimeCap {
+			return fmt.Errorf("Curl: %s is capped at %d seconds", name, curlMaxTimeCap)
+		}
+	case "--max-redirs":
+		n, err := strconv.Atoi(value)
+		if err != nil || n < 1 {
+			return fmt.Errorf("Curl: --max-redirs needs a positive integer, got %q", value)
+		}
+		if n > curlMaxRedirsCap {
+			return fmt.Errorf("Curl: --max-redirs is capped at %d", curlMaxRedirsCap)
+		}
+	case "--max-filesize":
+		if n, err := strconv.Atoi(value); err != nil || n < 0 {
+			return fmt.Errorf("Curl: --max-filesize needs a non-negative integer of bytes, got %q", value)
+		}
+	}
+	return nil
+}
+
+// truncateCurlOutput bounds the body that goes into the history, cutting on a
+// rune boundary so the result stays valid UTF-8.
+func truncateCurlOutput(out string) string {
+	if len(out) <= curlMaxOutput {
+		return out
+	}
+	cut := curlMaxOutput
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
+	}
+	return out[:cut] + fmt.Sprintf("\n[output truncated: %d bytes total, showing the first %d]",
+		len(out), cut)
 }
 
 // glob implements the `glob` tool, emulating Emacs' `file-expand-wildcards`:

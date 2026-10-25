@@ -25,7 +25,7 @@ does not:
   ``read``, ``write``, ``search_replace``, ``grep``, ``glob`` and ``shell`` —
   directly on the host and the project on disk, turning a chat client into a
   coding assistant. Read-only tools run without confirmation; the mutating ones
-  (``shell`` / ``write`` / ``search_replace``) are offered to the client for
+  (``shell`` / ``write`` / ``search_replace`` / ``curl``) are offered to the client for
   approval via a ``tool_confirm`` event before the bridge runs them.
 - **Image support (multimodal)**: a prompt can carry images by ``path`` (read
   by the bridge), ``url`` (passed through to the provider) or ``data`` (inline

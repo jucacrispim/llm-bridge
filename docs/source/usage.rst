@@ -72,7 +72,7 @@ it runs a local script instead. See :doc:`hooks`.
 
 **3. Tool approval and control commands.** The bridge runs the tools itself.
 Read-only tools (``read``, ``grep``, ``glob``) run without asking; for a
-mutating tool (``shell``, ``write``, ``search_replace``) the bridge emits a
+mutating tool (``shell``, ``write``, ``search_replace``, ``curl``) the bridge emits a
 ``tool_confirm`` event and the client replies with a ``tool_confirm`` command to
 approve it (or ``cancel`` to abort). The client can also ``cancel`` an
 in-flight turn, ``set_cwd`` to move the working directory (which also reloads the
@@ -190,6 +190,22 @@ only tighten the outer:
   IPC (unix sockets and SysV IPC) and the network. The in-process tools
   (``read``, ``write``, ``glob``, ``search_replace``) do not exec anything and
   are therefore only bounded by the bridge's own (ceiling) permissions.
+- **curl** — the one tool with network access, and the only one that does
+  **not** get the shared filesystem policy. It runs under its own caged policy
+  with the system trees and nothing else (no projects, no home, no knowledge
+  base, no temp directory), because network plus "can read the user's files" is
+  an exfiltration primitive: the answer can leave inside a URL path, a header or
+  a DNS query. With nothing to read, the only data left is the conversation the
+  model already has. The destination is bounded by port (see ``-curl-port``) and,
+  optionally, by host (``-curl-allow-host``).
+
+.. note::
+
+   ``-sandbox-network`` and ``-sandbox-connect-port`` were **removed**: network
+   access is not a property of the tools in general anymore, only of the curl
+   tool. A configuration that still passes them fails at startup with a message
+   pointing at ``-curl``/``-curl-port``, instead of silently running without the
+   network it asked for.
 
 Because the sandbox is on by default, ``caged`` must be available (see its
 `documentation <https://docs.poraodojuca.dev/caged>`_ for building and
@@ -212,13 +228,30 @@ fallback to unsandboxed execution.
     ``-sandbox-rw ~/go/pkg/mod`` (the module cache; writable only really needed
     for ``go get``) are what ``go build``/``go test`` need inside the sandbox.
 
-``--sandbox-network``
-    Give the tools network access (denied by default; without it, seccomp denies
-    creating a TCP socket at all, regardless of Landlock).
+``--curl`` (default ``true``)
+    Expose the ``curl`` tool, the **only** tool with network access. It runs
+    under its own caged policy that grants the system trees and nothing else —
+    no project, no home directory, no knowledge base, no temp directory — so a
+    fetch has no local file to read, and therefore nothing to leak into a URL, a
+    header or a DNS query. It is a **mutating** tool (the client sees the URL and
+    the options and confirms every call), and it only accepts a small allowlist
+    of options: no uploads, no file writes, no config files. ``-curl=false``
+    removes it from the tool list; ``-disable-sandbox`` does too, because it
+    never runs outside its sandbox.
 
-``--sandbox-connect-port <port>`` (repeatable)
-    Restrict the tools' network to these TCP ports (requires
-    ``-sandbox-network``; without ports, any destination is allowed).
+``--curl-port <port>`` (repeatable)
+    TCP port the curl tool may connect to (default: ``443`` and ``80``). This is
+    the kernel-level bound (Landlock ``NET_CONNECT_TCP``). It does not cover a
+    UDP DNS query: with the socket families allowed, resolution still works, and
+    a name lookup is not a channel the port rule can see.
+
+``--curl-any-port``
+    Let the curl tool connect to any TCP port (default: only the ports above).
+
+``--curl-allow-host <host>`` (repeatable)
+    Restrict the curl tool to these hosts; a leading dot (or ``*.``) also matches
+    any subdomain. Default: any host. Landlock cannot filter hosts, so this is
+    enforced by the bridge: it compares ``url.Hostname()`` before running curl.
 
 ``--sandbox-tmp <dir>``
     Temporary directory granted read-write to the bridge **and** the tools, and

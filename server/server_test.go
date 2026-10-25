@@ -35,6 +35,7 @@ import (
 	"llm-bridge/knowledge"
 	"llm-bridge/llm"
 	"llm-bridge/sandbox"
+	"llm-bridge/tools"
 )
 
 type fakeProvider struct {
@@ -2118,7 +2119,7 @@ func TestRunWithKnowledgeWiresKB(t *testing.T) {
 {"method":"prompt","params":{"text":"hi"}}
 {"method":"quit"}
 `
-	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, t.TempDir(), knowledge.ScopeProject, knowledge.DisabledEmbedder{}, nil)
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, t.TempDir(), knowledge.ScopeProject, knowledge.DisabledEmbedder{}, Sandboxes{})
 	if err != nil {
 		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}
@@ -2173,7 +2174,7 @@ func TestRunWithKnowledgeLoadsGlobalAtStartup(t *testing.T) {
 `
 	err := RunWithKnowledgeBase(strings.NewReader(input), &out,
 		map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false,
-		base, knowledge.ScopeGlobal, knowledge.DisabledEmbedder{}, nil)
+		base, knowledge.ScopeGlobal, knowledge.DisabledEmbedder{}, Sandboxes{})
 	if err != nil {
 		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}
@@ -2602,6 +2603,37 @@ func TestRunWithOptionsPruneAndAggressive(t *testing.T) {
 	}
 }
 
+// TestAvailableToolsCurlOnlyWithSandbox verifies the curl tool is only offered
+// when the bridge can actually run it: with no curl sandbox (the sandbox is off,
+// or -curl=false) the tool list leaves it out, so the model is never invited to
+// call something that would only error.
+func TestAvailableToolsCurlOnlyWithSandbox(t *testing.T) {
+	st := &state{}
+	for _, tool := range st.availableTools() {
+		if tool.Name == "curl" {
+			t.Fatal("curl offered without a curl sandbox")
+		}
+	}
+	if len(st.availableTools()) != len(tools.All())-1 {
+		t.Errorf("expected one tool fewer, got %d (all: %d)",
+			len(st.availableTools()), len(tools.All()))
+	}
+
+	st.sandboxes.Curl = &sandbox.Sandbox{Bin: "caged"}
+	found := false
+	for _, tool := range st.availableTools() {
+		if tool.Name == "curl" {
+			found = true
+			if tool.ReadOnly {
+				t.Error("curl must be mutating: it is confirmed by the client")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("curl not offered although a curl sandbox is configured")
+	}
+}
+
 // TestRunWithSandboxLogsToolSandbox exercises the run() branch that reports the
 // tool sandbox at startup (covers the sb != nil logging path), and confirms a
 // turn still completes normally with a sandbox attached: a prompt without tool
@@ -2615,7 +2647,7 @@ func TestRunWithSandboxLogsToolSandbox(t *testing.T) {
 	input := `{"method":"prompt","params":{"text":"hi"}}
 {"method":"quit"}
 `
-	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false, "", knowledge.ScopeGlobal, nil, &sandbox.Sandbox{Bin: "caged"})
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false, "", knowledge.ScopeGlobal, nil, Sandboxes{Tools: &sandbox.Sandbox{Bin: "caged"}})
 	if err != nil {
 		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}

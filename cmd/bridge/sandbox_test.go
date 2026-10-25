@@ -20,6 +20,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -220,4 +221,189 @@ func count(list []string, s string) int {
 		}
 	}
 	return n
+}
+
+// TestToolSandboxHasNoNetwork checks the shell/grep/hooks sandbox has no network
+// at all: that is the curl tool's privilege, not a general one. It would show up
+// both in the policy (flags) and, if it leaked, in caged's argv.
+func TestToolSandboxHasNoNetwork(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: t.TempDir()}
+	sb, err := c.toolSandbox()
+	if err != nil {
+		t.Fatalf("toolSandbox: %v", err)
+	}
+	if sb.Policy.AllowNetworkSockets || sb.Policy.ConnectTCP || len(sb.Policy.ConnectPorts) > 0 {
+		t.Fatalf("tools must have no network: %+v", sb.Policy)
+	}
+	args := strings.Join(sb.Policy.Args(), " ")
+	if strings.Contains(args, "--allow-network-sockets") || strings.Contains(args, "--allow-connect") {
+		t.Errorf("tools argv grants network: %s", args)
+	}
+}
+
+// TestCurlSandboxMinimalFilesystem checks the curl sandbox is the inverse of the
+// tools one: network on, but nothing of the user's to read. The shared policy
+// (projects, home, KB, temp dir) must not leak into it — network plus a readable
+// project is an exfiltration primitive.
+func TestCurlSandboxMinimalFilesystem(t *testing.T) {
+	tmp := t.TempDir()
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: tmp, curl: true}
+
+	sb, err := c.curlSandbox()
+	if err != nil {
+		t.Fatalf("curlSandbox: %v", err)
+	}
+	if !sb.Policy.AllowNetworkSockets {
+		t.Error("curl must have the socket families allowed")
+	}
+	if sb.Policy.KeepEnv {
+		t.Error("curl must not inherit the bridge's environment (API keys)")
+	}
+	if got := sb.Policy.ConnectPorts; len(got) != 2 || got[0] != 443 || got[1] != 80 {
+		t.Errorf("ConnectPorts = %v, want [443 80]", got)
+	}
+	if sb.Policy.ConnectTCP {
+		t.Error("any-port must be opt-in")
+	}
+	if got := sb.Policy.ReadWrite; len(got) != 1 || got[0] != "/dev/null" {
+		t.Errorf("ReadWrite = %v, want [/dev/null] only", got)
+	}
+	if contains(sb.Policy.ReadWrite, tmp) {
+		t.Errorf("curl must not get the temp dir: %v", sb.Policy.ReadWrite)
+	}
+	home, _ := os.UserHomeDir()
+	for _, p := range sb.Policy.ReadOnly {
+		if home != "" && (p == home || strings.HasPrefix(p, home+"/")) {
+			t.Errorf("curl must not read the home directory: %q", p)
+		}
+	}
+	for _, want := range []string{"/usr", "/etc"} {
+		if !contains(sb.Policy.ReadOnly, want) {
+			t.Errorf("curl needs %q to run (binary, CAs, resolv.conf): %v", want, sb.Policy.ReadOnly)
+		}
+	}
+}
+
+// TestCurlSandboxAnyPort checks -curl-any-port swaps the port rule for
+// --allow-connect-tcp (the two are mutually exclusive in caged).
+func TestCurlSandboxAnyPort(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), curl: true, curlAnyPort: true}
+	sb, err := c.curlSandbox()
+	if err != nil {
+		t.Fatalf("curlSandbox: %v", err)
+	}
+	if !sb.Policy.ConnectTCP {
+		t.Error("ConnectTCP should be on with -curl-any-port")
+	}
+	if len(sb.Policy.ConnectPorts) > 0 {
+		t.Errorf("ConnectPorts should be empty with -curl-any-port: %v", sb.Policy.ConnectPorts)
+	}
+}
+
+// TestCurlSandboxExplicitPorts checks -curl-port replaces the defaults (and
+// reaches caged as --allow-connect-port).
+func TestCurlSandboxExplicitPorts(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), curl: true, curlPorts: []int{8443}}
+	sb, err := c.curlSandbox()
+	if err != nil {
+		t.Fatalf("curlSandbox: %v", err)
+	}
+	if strings.Join(ints(sb.Policy.ConnectPorts), ",") != "8443" {
+		t.Fatalf("ConnectPorts = %v, want [8443]", sb.Policy.ConnectPorts)
+	}
+	if !contains(sb.Policy.Args(), "--allow-connect-port") {
+		t.Errorf("port rule missing from caged args: %v", sb.Policy.Args())
+	}
+}
+
+// TestCurlSandboxDisabled checks the two ways of having no curl tool at all:
+// -curl=false and -disable-sandbox. Both must yield a nil sandbox, which the
+// server turns into "do not offer the tool".
+func TestCurlSandboxDisabled(t *testing.T) {
+	for name, c := range map[string]*sandboxConfig{
+		"curl flag off": {cagedBin: fakeCagedPath(t), curl: false},
+		"sandbox off":   {disabled: true, curl: true},
+	} {
+		sb, err := c.curlSandbox()
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if sb != nil {
+			t.Errorf("%s: expected a nil sandbox, got %+v", name, sb)
+		}
+	}
+}
+
+// fakeCagedWithReportFD writes a stub caged whose --help advertises
+// --report-fd, which is what validate() checks at startup.
+func fakeCagedWithReportFD(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "caged")
+	script := "#!/bin/sh\necho 'usage: caged [--ro DIR] [--report-fd N] -- CMD'\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestValidateAcceptsCurlConfig covers the happy path of validate: caged with
+// --report-fd, curl ports in range.
+func TestValidateAcceptsCurlConfig(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), curlPorts: []int{443, 8443}}
+	if err := c.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}
+
+// TestValidateRejectsRemovedNetworkFlags covers the removal of
+// -sandbox-network/-sandbox-connect-port: an old configuration fails loudly at
+// startup instead of silently running without the network it asked for.
+func TestValidateRejectsRemovedNetworkFlags(t *testing.T) {
+	for name, c := range map[string]*sandboxConfig{
+		"sandbox-network":         {cagedBin: fakeCagedWithReportFD(t), legacyNetwork: true},
+		"sandbox-connect-port":    {cagedBin: fakeCagedWithReportFD(t), legacyPorts: []int{443}},
+		"both, only connect-port": {cagedBin: fakeCagedWithReportFD(t), legacyNetwork: true, legacyPorts: []int{443}},
+	} {
+		err := c.validate()
+		if err == nil {
+			t.Errorf("%s: expected an error", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "-curl-port") {
+			t.Errorf("%s: error should point at the replacement: %v", name, err)
+		}
+	}
+}
+
+// TestValidateRejectsBadCurlPort covers the range check of -curl-port.
+func TestValidateRejectsBadCurlPort(t *testing.T) {
+	for _, port := range []int{0, -1, 70000} {
+		c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), curlPorts: []int{port}}
+		if err := c.validate(); err == nil {
+			t.Errorf("port %d: expected an error", port)
+		}
+	}
+}
+
+// TestRequireReportFDRejectsOldCaged covers the old-caged guard: without
+// --report-fd a failed sandbox cannot be told apart from a command that exited
+// with the same status, so it is a startup error.
+func TestRequireReportFDRejectsOldCaged(t *testing.T) {
+	err := requireReportFD(fakeCagedPath(t))
+	if err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Fatalf("err = %v, want 'too old'", err)
+	}
+	if err := requireReportFD(fakeCagedWithReportFD(t)); err != nil {
+		t.Fatalf("new caged rejected: %v", err)
+	}
+}
+
+// ints converts a []int to []string, for compact comparisons in tests.
+func ints(v []int) []string {
+	out := make([]string, 0, len(v))
+	for _, n := range v {
+		out = append(out, strconv.Itoa(n))
+	}
+	return out
 }

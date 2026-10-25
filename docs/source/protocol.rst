@@ -190,7 +190,7 @@ Events (bridge → client)
        {"event": "tool_call", "id": "call_123", "name": "read", "input": {"path": "server/server.go"}}
 
 ``tool_confirm``
-    A **mutating** tool (``shell`` / ``write`` / ``search_replace``) the bridge is
+    A **mutating** tool (``shell`` / ``write`` / ``search_replace`` / ``curl``) the bridge is
     offering for approval. The client replies with a ``tool_confirm`` command to
     allow it (the bridge then runs it) or with ``cancel`` to abort the turn.
 

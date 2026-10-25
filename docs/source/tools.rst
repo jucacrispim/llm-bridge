@@ -10,8 +10,8 @@ detailed in :doc:`knowledge`.
 
 The bridge classifies every tool as **read-only** (it never mutates any state:
 ``read``, ``grep``, ``glob``, ``knowledge``) or **mutating** (``shell``,
-``write``, ``search_replace``). Read-only tools run **without confirmation**;
-mutating tools are first offered to the client for approval.
+``write``, ``search_replace``, ``curl``). Read-only tools run **without
+confirmation**; mutating tools are first offered to the client for approval.
 
 The tool-call cycle
 -------------------
@@ -116,6 +116,17 @@ internally (see :doc:`knowledge`).
 ``shell`` *(mutating)*
     Execute a shell ``command`` (required) on the host.
 
+``curl`` *(mutating)*
+    Fetch ``url`` (required; http or https) with an optional list of extra curl
+    options in ``args``. The only tool with **network access**, and the only one
+    whose sandbox grants no project, home or temp path, so a fetch cannot read a
+    local file. Options are an allowlist (``-H``, ``-L``, ``-I``, ``-i``,
+    ``--compressed``, ``-A``, ``-b`` with an inline cookie only, ``--max-time``,
+    ``--connect-timeout``, ``--max-redirs``, ``--max-filesize``); uploads, file
+    writes and config files are rejected. Output is truncated to 64 KiB. Not
+    offered at all with ``-curl=false`` or ``-disable-sandbox``. See the
+    "Sandbox (caged)" section of :doc:`usage`.
+
 ``knowledge`` *(read-only)*
     Manage the project's local knowledge base (``show`` / ``search`` / ``add`` /
     ``delete`` / ``reset``). Resolved **inside the bridge**, so it never needs a
@@ -129,7 +140,7 @@ Rules and details
   against it). The model's tools therefore operate on the project the client
   pointed the bridge at.
 - **Confirmation:** only mutating tools (``shell`` / ``write`` /
-  ``search_replace``) are offered for approval via ``tool_confirm``;
+  ``search_replace`` / ``curl``) are offered for approval via ``tool_confirm``;
   read-only tools run without asking.
 - **Id matching:** the bridge only accepts a ``tool_confirm`` approval for an
   ``id`` it is currently offering. An approval for an unknown id (e.g. a late

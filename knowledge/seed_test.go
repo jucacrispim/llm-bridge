@@ -50,6 +50,50 @@ func TestEnsureSeededFirstLoad(t *testing.T) {
 	}
 }
 
+// TestEnsureSeededGlobalOnly verifies that a manager whose seed project is
+// empty (the shared global KB) takes only the global seed files and ignores the
+// per-project subdirectory.
+func TestEnsureSeededGlobalOnly(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "global.md", "conteudo global")
+	writeSeed(t, root, "_global/inner.md", "nao deve entrar")
+	writeSeed(t, root, "proj/inner.md", "nao deve entrar")
+
+	m := NewManager(fakeEmbedder{dim: 8}, GlobalKey)
+	m.SetSeedProject("")
+	if err := m.EnsureSeeded(root); err != nil {
+		t.Fatal(err)
+	}
+	if m.Len() != 1 {
+		t.Fatalf("want 1 item (global seed only), got %d", m.Len())
+	}
+	res, err := m.Search("conteudo global", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].Label != "seed:global.md" {
+		t.Fatalf("want the global seed, got %+v", res)
+	}
+}
+
+// TestEnsureSeededProjectScoped verifies that the seed project is decoupled
+// from the storage key: a manager stored under one key can read another
+// project's seed subdirectory.
+func TestEnsureSeededProjectScoped(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "global.md", "conteudo global")
+	writeSeed(t, root, "realproj/inner.md", "conteudo do projeto")
+
+	m := NewManager(fakeEmbedder{dim: 8}, "storage-key")
+	m.SetSeedProject("realproj")
+	if err := m.EnsureSeeded(root); err != nil {
+		t.Fatal(err)
+	}
+	if m.Len() != 2 {
+		t.Fatalf("want 2 seeded items (global + realproj), got %d", m.Len())
+	}
+}
+
 func TestEnsureSeededIdempotent(t *testing.T) {
 	root := t.TempDir()
 	writeSeed(t, root, "global.md", "conteudo global")

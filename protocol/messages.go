@@ -67,6 +67,11 @@ type PromptParams struct {
 	// provider. Like Model/Thinking/ReasoningEffort, the override persists
 	// between prompts.
 	Provider string `json:"provider,omitempty"`
+	// KBScope optionally switches which knowledge base(s) are used for this and
+	// subsequent prompts: "global" (the shared KB), "project" (the cwd
+	// project's KB) or "both". Omitted keeps the configured -kb-scope. Like
+	// Model/Provider, the override persists between prompts.
+	KBScope string `json:"kb_scope,omitempty"`
 	// Thinking optionally overrides thinking mode for the conversation:
 	// true → deepseek-flash, false → deepseek-chat. Omitted keeps the
 	// provider's configured mode.

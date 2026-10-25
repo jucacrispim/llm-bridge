@@ -46,7 +46,7 @@ The bridge is organized into focused packages:
     the general ``~/.llm-bridge/hooks/``). See :doc:`hooks-internals`.
 
 ``knowledge``
-    The per-project knowledge base: index, ONNX embedder (``Embedder``,
+    The knowledge base: index, ONNX embedder (``Embedder``,
     ``LazyEmbedder``, ``DisabledEmbedder``), the ``Manager`` and the seed
     handling. See :doc:`knowledge-internals`.
 
@@ -74,7 +74,7 @@ which funnel into the single ``run`` function:
 - ``RunWithSystemPrompt(r, w, providers, defaultName, systemPrompt)`` — adds a
   global system prompt.
 - ``RunWithOptions(...)`` — adds the prune flags.
-- ``RunWithKnowledgeBase(...)`` — adds the knowledge base (base dir +
+- ``RunWithKnowledgeBase(...)`` — adds the knowledge base (base dir, scope +
   embedder). This is what ``cmd/bridge/main.go`` calls.
 
 Every variant reads from ``r`` and writes to ``w``, so the bridge is easily
@@ -193,8 +193,12 @@ Both are mutually exclusive and off by default. See :doc:`/usage`.
 Knowledge base
 --------------
 
-On ``set_cwd``, the server builds the per-project ``knowledge.Manager`` lazily
-from ``kbBaseDir/<project>/data.json`` (clearing it when disabled). The
-``knowledge`` tool calls are resolved locally inside ``runToolCycle`` so they
-never wait on the client. A one-line note about the project's KB is injected on
-the first turn when the KB is enabled. See :doc:`knowledge-internals`.
+The server builds the ``knowledge.Set`` for the effective scope on ``set_cwd``
+and when a prompt changes the scope via ``kb_scope``: the shared KB
+(``kbBaseDir/_global/data.json``) and/or the cwd project's
+(``kbBaseDir/<project>/data.json``); the set is cleared when the KB is
+disabled. The scope comes from ``-kb-scope`` (``global`` by default, or
+``project``/``both``). The ``knowledge`` tool calls are resolved locally inside
+``runToolCycle`` so they never wait on the client. A one-line note about the
+available KB(s) is injected on the first turn when the KB is enabled. See
+:doc:`knowledge-internals`.

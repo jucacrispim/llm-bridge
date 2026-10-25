@@ -42,24 +42,33 @@ type item struct {
 }
 
 // Manager ties together an Embedder, an Index and on-disk persistence. It is
-// scoped to a single project; when dir is non-empty, Add persists to
-// dir/<project>/data.json after each insertion.
+// scoped to a single knowledge base key; when dir is non-empty, Add persists
+// to dir/<key>/data.json after each insertion.
 type Manager struct {
-	embed     Embedder
-	idx       Index
-	dir       string // base dir ("" = in-memory only, no persistence)
-	project   string
-	seedRoot  string // dir of seed .md files; used by Reset to rebuild from seed
-	items     []item
+	embed Embedder
+	idx   Index
+	dir   string // base dir ("" = in-memory only, no persistence)
+	// project is the storage key: the directory name under dir that holds this
+	// KB's data.json. For a project KB it is the last element of the cwd; for
+	// the global (shared) KB it is GlobalKey ("_global").
+	project string
+	// seedProject scopes the seed subdirectory used by EnsureSeeded
+	// (seedRoot/<seedProject>/*.md). Empty means "global seeds only". It
+	// defaults to project but is decoupled from it so the shared KB
+	// (project == "_global") does not look for a "_global" seed subdir.
+	seedProject string
+	seedRoot    string // dir of seed .md files; used by Reset to rebuild from seed
+	items       []item
 }
 
 // NewManager returns an in-memory Manager for project backed by embed, with no
 // persistence. Use Load when on-disk persistence is wanted.
 func NewManager(embed Embedder, project string) *Manager {
 	return &Manager{
-		embed:   embed,
-		idx:     NewBruteForce(),
-		project: project,
+		embed:       embed,
+		idx:         NewBruteForce(),
+		project:     project,
+		seedProject: project,
 	}
 }
 
@@ -189,6 +198,15 @@ func (m *Manager) Len() int { return m.idx.Len() }
 // rebuild the knowledge base from curated content.
 func (m *Manager) SetSeedRoot(root string) { m.seedRoot = root }
 
+// SetSeedProject scopes which seed subdirectory EnsureSeeded reads
+// (seedRoot/<seedProject>/*.md). An empty value means "global seeds only",
+// which is what the shared KB uses. The default is the manager's project key.
+func (m *Manager) SetSeedProject(project string) { m.seedProject = project }
+
+// Project returns the storage key of this knowledge base (the directory name
+// under the KB base dir).
+func (m *Manager) Project() string { return m.project }
+
 // rebuildIndex reconstructs the brute-force index from the current items. It is
 // used after any item mutation (upsert/delete) that the plain index cannot apply
 // in place. The KB is small, so a full rebuild is cheap.
@@ -234,21 +252,36 @@ func (m *Manager) Reset() error {
 	return m.EnsureSeeded(m.seedRoot)
 }
 
+// toolArgs is the JSON shape of the `knowledge` tool arguments. It is shared by
+// Manager.Execute (single KB) and Set.Execute (one or two scoped KBs); the
+// "scope" field is only meaningful for a Set.
+type toolArgs struct {
+	Command string `json:"command"`
+	Query   string `json:"query"`
+	Label   string `json:"label"`
+	Text    string `json:"text"`
+	Limit   int    `json:"limit"`
+	Scope   string `json:"scope"`
+}
+
+// parseToolArgs decodes the tool's raw JSON arguments.
+func parseToolArgs(args json.RawMessage) (toolArgs, error) {
+	var p toolArgs
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &p); err != nil {
+			return p, fmt.Errorf("invalid knowledge arguments: %w", err)
+		}
+	}
+	return p, nil
+}
+
 // Execute handles a `knowledge` tool invocation (command: show|search|add) and
 // returns the formatted result to feed back to the model as the tool result.
 // args is the tool's raw JSON arguments.
 func (m *Manager) Execute(args json.RawMessage) (string, error) {
-	var p struct {
-		Command string `json:"command"`
-		Query   string `json:"query"`
-		Label   string `json:"label"`
-		Text    string `json:"text"`
-		Limit   int    `json:"limit"`
-	}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &p); err != nil {
-			return "", fmt.Errorf("invalid knowledge arguments: %w", err)
-		}
+	p, err := parseToolArgs(args)
+	if err != nil {
+		return "", err
 	}
 	switch p.Command {
 	case "show":

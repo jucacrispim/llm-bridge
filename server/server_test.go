@@ -2004,7 +2004,7 @@ func TestResolveKnowledgeDisabled(t *testing.T) {
 // embed that fails still produces a tool result so the model keeps its turn).
 func TestResolveKnowledgeExecuteError(t *testing.T) {
 	kb := knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")
-	st := &state{kb: kb}
+	st := &state{kb: projectSet(kb)}
 	st.resolveKnowledge("call_1", `{"command":"add","label":"x","text":"y"}`)
 	last := st.history[len(st.history)-1]
 	if last.Role != "tool" || last.ToolCallID != "call_1" {
@@ -2020,7 +2020,7 @@ func TestResolveKnowledgeExecuteError(t *testing.T) {
 // JSON payload).
 func TestResolveKnowledgeNilArgs(t *testing.T) {
 	kb := knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")
-	st := &state{kb: kb}
+	st := &state{kb: projectSet(kb)}
 	st.resolveKnowledge("call_1", "")
 	last := st.history[len(st.history)-1]
 	if last.Role != "tool" || last.ToolCallID != "call_1" {
@@ -2039,7 +2039,7 @@ func TestFirstTurnInjectsKnowledgeBaseLine(t *testing.T) {
 		resp: &llm.ChatResponse{Content: "Hello", StopReason: "END_TURN", Usage: &llm.Usage{}},
 	}
 	t.Setenv("HOME", t.TempDir()) // isolate general context (none injected)
-	st := &state{provider: fp, kb: kb, firstTurn: true, cwd: "/home/user/proj"}
+	st := &state{provider: fp, kb: projectSet(kb), firstTurn: true, cwd: "/home/user/proj"}
 	var w bytes.Buffer
 	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi"}}`, st, &w)
 	if quit {
@@ -2073,7 +2073,7 @@ func TestKnowledgeToolResolvedInternally(t *testing.T) {
 			{Content: "done", StopReason: "END_TURN", Usage: &llm.Usage{}},
 		},
 	}
-	st := &state{provider: provider, kb: knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")}
+	st := &state{provider: provider, kb: projectSet(knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj"))}
 	var w bytes.Buffer
 	_, quit := handleLine(`{"method":"prompt","params":{"text":"remember"}}`, st, &w)
 	if quit {
@@ -2118,7 +2118,7 @@ func TestRunWithKnowledgeWiresKB(t *testing.T) {
 {"method":"prompt","params":{"text":"hi"}}
 {"method":"quit"}
 `
-	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, t.TempDir(), knowledge.DisabledEmbedder{}, nil)
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": provider}, "fake", "", false, false, t.TempDir(), knowledge.ScopeProject, knowledge.DisabledEmbedder{}, nil)
 	if err != nil {
 		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}
@@ -2130,59 +2130,190 @@ func TestRunWithKnowledgeWiresKB(t *testing.T) {
 	}
 }
 
-// TestLoadKBProjectLoadsPersistedKB verifies that loadKBProject (called on
-// set_cwd) loads the project's persisted data.json into st.kb, so the KB
-// populated via -populate-project-kb is actually used at runtime.
-func TestLoadKBProjectLoadsPersistedKB(t *testing.T) {
-	base := t.TempDir()
-	// Persist a KB for project "proj" directly (same schema Load reads).
-	dataPath := filepath.Join(base, "proj", "data.json")
+// writeKBFile persists a data.json for the knowledge base under key in base,
+// with one item per label (fake vectors: the embedder is never used on load).
+func writeKBFile(t *testing.T, base, key string, labels ...string) {
+	t.Helper()
+	items := make([]string, 0, len(labels))
+	for i, label := range labels {
+		items = append(items, fmt.Sprintf(
+			`{"id":%d,"payload":{"label":%q,"text":"texto %s","vector":[1,0]},"vector":[1,0]}`,
+			i, label, label))
+	}
+	dataPath := filepath.Join(base, key, "data.json")
 	if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(dataPath, []byte(`[
-  {"id":0,"payload":{"label":"seed:README.md","text":"conteudo","vector":[1,0]}},
-  {"id":1,"payload":{"label":"seed:proj/README.md","text":"proj","vector":[0,1]}}
-]`), 0o644); err != nil {
+	if err := os.WriteFile(dataPath, []byte("["+strings.Join(items, ",")+"]"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	st := &state{kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{}}
-	st.loadKBProject("proj")
+// projectSet wraps a single project Manager in the Set the server expects.
+func projectSet(m *knowledge.Manager) *knowledge.Set {
+	return knowledge.NewSet(knowledge.ScopeProject,
+		knowledge.Scope{Name: knowledge.ScopeProject, M: m})
+}
+
+// TestRunWithKnowledgeLoadsGlobalAtStartup verifies that the shared KB is loaded
+// at startup, before any set_cwd: in the global scope the KB does not depend on
+// the cwd, so the first-turn notice must already mention the shared KB.
+func TestRunWithKnowledgeLoadsGlobalAtStartup(t *testing.T) {
+	base := t.TempDir()
+	writeKBFile(t, base, knowledge.GlobalKey, "seed:global.md")
+
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	t.Setenv("HOME", t.TempDir()) // isolate the general context
+	var out bytes.Buffer
+	input := `{"method":"prompt","params":{"text":"hi"}}
+{"method":"quit"}
+`
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out,
+		map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false,
+		base, knowledge.ScopeGlobal, knowledge.DisabledEmbedder{}, nil)
+	if err != nil {
+		t.Fatalf("RunWithKnowledgeBase error: %v", err)
+	}
+	if len(fp.lastReq.Messages) == 0 {
+		t.Fatal("provider was not called")
+	}
+	if got := fp.lastReq.Messages[0].Content; !strings.Contains(got, "shared across projects") {
+		t.Fatalf("first-turn KB notice = %q, want the shared-KB notice", got)
+	}
+}
+
+// TestLoadKBProjectLoadsPersistedKB verifies that loadKB (called on set_cwd)
+// loads the project's persisted data.json into st.kb in the project scope, so
+// the KB populated via -populate-project-kb is actually used at runtime.
+func TestLoadKBProjectLoadsPersistedKB(t *testing.T) {
+	base := t.TempDir()
+	writeKBFile(t, base, "proj", "seed:README.md", "seed:proj/README.md")
+
+	st := &state{cwd: "/tmp/proj", kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{},
+		kbScope: knowledge.ScopeProject}
+	st.loadKB()
 	if st.kb == nil {
 		t.Fatal("expected kb to be loaded for project")
+	}
+	if got := st.kb.Scopes(); len(got) != 1 || got[0] != knowledge.ScopeProject {
+		t.Fatalf("scopes = %v, want [project]", got)
 	}
 	if st.kb.Len() != 2 {
 		t.Fatalf("kb.Len() = %d, want 2", st.kb.Len())
 	}
 }
 
-// TestLoadKBProjectDisabled verifies that loadKBProject with no embedder/base
-// dir clears st.kb (KB disabled) and does not panic.
-func TestLoadKBProjectDisabled(t *testing.T) {
-	st := &state{kb: knowledge.NewManager(knowledge.DisabledEmbedder{}, "x")}
-	st.loadKBProject("proj")
+// TestLoadKBGlobalScope verifies that the default global scope loads the shared
+// _global KB only, ignoring the cwd project's KB.
+func TestLoadKBGlobalScope(t *testing.T) {
+	base := t.TempDir()
+	writeKBFile(t, base, knowledge.GlobalKey, "seed:global.md")
+	writeKBFile(t, base, "proj", "seed:a.md", "seed:b.md")
+
+	st := &state{cwd: "/tmp/proj", kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{},
+		kbScope: knowledge.ScopeGlobal}
+	st.loadKB()
+	if st.kb == nil {
+		t.Fatal("expected global kb to be loaded")
+	}
+	if got := st.kb.Scopes(); len(got) != 1 || got[0] != knowledge.ScopeGlobal {
+		t.Fatalf("scopes = %v, want [global]", got)
+	}
+	if st.kb.Len() != 1 {
+		t.Fatalf("kb.Len() = %d, want 1 (only the global KB)", st.kb.Len())
+	}
+}
+
+// TestLoadKBGlobalSurvivesCwdChange verifies that in the global scope the KB
+// does not follow the cwd: changing the project keeps the same shared KB.
+func TestLoadKBGlobalSurvivesCwdChange(t *testing.T) {
+	base := t.TempDir()
+	writeKBFile(t, base, knowledge.GlobalKey, "seed:global.md")
+	writeKBFile(t, base, "other", "seed:x.md")
+
+	st := &state{kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{},
+		kbScope: knowledge.ScopeGlobal}
+	st.cwd, _ = "/tmp/proj", 0
+	st.loadKB()
+	st.cwd = "/tmp/other"
+	st.loadKB()
+	if st.kb.Len() != 1 {
+		t.Fatalf("kb.Len() = %d, want 1 (global KB unchanged by cwd)", st.kb.Len())
+	}
+	res, err := st.kb.Execute(json.RawMessage(`{"command":"show"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res, "seed:x.md") {
+		t.Fatalf("global KB leaked the other project's notes: %q", res)
+	}
+}
+
+// TestLoadKBBothScope verifies that the "both" scope loads the shared KB plus
+// the current project's KB, and that searches are merged across them.
+func TestLoadKBBothScope(t *testing.T) {
+	base := t.TempDir()
+	writeKBFile(t, base, knowledge.GlobalKey, "seed:global.md")
+	writeKBFile(t, base, "proj", "seed:a.md", "seed:b.md")
+
+	st := &state{cwd: "/tmp/proj", kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{},
+		kbScope: knowledge.ScopeBoth}
+	st.loadKB()
+	if st.kb == nil {
+		t.Fatal("expected both kbs to be loaded")
+	}
+	if got := st.kb.Scopes(); len(got) != 2 {
+		t.Fatalf("scopes = %v, want 2", got)
+	}
+	if st.kb.Len() != 3 {
+		t.Fatalf("kb.Len() = %d, want 3 (global + project)", st.kb.Len())
+	}
+	if st.kb.Default() != knowledge.ScopeGlobal {
+		t.Fatalf("default scope = %q, want global", st.kb.Default())
+	}
+	out, err := st.kb.Execute(json.RawMessage(`{"command":"show"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "[global]") || !strings.Contains(out, "[project]") {
+		t.Fatalf("show should group labels by scope, got %q", out)
+	}
+	if !strings.Contains(out, "seed:global.md") || !strings.Contains(out, "seed:a.md") {
+		t.Fatalf("show should list both scopes' labels, got %q", out)
+	}
+}
+
+// TestLoadKBDisabled verifies that loadKB with no embedder/base dir clears st.kb
+// (KB disabled) and does not panic.
+func TestLoadKBDisabled(t *testing.T) {
+	st := &state{cwd: "/tmp/proj", kb: projectSet(knowledge.NewManager(knowledge.DisabledEmbedder{}, "x"))}
+	st.loadKB()
 	if st.kb != nil {
 		t.Fatalf("expected kb cleared when disabled, got %+v", st.kb)
 	}
 }
 
-// TestLoadKBProjectEmptyProject verifies that loadKBProject with an empty
-// project name is a no-op: it leaves the current kb unchanged (covers the
+// TestLoadKBEmptyCwdProjectScope verifies that in the project scope with no cwd
+// yet loadKB is a no-op: it leaves the current kb unchanged (covers the
 // early-return guard).
-func TestLoadKBProjectEmptyProject(t *testing.T) {
-	st := &state{kbBaseDir: t.TempDir(), kbEmbed: knowledge.DisabledEmbedder{}}
-	st.loadKBProject("") // no-op, does not panic
-	if st.kb != nil {
-		t.Fatalf("expected kb untouched for empty project, got %+v", st.kb)
+func TestLoadKBEmptyCwdProjectScope(t *testing.T) {
+	prev := projectSet(knowledge.NewManager(knowledge.DisabledEmbedder{}, "prev"))
+	st := &state{kbBaseDir: t.TempDir(), kbEmbed: knowledge.DisabledEmbedder{},
+		kbScope: knowledge.ScopeProject, kb: prev}
+	st.loadKB() // no cwd: no-op, does not panic
+	if st.kb != prev {
+		t.Fatalf("expected kb untouched for empty cwd, got %+v", st.kb)
 	}
 }
 
-// TestLoadKBProjectFallbackOnError verifies that when loading the project's
-// data.json fails (corrupt file), loadKBProject falls back to an empty
-// in-memory manager for that project so the `knowledge` tool still resolves
-// locally instead of erroring (covers the Load-error branch).
-func TestLoadKBProjectFallbackOnError(t *testing.T) {
+// TestLoadKBFallbackOnError verifies that when loading a data.json fails
+// (corrupt file), loadKB falls back to an empty in-memory manager so the
+// `knowledge` tool still resolves locally instead of erroring (covers the
+// Load-error branch).
+func TestLoadKBFallbackOnError(t *testing.T) {
 	base := t.TempDir()
 	dataPath := filepath.Join(base, "proj", "data.json")
 	if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil {
@@ -2191,13 +2322,89 @@ func TestLoadKBProjectFallbackOnError(t *testing.T) {
 	if err := os.WriteFile(dataPath, []byte("{not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := &state{kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{}}
-	st.loadKBProject("proj")
+	st := &state{cwd: "/tmp/proj", kbBaseDir: base, kbEmbed: knowledge.DisabledEmbedder{},
+		kbScope: knowledge.ScopeProject}
+	st.loadKB()
 	if st.kb == nil {
 		t.Fatal("expected kb fallback manager to be set on load error")
 	}
 	if st.kb.Len() != 0 {
 		t.Fatalf("expected empty fallback manager, got %d items", st.kb.Len())
+	}
+}
+
+// TestPromptKBScopeOverride verifies that a prompt's kb_scope switches (and
+// persists) the KB scope, reloading the managers for the new scope.
+func TestPromptKBScopeOverride(t *testing.T) {
+	base := t.TempDir()
+	writeKBFile(t, base, knowledge.GlobalKey, "seed:global.md")
+	writeKBFile(t, base, "proj", "seed:a.md", "seed:b.md")
+
+	st := newTestState()
+	st.cwd = "/tmp/proj"
+	st.kbBaseDir = base
+	st.kbEmbed = knowledge.DisabledEmbedder{}
+	st.kbScope = knowledge.ScopeGlobal
+	st.loadKB()
+	if st.kb.Len() != 1 {
+		t.Fatalf("global scope: kb.Len() = %d, want 1", st.kb.Len())
+	}
+
+	var w bytes.Buffer
+	resp, _ := handleLine(`{"method":"prompt","params":{"text":"oi","kb_scope":"project"}}`, st, &w)
+	if strings.Contains(resp, "error") {
+		t.Fatalf("prompt error: %s", resp)
+	}
+	if st.kbScopeOverride != knowledge.ScopeProject {
+		t.Fatalf("kbScopeOverride = %q, want project", st.kbScopeOverride)
+	}
+	if st.kb.Len() != 2 {
+		t.Fatalf("project scope: kb.Len() = %d, want 2", st.kb.Len())
+	}
+	if got := st.kb.Scopes(); len(got) != 1 || got[0] != knowledge.ScopeProject {
+		t.Fatalf("scopes = %v, want [project]", got)
+	}
+}
+
+// TestPromptKBScopeOverrideInvalid verifies that an unknown kb_scope is
+// rejected with an error instead of silently switching.
+func TestPromptKBScopeOverrideInvalid(t *testing.T) {
+	st := newTestState()
+	var w bytes.Buffer
+	resp, _ := handleLine(`{"method":"prompt","params":{"text":"oi","kb_scope":"bogus"}}`, st, &w)
+	if !strings.Contains(resp, "unknown kb_scope") {
+		t.Fatalf("expected unknown kb_scope error, got %q", resp)
+	}
+	if st.kbScopeOverride != "" {
+		t.Fatalf("kbScopeOverride = %q, want unchanged", st.kbScopeOverride)
+	}
+}
+
+// TestKnowledgeNotice checks the first-turn notice for each scope: global only,
+// project only and both.
+func TestKnowledgeNotice(t *testing.T) {
+	global := knowledge.NewSet(knowledge.ScopeGlobal,
+		knowledge.Scope{Name: knowledge.ScopeGlobal, M: knowledge.NewManager(knowledge.DisabledEmbedder{}, knowledge.GlobalKey)})
+	project := projectSet(knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj"))
+	both := knowledge.NewSet(knowledge.ScopeGlobal,
+		knowledge.Scope{Name: knowledge.ScopeGlobal, M: knowledge.NewManager(knowledge.DisabledEmbedder{}, knowledge.GlobalKey)},
+		knowledge.Scope{Name: knowledge.ScopeProject, M: knowledge.NewManager(knowledge.DisabledEmbedder{}, "proj")})
+
+	if got := (&state{}).knowledgeNotice(); got != "" {
+		t.Fatalf("disabled notice = %q, want empty", got)
+	}
+	st := &state{kb: global, cwd: "/tmp/proj"}
+	if got := st.knowledgeNotice(); !strings.Contains(got, "shared across projects") {
+		t.Fatalf("global notice = %q", got)
+	}
+	st = &state{kb: project, cwd: "/tmp/proj"}
+	if got := st.knowledgeNotice(); !strings.Contains(got, `for project "proj"`) {
+		t.Fatalf("project notice = %q", got)
+	}
+	st = &state{kb: both, cwd: "/tmp/proj"}
+	got := st.knowledgeNotice()
+	if !strings.Contains(got, `"global"`) || !strings.Contains(got, `"proj"`) || !strings.Contains(got, "scope") {
+		t.Fatalf("both notice = %q", got)
 	}
 }
 
@@ -2379,7 +2586,7 @@ func TestRunWithSandboxLogsToolSandbox(t *testing.T) {
 	input := `{"method":"prompt","params":{"text":"hi"}}
 {"method":"quit"}
 `
-	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false, "", nil, &sandbox.Sandbox{Bin: "caged"})
+	err := RunWithKnowledgeBase(strings.NewReader(input), &out, map[string]llm.LLMProvider{"fake": fp}, "fake", "", false, false, "", knowledge.ScopeGlobal, nil, &sandbox.Sandbox{Bin: "caged"})
 	if err != nil {
 		t.Fatalf("RunWithKnowledgeBase error: %v", err)
 	}

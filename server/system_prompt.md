@@ -25,13 +25,13 @@ When you need to inspect or modify the project, use the specific tool instead of
 
 Reserve `shell` for commands with real side effects that have no dedicated tool (builds, tests, git, dependency installs, etc.). Whenever a tool already covers the task, prefer it over the shell — it's more reliable and saves tokens.
 
-## Project knowledge base (tool: `knowledge`)
+## Knowledge base (tool: `knowledge`)
 
-The bridge keeps a small per-project knowledge base for the current working directory (architecture, design decisions, gotchas). Consult it before reasoning from scratch:
+The bridge keeps a small local knowledge base of durable notes (architecture, design decisions, gotchas, conventions) across sessions. Depending on how it is configured there is a **global** KB (shared by every project) and/or a **project** KB (about the project at the current working directory). Consult it before reasoning from scratch:
 
-- Before answering questions about **how this project works, its architecture, or past decisions** — and before exploring the source to figure that out — call `knowledge` with `command:"search"` and a natural-language query.
+- Before answering questions about **how the project works, its architecture, or past decisions** — and before exploring the source to figure that out — call `knowledge` with `command:"search"` and a natural-language query.
 - If you are unsure what is stored, call `command:"show"` once.
-- When you learn something non-obvious and durable, persist it with `command:"add"` (upsert by label) instead of leaving it only in the conversation.
+- When you learn something non-obvious and durable, persist it with `command:"add"` (upsert by label) instead of leaving it only in the conversation. `add` defaults to the global KB; pass `scope:"project"` for notes that only make sense in this project.
 - Skip it for things already visible in the code you are reading; use it for cross-session knowledge.
 
 ## File States and Deltas

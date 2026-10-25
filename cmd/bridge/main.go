@@ -46,12 +46,13 @@ func main() {
 	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
 	systemPromptFlag := flag.String("system-prompt", "", "path to a file containing the system prompt (or literal system prompt string)")
 	aggressivePrune := flag.Bool("aggressive-prune", false, "collapse each completed tool-calling turn into just the user prompt + final answer, dropping the intermediate tool calls, tool results, and chain-of-thought from the history to save tokens and keep the prefix cacheable. Off by default.")
-	knowledgeEnabled := flag.Bool("knowledge", true, "enable the project knowledge base (tool 'knowledge'); false disables it")
-	knowledgeBase := flag.String("knowledge-base", "", "base directory for the project knowledge bases (default ~/.local/share/llm-bridge/knowledge_bases)")
+	knowledgeEnabled := flag.Bool("knowledge", true, "enable the knowledge base (tool 'knowledge'); false disables it")
+	knowledgeBase := flag.String("knowledge-base", "", "base directory for the knowledge bases (default ~/.local/share/llm-bridge/knowledge_bases)")
+	kbScope := flag.String("kb-scope", "global", "which knowledge base(s) to use: 'global' (default, one KB shared across projects), 'project' (one KB per cwd project) or 'both' (both at once). Can be overridden per prompt via kb_scope")
 	kbLoad := flag.String("kb-load", "lazy", "when to load the knowledge base model: 'lazy' (default, load on first use so the server starts fast) or 'eager' (load at startup; failure disables the KB with a warning)")
 	prune := flag.Bool("prune", false, "collapse reasoning and tool results, preserving file states (read/write/replace) as user snapshots. Off by default.")
-	populateKB := flag.String("populate-project-kb", "", "populate the knowledge base for -project from a seed directory and exit (standalone mode; requires the ONNX embedder). Mutually exclusive with running the server.")
-	projectName := flag.String("project", "", "project name; used with -populate-project-kb as the knowledge base key")
+	populateKB := flag.String("populate-project-kb", "", "populate a knowledge base from a seed directory and exit (standalone mode; requires the ONNX embedder). Mutually exclusive with running the server.")
+	projectName := flag.String("project", "", "knowledge base key used with -populate-project-kb: a project name, or _global for the shared KB")
 	sbCfg := registerSandboxFlags()
 	flag.Parse()
 
@@ -207,9 +208,13 @@ func main() {
 		}
 	}
 
-	// Knowledge base wiring. The server builds the per-project Manager lazily
-	// on `set_cwd` (kbBaseDir/<project>/data.json), so here we only resolve the
-	// base dir and the embedder.
+	// Knowledge base wiring. The server builds the managers lazily on
+	// `set_cwd` (kbBaseDir/<key>/data.json), so here we only resolve the base
+	// dir, the scope and the embedder. With -kb-scope=global (the default) a
+	// single shared KB lives under kbBaseDir/_global and does not follow the
+	// cwd; -kb-scope=project keeps one KB per cwd project (the previous
+	// behavior) and -kb-scope=both loads the shared KB plus the project's,
+	// merging searches. The scope can be overridden per prompt (kb_scope).
 	//
 	// -knowledge=false disables the KB outright (embedder nil → the server
 	// treats it as disabled).
@@ -227,6 +232,10 @@ func main() {
 	var kbBaseDir string
 	var kbEmbed knowledge.Embedder
 	if *knowledgeEnabled {
+		if !knowledge.IsScope(*kbScope) {
+			fmt.Fprintf(os.Stderr, "invalid -kb-scope %q: use global, project or both\n", *kbScope)
+			os.Exit(1)
+		}
 		kbBaseDir = *knowledgeBase
 		if kbBaseDir == "" {
 			kbBaseDir = os.Getenv("KNOWLEDGE_BASE")
@@ -254,11 +263,11 @@ func main() {
 				kbEmbed = knowledge.DisabledEmbedder{}
 			} else {
 				kbEmbed = embed
-				logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
+				logger.Infof("knowledge base enabled (scope: %s, base dir: %s)", *kbScope, kbBaseDir)
 			}
 		} else {
 			kbEmbed = knowledge.NewLazyEmbedder(modelPath, tokenizerPath)
-			logger.Infof("knowledge base enabled (lazy load, base dir: %s)", kbBaseDir)
+			logger.Infof("knowledge base enabled (lazy load, scope: %s, base dir: %s)", *kbScope, kbBaseDir)
 		}
 	} else {
 		logger.Infof("knowledge base disabled (flag -knowledge=false)")
@@ -274,19 +283,19 @@ func main() {
 	}
 
 	if err := server.RunWithKnowledgeBase(os.Stdin, os.Stdout, providers, *providerName,
-		systemPrompt, *aggressivePrune, *prune, kbBaseDir, kbEmbed, sb); err != nil {
+		systemPrompt, *aggressivePrune, *prune, kbBaseDir, *kbScope, kbEmbed, sb); err != nil {
 		os.Exit(1)
 	}
 }
 
 // populateProjectKB implements the standalone -populate-project-kb mode: it
-// fully rebuilds the given project's knowledge base from a seed directory and
-// persists it, then returns (the caller exits). The seed dir layout follows
-// EnsureSeeded: <seedDir>/*.md (global) plus <seedDir>/<project>/*.md
-// (per-project). The rebuild is total — existing data.json for the project is
-// wiped and re-embedded from the seed, so edits to the seed are reflected.
-// Requires the ONNX embedder (knowledge_onnx build tag); a failure to load it
-// is fatal here.
+// fully rebuilds the given knowledge base from a seed directory and persists
+// it, then returns (the caller exits). The seed dir layout follows EnsureSeeded:
+// <seedDir>/*.md (global) plus <seedDir>/<project>/*.md (per-project); for the
+// shared KB (project == "_global") only the global seeds are used. The rebuild
+// is total — the existing data.json is wiped and re-embedded from the seed, so
+// edits to the seed are reflected. Requires the ONNX embedder (knowledge_onnx
+// build tag); a failure to load it is fatal here.
 func populateProjectKB(seedDir, project, knowledgeBaseFlag string) error {
 	if project == "" {
 		return errors.New("-populate-project-kb requires -project")
@@ -324,6 +333,11 @@ func populateProjectKB(seedDir, project, knowledgeBaseFlag string) error {
 		return fmt.Errorf("load project kb: %w", err)
 	}
 	m.SetSeedRoot(seedDir)
+	if project == knowledge.GlobalKey {
+		// The shared KB is seeded from the global seed files only (there is no
+		// "_global" seed subdirectory).
+		m.SetSeedProject("")
+	}
 	// Reset wipes the project's data.json and re-embeds from the seed (total
 	// reconstruction, reflecting any seed edits).
 	if err := m.Reset(); err != nil {

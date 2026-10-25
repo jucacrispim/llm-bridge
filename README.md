@@ -9,7 +9,8 @@ active provider, and streams the response back on stdout — translating the
 request/response format, streaming style, authentication and thinking mode for
 each provider. Beyond plain chat, the bridge relays client-side tool calls (the
 model calls the tools, the client runs them), carries image attachments, injects
-project context, offers an optional per-project knowledge base, and runs hooks.
+project context, offers an optional knowledge base (shared across projects by
+default, or per project), and runs hooks.
 
 ## Documentation
 

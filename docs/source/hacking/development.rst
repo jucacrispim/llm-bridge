@@ -40,7 +40,7 @@ they fit together):
     :doc:`hooks-internals`).
 
 ``knowledge``
-    The per-project knowledge base: index, embedders, ``Manager`` and seed
+    The knowledge base: index, embedders, ``Manager``/``Set`` and seed
     handling (see :doc:`knowledge-internals`).
 
 ``context``

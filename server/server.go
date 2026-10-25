@@ -56,18 +56,26 @@ var defaultSystemPrompt = func() string {
 type state struct {
 	cwd            string
 	knowledgeBases []json.RawMessage
-	// kbEmbed is the embedder to use for the project knowledge base. nil means
-	// the knowledge base is disabled. It may itself be a LazyEmbedder (the
+	// kbEmbed is the embedder to use for the knowledge base(s). nil means the
+	// knowledge base is disabled. It may itself be a LazyEmbedder (the
 	// -kb-load default) that defers the ONNX model load until the first
-	// embedding. The per-project Manager is built lazily on `set_cwd` (see
-	// loadKBProject) and stored in kb.
+	// embedding. The managers are (re)built by loadKB on `set_cwd` and when the
+	// scope changes.
 	kbEmbed knowledge.Embedder
-	// kbBaseDir is the base directory where per-project KBs live
-	// (kbBaseDir/<project>/data.json). Empty means the KB is disabled.
+	// kbBaseDir is the base directory where the knowledge bases live
+	// (kbBaseDir/<key>/data.json). Empty means the KB is disabled.
 	kbBaseDir string
-	// kb is the project-scoped knowledge base used to resolve `knowledge` tool
-	// calls locally for the current cwd. nil means disabled.
-	kb *knowledge.Manager
+	// kbScope is the configured KB scope (knowledge.ScopeGlobal,
+	// knowledge.ScopeProject or knowledge.ScopeBoth), set from -kb-scope.
+	kbScope string
+	// kbScopeOverride is the per-prompt kb_scope override, which persists
+	// between prompts like the other overrides (model, provider, thinking).
+	// Empty means "use kbScope".
+	kbScopeOverride string
+	// kb is the knowledge base surface used to resolve `knowledge` tool calls
+	// locally: one or two scoped managers (global and/or the current project).
+	// nil means disabled.
+	kb *knowledge.Set
 	// sandbox wraps the external processes the bridge spawns (the shell/grep
 	// tools and hooks) in caged. nil means the tools run unsandboxed. The
 	// policy is built once at startup; the project cwd (which changes via
@@ -305,28 +313,106 @@ func (st *state) projectKBName() string {
 	return ""
 }
 
-// loadKBProject loads (or creates) the knowledge base manager for the given
-// project from disk (kbBaseDir/<project>/data.json) and stores it in st.kb,
-// replacing whatever project was active before. When the KB is disabled
-// (no embedder/base dir) st.kb is cleared so the `knowledge` tool reports it
-// disabled. Runs on `set_cwd` so the KB always follows the current project.
-func (st *state) loadKBProject(project string) {
+// effectiveKBScope returns the scope in effect for the current turn: the
+// per-prompt override when set, otherwise the configured -kb-scope. Unknown
+// values fall back to the global scope.
+func (st *state) effectiveKBScope() string {
+	scope := st.kbScopeOverride
+	if scope == "" {
+		scope = st.kbScope
+	}
+	if !knowledge.IsScope(scope) {
+		return knowledge.ScopeGlobal
+	}
+	return scope
+}
+
+// kbManager loads (or creates) the knowledge base manager stored under key in
+// kbBaseDir. A corrupt data.json is logged and replaced by an empty in-memory
+// manager for that key, so the `knowledge` tool still resolves locally instead
+// of erroring.
+func (st *state) kbManager(key string) *knowledge.Manager {
+	m, err := knowledge.Load(st.kbBaseDir, key, st.kbEmbed)
+	if err != nil {
+		logger.Warningf("knowledge: load %q: %v", key, err)
+		return knowledge.NewManager(st.kbEmbed, key)
+	}
+	return m
+}
+
+// loadKB (re)builds the knowledge base surface (st.kb) from the effective
+// scope and the current cwd: only the shared `_global` KB for ScopeGlobal, only
+// the cwd project's KB for ScopeProject, and both for ScopeBoth. When the KB is
+// disabled (no embedder/base dir) st.kb is cleared so the `knowledge` tool
+// reports it disabled. It runs on `set_cwd` and when a prompt changes the
+// scope; in the global scope a cwd change leaves the KB untouched.
+func (st *state) loadKB() {
 	if st.kbEmbed == nil || st.kbBaseDir == "" {
 		st.kb = nil
 		return
 	}
-	if project == "" {
-		return
+	global := func() knowledge.Scope {
+		m := st.kbManager(knowledge.GlobalKey)
+		// The shared KB has no per-project seed subdirectory: it is seeded
+		// from the global seed files only.
+		m.SetSeedProject("")
+		return knowledge.Scope{Name: knowledge.ScopeGlobal, M: m}
 	}
-	m, err := knowledge.Load(st.kbBaseDir, project, st.kbEmbed)
-	if err != nil {
-		logger.Warningf("knowledge: load project %q: %v", project, err)
-		// Fall back to an empty in-memory manager for this project so the
-		// `knowledge` tool still resolves locally instead of erroring.
-		st.kb = knowledge.NewManager(st.kbEmbed, project)
-		return
+	project := ""
+	if st.cwd != "" {
+		project = filepath.Base(st.cwd)
 	}
-	st.kb = m
+
+	switch st.effectiveKBScope() {
+	case knowledge.ScopeProject:
+		if project == "" {
+			return // no cwd yet: keep whatever is loaded
+		}
+		st.kb = knowledge.NewSet(knowledge.ScopeProject,
+			knowledge.Scope{Name: knowledge.ScopeProject, M: st.kbManager(project)})
+	case knowledge.ScopeBoth:
+		scopes := []knowledge.Scope{global()}
+		def := knowledge.ScopeGlobal
+		if project != "" {
+			scopes = append(scopes,
+				knowledge.Scope{Name: knowledge.ScopeProject, M: st.kbManager(project)})
+		}
+		st.kb = knowledge.NewSet(def, scopes...)
+	default: // knowledge.ScopeGlobal
+		st.kb = knowledge.NewSet(knowledge.ScopeGlobal, global())
+	}
+}
+
+// knowledgeNotice returns the single minimal line that tells the model which
+// knowledge base(s) are available, or "" when the KB is disabled. It only
+// mentions the scopes in use (never their contents), so it stays cache-friendly.
+func (st *state) knowledgeNotice() string {
+	if st.kb == nil {
+		return ""
+	}
+	names := st.kb.Scopes()
+	if len(names) == 1 && names[0] == knowledge.ScopeGlobal {
+		return "Knowledge base available (tool: knowledge), shared across projects. " +
+			"Search it before answering questions about architecture, past decisions or conventions."
+	}
+	kbName := st.projectKBName()
+	if kbName == "" && st.cwd != "" {
+		kbName = filepath.Base(st.cwd)
+	}
+	if len(names) == 1 {
+		line := "Knowledge base"
+		if kbName != "" {
+			line += " for project \"" + kbName + "\""
+		}
+		return line + " available (tool: knowledge). Search it before answering " +
+			"questions about this project's architecture or past decisions."
+	}
+	line := "Knowledge bases available (tool: knowledge): \"global\" (shared across projects)"
+	if kbName != "" {
+		line += " and the project KB for \"" + kbName + "\""
+	}
+	return line + ". Search them before answering questions about architecture or past " +
+		"decisions; add takes a \"scope\" field (\"global\" or \"project\"), defaulting to \"global\"."
 }
 
 // sanitizeHistory strips ephemeral blocks and orphaned tool_calls messages.
@@ -793,20 +879,9 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 				st.appendUser(e.Render())
 			}
 			// When the knowledge base is enabled, surface a single minimal line
-			// about the project's KB (not its contents) so the model knows the
-			// `knowledge` tool is available and is nudged to consult it. Only
-			// the cwd project is mentioned — other bases are noise, and the
-			// search is already scoped to cwd.
-			if st.kb != nil {
-				kbName := st.projectKBName()
-				if kbName == "" && st.cwd != "" {
-					kbName = filepath.Base(st.cwd)
-				}
-				line := "Knowledge base"
-				if kbName != "" {
-					line += " for project \"" + kbName + "\""
-				}
-				line += " available (tool: knowledge). Search it before answering questions about this project's architecture or past decisions."
+			// about the available KB(s) (not their contents) so the model knows
+			// the `knowledge` tool is available and is nudged to consult it.
+			if line := st.knowledgeNotice(); line != "" {
 				st.appendUser(line)
 			}
 			st.firstTurn = false
@@ -828,6 +903,17 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		}
 		if p.ReasoningEffort != nil {
 			st.reasoningEffortOverride = p.ReasoningEffort
+		}
+		if p.KBScope != "" {
+			if !knowledge.IsScope(p.KBScope) {
+				return string(protocol.NewError("unknown kb_scope: " + p.KBScope +
+					" (use global, project or both)")), false
+			}
+			if p.KBScope != st.effectiveKBScope() {
+				st.kbScopeOverride = p.KBScope
+				// Reload so the new scope's KB(s) are the ones in use.
+				st.loadKB()
+			}
 		}
 		sys := p.System
 		if sys == "" {
@@ -860,9 +946,10 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			return string(protocol.NewError("invalid set_cwd params: " + err.Error())), false
 		}
 		st.cwd = p.Cwd
-		// Rebuild the project knowledge base to follow the new cwd (loads the
-		// project's data.json from disk, or clears the KB when disabled).
-		st.loadKBProject(filepath.Base(p.Cwd))
+		// Rebuild the knowledge base to follow the new cwd (in the global scope
+		// the shared KB is unchanged; in the project/both scopes the project's
+		// data.json is loaded from disk).
+		st.loadKB()
 		return "", false
 
 	case string(protocol.MethodSetKnowledgeBases):
@@ -1177,7 +1264,7 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 // runWithProvider) or a named provider registry that can be switched per request
 // (via RunWithProviders). When providers is non-empty it takes precedence over
 // the single provider.
-func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
+func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
 
 	if len(providers) > 0 {
 		if defaultName == "" {
@@ -1192,7 +1279,7 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 		logger.Infof("aggressive prune enabled: collapsing tool-calling turns")
 	}
 	if kbEmbed != nil {
-		logger.Infof("knowledge base enabled (base dir: %s)", kbBaseDir)
+		logger.Infof("knowledge base enabled (scope: %s, base dir: %s)", kbScope, kbBaseDir)
 	}
 	if prune {
 		logger.Infof("prune enabled: collapsing reasoning and preserving file snapshots")
@@ -1204,7 +1291,12 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 	st := &state{providers: providers, providerName: defaultName,
 		systemPrompt: systemPrompt, firstTurn: true,
 		aggressivePrune: aggressivePrune, prune: prune,
-		kbBaseDir: kbBaseDir, kbEmbed: kbEmbed, sandbox: sb}
+		kbBaseDir: kbBaseDir, kbScope: kbScope, kbEmbed: kbEmbed, sandbox: sb}
+
+	// Load the knowledge base up front so it is available even when the client
+	// never sends set_cwd (always the case for the global scope, whose KB does
+	// not depend on the cwd).
+	st.loadKB()
 
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
@@ -1270,9 +1362,9 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 func runWithProvider(r io.Reader, w io.Writer, provider llm.LLMProvider) error {
 	if provider != nil {
 		providers := map[string]llm.LLMProvider{provider.Name(): provider}
-		return run(r, w, providers, provider.Name(), "", false, false, "", nil, nil)
+		return run(r, w, providers, provider.Name(), "", false, false, "", "", nil, nil)
 	}
-	return run(r, w, nil, "", "", false, false, "", nil, nil)
+	return run(r, w, nil, "", "", false, false, "", "", nil, nil)
 }
 
 // Run starts the server loop reading from r and writing to w.
@@ -1293,7 +1385,7 @@ func RunWithProviders(r io.Reader, w io.Writer, providers map[string]llm.LLMProv
 // and an initial global system prompt.
 func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, false, false, "", nil, nil)
+	return run(r, w, providers, defaultName, systemPrompt, false, false, "", "", nil, nil)
 
 }
 
@@ -1301,17 +1393,18 @@ func RunWithSystemPrompt(r io.Reader, w io.Writer, providers map[string]llm.LLMP
 // initial global system prompt, and the aggressive-prune option (see state).
 func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", nil, nil)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", "", nil, nil)
 }
 
 // RunWithKnowledgeBase starts the server loop like RunWithOptions, but also
-// wires the project knowledge base: kbBaseDir is where per-project KBs live
-// (kbBaseDir/<project>/data.json) and kbEmbed is the embedder used to load them.
-// A per-project Manager is built lazily on `set_cwd`, so `knowledge` tool calls
-// resolve locally (fire-and-forget) against the current project's KB. kbEmbed
-// nil (or empty base dir) keeps the knowledge base disabled. This is the entry
-// point used by cmd/bridge.
-func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
+// wires the knowledge base: kbBaseDir is where the KBs live
+// (kbBaseDir/<key>/data.json), kbScope selects which one(s) are used
+// ("global", "project" or "both"; empty means "global") and kbEmbed is the
+// embedder used to load them. The managers are (re)built on `set_cwd` and when
+// a prompt changes the scope via kb_scope, so `knowledge` tool calls resolve
+// locally (fire-and-forget). kbEmbed nil (or empty base dir) keeps the
+// knowledge base disabled. This is the entry point used by cmd/bridge.
+func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sb *sandbox.Sandbox) error {
 	// notest
-	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbEmbed, sb)
+	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbScope, kbEmbed, sb)
 }

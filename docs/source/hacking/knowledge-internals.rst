@@ -39,11 +39,16 @@ The ``knowledge`` package (``knowledge/``) is split into small pieces:
 
 ``manager.go``
     ``Manager`` ties an embedder, an index and on-disk persistence together,
-    scoped to a single project.
+    scoped to a single knowledge base (a *key* under the base directory).
+
+``set.go``
+    ``Set`` is the surface the ``knowledge`` tool talks to: it bundles one or
+    two scoped managers (the shared ``global`` KB and/or the current
+    ``project`` KB) and routes reads/writes over them.
 
 ``seed.go``
-    ``EnsureSeeded`` populates the KB from curated ``.md`` seed files the first
-    time a project is used.
+    ``EnsureSeeded`` populates a KB from curated ``.md`` seed files the first
+    time it is used.
 
 The ``Manager``
 ---------------
@@ -63,33 +68,63 @@ field dispatches to it:
 - ``reset`` — clears the KB and rebuilds it from the seed (or simply wipes it
   when no seed root is configured).
 
+The ``Set``
+-----------
+
+``knowledge.Set`` wraps one or two ``Manager``s, each tagged with a scope name.
+Which ones it holds follows the effective scope (``global`` — the default —,
+``project`` or ``both``):
+
+- ``show`` and ``search`` cover **every** scope in the set. A search is run
+  against each manager, the hits are merged by descending score and truncated
+  to ``limit`` (default 5); with more than one scope the labels are prefixed
+  with the scope name (``global: …`` / ``project: …``) so the model can tell
+  where a note came from.
+- ``add``, ``delete`` and ``reset`` target exactly **one** manager: the scope
+  named in the tool's optional ``scope`` argument, or the default scope when it
+  is omitted. The default is the only scope in single-scope configurations and
+  ``global`` in the ``both`` mode, so notes are shared unless the caller
+  explicitly asks for the project KB. Naming a scope that is not active is an
+  error with two scopes and a plain note with one.
+
 Persistence
 -----------
 
 When a base directory is set, the manager persists to
-``<baseDir>/<project>/data.json`` after every change (``save``). The on-disk
-schema is the simple ``{id, payload: {label, text}, vector}`` shape. On load,
-the index is rebuilt from the persisted vectors, so the KB survives restarts
-without re-embedding.
+``<baseDir>/<key>/data.json`` after every change (``save``). The key is the
+project name (last element of the cwd) for a project KB and ``_global`` for the
+shared one. The on-disk schema is the simple ``{id, payload: {label, text},
+vector}`` shape. On load, the index is rebuilt from the persisted vectors, so
+the KB survives restarts without re-embedding.
 
 Seeding
 -------
 
-``EnsureSeeded`` populates the KB the first time it is used for a project, so
-it starts with curated content instead of being empty. Global seeds under
-``seedRoot/*.md`` are combined with project seeds under
-``seedRoot/<project>/*.md``. Each file is stored with a label derived from its
-path relative to ``seedRoot`` (prefixed with ``seed:``), so global and
-per-project files with the same basename never collide. It is idempotent —
-once the index has items, nothing is embedded again.
+``EnsureSeeded`` populates the KB the first time it is used, so it starts with
+curated content instead of being empty. Global seeds under ``seedRoot/*.md``
+are combined with project seeds under ``seedRoot/<seedProject>/*.md``. The
+manager's storage key and its *seed project* are decoupled
+(``SetSeedProject``): a project KB uses its project name for both, while the
+shared KB (stored under ``_global``) has an empty seed project and therefore
+takes only the global seed files — there is no ``_global`` seed subdirectory.
+Each file is stored with a label derived from its path relative to
+``seedRoot`` (prefixed with ``seed:``), so global and per-project files with
+the same basename never collide. It is idempotent — once the index has items,
+nothing is embedded again.
 
 Wiring
 ------
 
-The server builds the per-project ``Manager`` lazily on ``set_cwd`` from
-``<baseDir>/<project>/data.json`` (clearing it when the KB is disabled), and
-the ``knowledge`` tool calls are resolved **locally** inside ``runToolCycle``,
-so they never wait on the client. A one-line note about the project's KB is
-injected on the first turn when the KB is enabled; that same first turn is
-where the context entries and the KB note are appended to the top of the
-history (see :doc:`architecture`).
+``cmd/bridge`` resolves the base directory and the embedder and passes a
+``-kb-scope`` (``global`` by default, or ``project``/``both``) to
+``server.RunWithKnowledgeBase``. The server builds the ``Set`` for the
+effective scope in ``loadKB``: on ``set_cwd`` and whenever a prompt changes the
+scope via the ``kb_scope`` override (which, like the model/provider overrides,
+persists between prompts). In the ``global`` scope a ``set_cwd`` leaves the KB
+untouched — the shared KB does not follow the cwd; in ``project``/``both`` the
+cwd project's ``data.json`` is loaded. Clearing/disabling the KB clears the
+set when it is disabled. The ``knowledge`` tool calls are resolved **locally**
+inside ``runToolCycle``, so they never wait on the client. A one-line note
+about the available KB(s) is injected on the first turn when the KB is enabled;
+that same first turn is where the context entries and the KB note are appended
+to the top of the history (see :doc:`architecture`).

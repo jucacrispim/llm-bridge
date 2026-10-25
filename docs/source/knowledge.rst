@@ -1,10 +1,23 @@
 Knowledge Base
 ==============
 
-The bridge ships a small, local, per-project knowledge base (KB) that the model
-can use during a conversation through the ``knowledge`` tool. It stores short
-notes about what has been learned and lets the model retrieve them later with a
-similarity search, scoped to the current working directory.
+The bridge ships a small, local knowledge base (KB) that the model can use
+during a conversation through the ``knowledge`` tool. It stores short notes
+about what has been learned and lets the model retrieve them later with a
+similarity search.
+
+There are two KBs, and ``-kb-scope`` selects which one(s) are in use:
+
+- ``global`` (**the default**) — a single shared KB, independent of the current
+  working directory. Notes collected in one project are available in every
+  other one.
+- ``project`` — one KB per project (keyed by the last element of the cwd), the
+  previous behavior: notes stay confined to the project they were learned in.
+- ``both`` — the shared KB plus the project's, at the same time.
+
+The scope can be changed for the conversation through the prompt's ``kb_scope``
+field (``"global"``, ``"project"`` or ``"both"``), with the same persistence
+semantics as the ``model``/``provider`` overrides.
 
 Using the ``knowledge`` tool
 ----------------------------
@@ -25,6 +38,13 @@ tool, whose ``command`` field selects the operation:
 - ``delete <label>`` — removes the item with that label.
 - ``reset`` — clears the KB and rebuilds it from the seed.
 
+``show`` and ``search`` cover every active KB; when two are active, search
+results are merged by score and their labels are prefixed with the scope they
+came from (``global: …`` / ``project: …``). ``add``, ``delete`` and ``reset``
+take an optional ``scope`` (``"global"`` or ``"project"``) and default to the
+global KB, so a note is shared unless the model explicitly asks for the
+project's KB.
+
 Enabling the KB
 ---------------
 
@@ -43,14 +63,21 @@ Without those, the KB starts disabled with a warning and the bridge keeps
 running (the ``knowledge`` tool is absent). The default ``make build`` (no
 ``knowledge_onnx`` tag) likewise produces a build without a working KB.
 
+The base directory defaults to ``~/.local/share/llm-bridge/knowledge_bases``
+(override with ``-knowledge-base`` or ``$KNOWLEDGE_BASE``). The shared KB is
+stored under ``knowledge_bases/_global/data.json``; project KBs keep living
+under ``knowledge_bases/<project>/data.json``, so switching scopes does not
+discard anything already stored.
+
 Seeding
 -------
 
-The first time a project uses the KB it is populated from curated seed files,
-so it starts with content instead of being empty. Global seeds under
+The first time a KB is used it can be populated from curated seed files, so it
+starts with content instead of being empty. Global seeds under
 ``seedRoot/*.md`` are combined with project seeds under
-``seedRoot/<project>/*.md``. It is idempotent — once the KB has items, nothing
-is re-embedded.
+``seedRoot/<project>/*.md``. The shared KB takes only the global seeds (there
+is no ``_global`` seed subdirectory). Seeding is idempotent — once the KB has
+items, nothing is re-embedded.
 
 A conventional location for the seed directory is
 ``~/.local/share/llm-bridge/seeds`` — alongside the per-project knowledge bases
@@ -68,9 +95,10 @@ A standalone mode fully rebuilds a project's KB from a seed directory
 
    ./build/llm-bridge -populate-project-kb ~/.local/share/llm-bridge/seeds -project <proj>
 
-This uses the same ``seedRoot/*.md`` plus ``seedRoot/<project>/*.md`` layout as
-seeding and requires the ONNX embedder. The seed stays decoupled from the
-binary — it is only read at populate time.
+Use ``-project _global`` to (re)populate the shared KB; it is rebuilt from the
+global seed files only. This uses the same ``seedRoot/*.md`` plus
+``seedRoot/<project>/*.md`` layout as seeding and requires the ONNX embedder.
+The seed stays decoupled from the binary — it is only read at populate time.
 
 Implementation details (the ``knowledge`` package, index, embedders, the
 ``Manager`` and persistence) live in :doc:`/hacking/knowledge-internals`.

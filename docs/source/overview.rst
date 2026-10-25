@@ -39,8 +39,9 @@ does not:
 - **Hooks**: messages starting with ``#`` run a local script instead of
   calling the LLM, useful for project-specific commands.
 - **Project context and knowledge base**: project/global Markdown context is
-  injected into the conversation, and an optional per-project knowledge base
-  (with an ONNX embedder) can be queried through a ``knowledge`` tool.
+  injected into the conversation, and an optional knowledge base (shared
+  across projects by default, or per project) with an ONNX embedder can be
+  queried through a ``knowledge`` tool.
 - **History management**: tool-calling turns can be pruned/collapsed
   (``-prune`` / ``-aggressive-prune``) to save tokens and keep the prefix
   cacheable.

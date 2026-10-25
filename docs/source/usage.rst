@@ -75,13 +75,13 @@ Read-only tools (``read``, ``grep``, ``glob``) run without asking; for a
 mutating tool (``shell``, ``write``, ``search_replace``) the bridge emits a
 ``tool_confirm`` event and the client replies with a ``tool_confirm`` command to
 approve it (or ``cancel`` to abort). The client can also ``cancel`` an
-in-flight turn, ``set_cwd`` to move the working directory (which also rebuilds
-the project knowledge base), ``set_knowledge_bases`` to choose the active bases,
-and ``quit`` to shut down.
+in-flight turn, ``set_cwd`` to move the working directory (which also reloads the
+knowledge base in the project/both scopes), ``set_knowledge_bases`` to choose
+the active bases, and ``quit`` to shut down.
 
 **4. Standalone knowledge-base population.** A mode that does not run the
-server at all — it fully rebuilds a project's knowledge base from a seed
-directory and exits (see :doc:`knowledge`):
+server at all — it fully rebuilds a knowledge base from a seed directory and
+exits (see :doc:`knowledge`):
 
 .. code-block:: sh
 
@@ -127,13 +127,21 @@ CLI flags
     chain-of-thought entirely. Mutually exclusive with ``-prune``.
 
 ``--knowledge[=true|false]``
-    Enable/disable the project knowledge base and its ``knowledge`` tool
-    (default ``true``).
+    Enable/disable the knowledge base and its ``knowledge`` tool (default
+    ``true``).
 
 ``--knowledge-base <dir>``
-    Base directory for the project knowledge bases (default
+    Base directory for the knowledge bases (default
     ``~/.local/share/llm-bridge/knowledge_bases``; ``KNOWLEDGE_BASE`` env also
     honored).
+
+``--kb-scope <global|project|both>``
+    Which knowledge base(s) to use: ``global`` (default — one KB shared across
+    every project, stored under ``_global``), ``project`` (one KB per cwd
+    project, keyed by the last path element of the cwd) or ``both`` (the shared
+    KB plus the project's; searches merge both and ``add`` defaults to the
+    global KB unless ``scope:"project"`` is given). A prompt can override the
+    scope for the rest of the conversation with ``kb_scope``.
 
 ``--kb-load <lazy|eager>``
     When to load the (heavy) ONNX KB model: ``lazy`` (default — loads on first
@@ -150,9 +158,9 @@ CLI flags
     ``/tmp/llm-bridge.log``.
 
 ``-populate-project-kb <seedDir> -project <project>``
-    Standalone mode (does not run the server): fully rebuild a project's
-    knowledge base from a seed directory and exit. Requires the ONNX embedder
-    (``make build-kb``).
+    Standalone mode (does not run the server): fully rebuild a knowledge base
+    from a seed directory and exit. Requires the ONNX embedder
+    (``make build-kb``). Use ``-project _global`` for the shared KB.
 
 Sandbox (caged)
 ---------------
@@ -276,7 +284,7 @@ The bridge reads these from the environment at runtime.
 
 **Knowledge base**
 
-* ``KNOWLEDGE_BASE`` — base directory for the project KBs (default ``~/.local/share/llm-bridge/knowledge_bases``).
+* ``KNOWLEDGE_BASE`` — base directory for the KBs (default ``~/.local/share/llm-bridge/knowledge_bases``).
 * ``LLM_BRIDGE_KB_MODEL`` — path to the ONNX model (default ``~/.cache/llm-bridge/model.onnx``).
 * ``LLM_BRIDGE_KB_TOKENIZER`` — path to the tokenizer (default ``~/.cache/llm-bridge/tokenizer.json``).
 * ``LLM_BRIDGE_ONNXRUNTIME_LIB`` — path to ``libonnxruntime.so``, required by the KB build.

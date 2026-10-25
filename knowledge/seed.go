@@ -25,8 +25,9 @@ import (
 // EnsureSeeded populates the knowledge base from seed .md files the first time
 // it is used for a project, so the KB starts with curated content instead of
 // being empty. Global seeds under seedRoot/*.md are combined with project
-// seeds under seedRoot/<project>/*.md. It is idempotent: if the index already
-// has items, nothing is embedded.
+// seeds under seedRoot/<seedProject>/*.md (see SetSeedProject; the shared KB
+// has an empty seed project, so it only takes the global seeds). It is
+// idempotent: if the index already has items, nothing is embedded.
 //
 // The label for each seed file is the path relative to seedRoot (prefixed
 // with "seed:"), so global and per-project files with the same basename never
@@ -43,8 +44,8 @@ func (m *Manager) EnsureSeeded(seedRoot string) error {
 		files = append(files, matches...)
 	}
 	glob(filepath.Join(seedRoot, "*.md"))
-	if m.project != "" {
-		glob(filepath.Join(seedRoot, m.project, "*.md"))
+	if m.seedProject != "" {
+		glob(filepath.Join(seedRoot, m.seedProject, "*.md"))
 	}
 
 	for _, f := range files {

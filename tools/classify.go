@@ -87,15 +87,21 @@ func CommandOf(rawArgs string) string {
 // `||`, `|`, a lone `&` and newlines, without splitting inside quotes. It is
 // what lets the client show "this approval runs 4 commands" instead of one long
 // line, and what the segment limit counts.
+//
+// Redirections are not separators: `cmd > out 2>&1` is one command, and the `&`
+// of `2>&1`, `>&2`, `<&3` and of the `&>`/`&>>` form belongs to the redirect.
+// Splitting there used to report `git describe --tags 2>&1 || true` as four
+// commands (`git describe --tags 2>`, `1`, ...) and to inflate the count the
+// limit is applied to. Heredoc bodies are still not parsed, so a `&` inside one
+// is treated as a separator.
 func Segments(command string) []string {
 	var (
-		out      []string
-		cur      strings.Builder
-		quote    rune
-		escaped  bool
-		flush    func()
-		runes    = []rune(command)
-		operator string
+		out     []string
+		cur     strings.Builder
+		quote   rune
+		escaped bool
+		flush   func()
+		runes   = []rune(command)
 	)
 	flush = func() {
 		if seg := strings.TrimSpace(cur.String()); seg != "" {
@@ -130,16 +136,35 @@ func Segments(command string) []string {
 			flush()
 		case ';':
 			flush()
-		case '&', '|':
-			// Collapse `&&` and `||` into one separator; a lone `&` or `|`
-			// separates just the same.
-			next := ""
-			if i+1 < len(runes) && (runes[i+1] == '&' || runes[i+1] == '|') && runes[i+1] == r {
-				next = string(runes[i+1])
+		case '>', '<':
+			// A redirect, not a separator. The `&` that may follow it
+			// (`2>&1`, `>&2`, `<&3`) is part of the redirect, so write it
+			// here instead of letting the `&` case below split the line.
+			cur.WriteRune(r)
+			if i+1 < len(runes) && runes[i+1] == '&' {
+				i++
+				cur.WriteRune(runes[i])
+			}
+		case '&':
+			// `&&` is one separator; `&>` and `&>>` are redirects.
+			if i+1 < len(runes) {
+				switch runes[i+1] {
+				case '&':
+					i++
+					flush()
+					continue
+				case '>':
+					cur.WriteRune(r)
+					continue
+				}
+			}
+			flush()
+		case '|':
+			// `||` is one separator; `|&` pipes stdout and stderr together
+			// into the next command, so its `&` is not a separator of its own.
+			if i+1 < len(runes) && (runes[i+1] == '|' || runes[i+1] == '&') {
 				i++
 			}
-			operator = string(r) + next
-			_ = operator
 			flush()
 		default:
 			cur.WriteRune(r)

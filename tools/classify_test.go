@@ -47,6 +47,25 @@ func TestSegments(t *testing.T) {
 		// Empty pieces never become segments.
 		{"a;;;b", []string{"a", "b"}},
 		{"   ", nil},
+		// Redirects are not separators: `2>&1`, `>&2`, `<&3`, `&>` and `&>>`
+		// belong to the command they redirect, and splitting there used to
+		// report `git describe --tags 2>&1 || true` as four commands.
+		{"git describe --tags 2>&1 || true", []string{"git describe --tags 2>&1", "true"}},
+		{"go build > /tmp/out 2>&1", []string{"go build > /tmp/out 2>&1"}},
+		{"cmd >&2", []string{"cmd >&2"}},
+		{"cmd 0<&3", []string{"cmd 0<&3"}},
+		{"a &> /tmp/log", []string{"a &> /tmp/log"}},
+		{"a &>> /tmp/log", []string{"a &>> /tmp/log"}},
+		{"cat < in > out", []string{"cat < in > out"}},
+		// A background `&` is still a separator, and so is `|&`.
+		{"cmd 2>/dev/null &", []string{"cmd 2>/dev/null"}},
+		{"a |& b", []string{"a", "b"}},
+		// The `&` of a redirect inside quotes is data, like any other.
+		{`echo "2>&1" && ls`, []string{`echo "2>&1"`, "ls"}},
+		// The one-liner that reported "runs 6 commands" for 5 commands.
+		{"cd ~/src && git status --short; git log -1 --oneline; git describe --tags 2>&1 || true",
+			[]string{"cd ~/src", "git status --short", "git log -1 --oneline",
+				"git describe --tags 2>&1", "true"}},
 	}
 	for _, c := range cases {
 		got := Segments(c.command)

@@ -1,8 +1,8 @@
 Changelog
 =========
 
-Unreleased
-----------
+v0.6.0
+------
 
 Added
 ~~~~~
@@ -73,10 +73,20 @@ Changed
   are read, nothing is migrated or discarded.
 - ``set_cwd`` reloads the KB in the ``project``/``both`` scopes only; in the
   ``global`` scope it no longer rebuilds anything.
-- The ``knowledge`` tool schema documents the ``scope`` argument; the tool
-  stays read-only (``add``/``delete``/``reset`` are gated by the scope in the
-  set, not by ``tool_confirm``).
+- The ``knowledge`` tool schema documents the ``scope`` argument.
 - Docs and the system prompt describe the shared KB as the default.
+
+Fixed
+~~~~~
+
+- **Redirections are no longer command separators.** ``Segments`` treated the
+  ``&`` of ``2>&1``, ``>&2`` and ``<&3`` as a separator, so
+  ``git describe --tags 2>&1 || true`` was reported as four commands
+  (``git describe --tags 2>``, ``1``, ``true``) instead of two — inflating the
+  approval header, the class key a client derives from it, and the ten-segment
+  limit. ``>``/``<`` now consume the following ``&``, ``&>`` and ``&>>`` are
+  redirects as well, and ``|&`` is a single separator. Heredoc bodies are still
+  not parsed.
 
 v0.5.0
 ------

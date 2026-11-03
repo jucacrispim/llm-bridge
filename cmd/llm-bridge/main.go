@@ -294,7 +294,7 @@ func main() {
 
 	if err := server.RunWithKnowledgeBase(os.Stdin, os.Stdout, providers, *providerName,
 		systemPrompt, *aggressivePrune, *prune, kbBaseDir, *kbScope, kbEmbed,
-		server.Sandboxes{Tools: sb, Curl: curlSb, CurlHosts: sbCfg.curlHosts}); err != nil {
+		server.Sandboxes{Tools: sb, Curl: curlSb, ToolBin: sbCfg.toolBin, CurlHosts: sbCfg.curlHosts}); err != nil {
 		os.Exit(1)
 	}
 }

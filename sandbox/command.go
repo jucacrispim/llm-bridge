@@ -18,6 +18,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -171,6 +172,48 @@ func (s *Sandbox) Run(ctx context.Context, dir, name string, args ...string) ([]
 		return out, &SetupError{Code: exitCode(runErr), Output: msg}
 	}
 	return out, runErr
+}
+
+// RunIO is Run with a stdin payload and stdout/stderr kept apart.
+//
+// It exists for the one tool that speaks a protocol instead of printing text
+// (llm-tools: one JSON request in, one JSON response out). Run's combined
+// output is what a shell command wants — the model should see stdout and
+// stderr interleaved, in the order the command wrote them — but it cannot carry
+// a response meant to be parsed: a single warning on stderr would corrupt it.
+//
+// The setup-failure contract is the same as Run's: a *SetupError comes back
+// when caged reports that the sandbox itself did not apply, and the caller must
+// not treat stdout as a result in that case.
+func (s *Sandbox) RunIO(ctx context.Context, dir, name string, stdin []byte, args ...string) (stdout, stderr []byte, err error) {
+	cmd := s.Command(ctx, name, args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Stdin = bytes.NewReader(stdin)
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		return nil, nil, perr
+	}
+	defer pr.Close()
+	cmd.ExtraFiles = []*os.File{pw}
+
+	report := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(pr)
+		report <- string(b)
+	}()
+
+	runErr := cmd.Run()
+	pw.Close()
+	if msg := <-report; msg != "" {
+		return out.Bytes(), errOut.Bytes(), &SetupError{Code: exitCode(runErr), Output: msg}
+	}
+	return out.Bytes(), errOut.Bytes(), runErr
 }
 
 // exitCode returns the process exit status, or -1 when it did not exit

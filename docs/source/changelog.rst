@@ -1,6 +1,46 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+The bridge no longer opens a path the model chose. ``read``, ``write``,
+``glob`` and ``search_replace`` moved out of the bridge process into
+``llm-tools``, a second binary that the bridge runs under ``caged`` with the
+tool policy.
+
+Why: those four tools used to run in-process (``os.ReadFile``/``os.WriteFile``),
+so the only thing bounding the path the model asked for was the bridge's own
+ceiling. That made the bridge a privileged process — and, because Landlock and
+seccomp are inherited, every external process the bridge spawned ran under two
+stacked policies, which is what blocks giving the tools their own namespaces
+(a user namespace needs ``/proc/<self>/uid_map``, which cannot be granted from
+above and must not be opened to the model).
+
+Breaking changes
+~~~~~~~~~~~~~~~~
+
+- ``cmd/bridge`` is now ``cmd/llm-bridge``, and ``make build`` produces two
+  binaries: ``llm-bridge`` and ``llm-tools``. Both go to ``build/`` and both
+  must be installed together; the bridge looks for ``llm-tools`` next to itself
+  first, then in ``$PATH`` (override with ``-tools-bin``).
+- A missing or mismatched ``llm-tools`` is a **startup error**, like a missing
+  ``caged``: it answers a handshake before the sandbox is built, so a stale
+  binary fails loudly instead of answering requests it does not understand.
+  With ``-disable-sandbox`` there is no policy to run the helper under, so the
+  filesystem tools stay in-process.
+
+Changed
+~~~~~~~
+
+- ``tools.Executor`` gained ``NewExecutorWithToolbox``; when a helper and a
+  policy are both set, the four filesystem tools go through
+  ``sandbox.Sandbox.RunIO`` (a new ``Run`` variant with stdin and stdout/stderr
+  kept apart — a protocol response cannot share a pipe with a warning).
+- ``tools.IsFileTool`` names the tools the helper serves. ``shell``, ``grep``
+  and ``curl`` are deliberately not among them: they exec external programs, so
+  they have to be the sandboxed command itself.
+
 v0.6.0
 ------
 

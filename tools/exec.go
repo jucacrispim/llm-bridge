@@ -82,9 +82,17 @@ var curlFlags = map[string]bool{
 type Executor struct {
 	cwd string
 	// sandbox, when non-nil, wraps the external processes (shell, grep) in
-	// caged. The in-process file tools (read/write/glob/search_replace) do not
-	// exec anything, so they are only bounded by the bridge's own permissions.
+	// caged — and the llm-tools helper, when toolBin is set.
+	//
+	// With toolBin set, the filesystem tools (read/write/glob/search_replace)
+	// run in that helper under this same policy, so the path the model asked
+	// for never reaches a syscall in the bridge process. Without it (no
+	// sandbox, or tests) they run in-process, which is the old behaviour.
 	sandbox *sandbox.Sandbox
+	// toolBin is the path of the llm-tools binary. Empty means "run the
+	// filesystem tools in-process"; the bridge sets it unless the sandbox is
+	// off, and refuses to start when the binary is missing (see CheckToolbox).
+	toolBin string
 	// curlSandbox is the sandbox the curl tool runs under: same shape as
 	// sandbox, but with network access and WITHOUT the project/home paths, so
 	// a fetch cannot read local files (and therefore cannot exfiltrate them).
@@ -120,6 +128,22 @@ func NewExecutorWithSandboxes(cwd string, sb, curlSb *sandbox.Sandbox, hosts []s
 	return &Executor{cwd: cwd, sandbox: sb, curlSandbox: curlSb, curlHosts: hosts}
 }
 
+// NewExecutorWithToolbox returns NewExecutorWithSandboxes plus toolBin, the
+// path of the llm-tools binary. With it set, the filesystem tools run out of
+// process, under sb, so the bridge itself never opens a path the model chose.
+// An empty toolBin keeps them in-process.
+func NewExecutorWithToolbox(cwd string, sb, curlSb *sandbox.Sandbox, hosts []string, toolBin string) *Executor {
+	return &Executor{cwd: cwd, sandbox: sb, curlSandbox: curlSb, curlHosts: hosts, toolBin: toolBin}
+}
+
+// outOfProcess reports whether the filesystem tools should go through
+// llm-tools. It needs both halves: the binary to run and the policy to run it
+// under. Without a policy the helper would be plain unsandboxed execution,
+// which is the opposite of the point, so the in-process path is used instead.
+func (e *Executor) outOfProcess() bool {
+	return e.toolBin != "" && e.sandbox != nil
+}
+
 // run executes name/args capturing the combined output. With a sandbox
 // configured it goes through Sandbox.Run, which proves from caged's report
 // descriptor whether the sandbox applied: a *sandbox.SetupError comes back
@@ -145,11 +169,46 @@ func isSetupError(err error) bool {
 	return errors.As(err, &se)
 }
 
+// runToolbox runs one filesystem tool in llm-tools, under the tool policy, and
+// returns what it answered.
+//
+// The working directory is the executor's, so a relative path means the same
+// thing it means for the other tools. Nothing is inferred from the reply's exit
+// status: a *sandbox.SetupError means the helper never ran confined (and is
+// returned as such), any other failure means the helper itself failed, and an
+// unreadable reply means it died — none of which is a tool result.
+func (e *Executor) runToolbox(ctx context.Context, name, rawArgs string) (string, error) {
+	req, err := toolboxRequestLine(name, rawArgs)
+	if err != nil {
+		return "", err
+	}
+	stdout, stderr, err := e.sandbox.RunIO(ctx, e.cwd, e.toolBin, req)
+	if err != nil {
+		if isSetupError(err) {
+			return "", err
+		}
+		// Keep whatever the helper said: it is the only clue for a crash, and
+		// it is never mistaken for a result because it travels as the error.
+		if msg := strings.TrimSpace(string(stderr)); msg != "" {
+			return "", fmt.Errorf("llm-tools %s: %w: %s", name, err, msg)
+		}
+		return "", fmt.Errorf("llm-tools %s: %w", name, err)
+	}
+	return decodeToolboxResponse(stdout)
+}
+
 // Execute runs the named tool with raw JSON arguments and returns its textual
 // result. The provided context cancels a running external process (shell/grep)
 // when the turn is cancelled. On error the caller is expected to surface the
 // error text as the tool result (the model still gets a response per call).
 func (e *Executor) Execute(ctx context.Context, name, rawArgs string) (string, error) {
+	// The filesystem tools run in llm-tools when a helper and a policy are
+	// configured, so no path the model produced ever reaches a syscall here.
+	// The argument payload travels untouched: the helper parses it exactly as
+	// the in-process path below would.
+	if IsFileTool(name) && e.outOfProcess() {
+		return e.runToolbox(ctx, name, rawArgs)
+	}
 	args := map[string]any{}
 	if rawArgs != "" {
 		// A malformed argument payload is tolerated: the individual tool

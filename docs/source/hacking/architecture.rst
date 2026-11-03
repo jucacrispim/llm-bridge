@@ -41,6 +41,15 @@ The bridge is organized into focused packages:
     LLM: ``read``, ``write``, ``shell``, ``grep``, ``glob``, ``search_replace``
     and ``knowledge``.
 
+``cmd/llm-tools``
+    The helper that runs the filesystem tools (``read``, ``write``, ``glob``,
+    ``search_replace``) out of process, under ``caged``. The protocol is one
+    JSON request in, one JSON response out (see ``tools/toolbox.go``). It
+    exists so the path the model asked for never reaches a syscall in the
+    bridge process: the bridge holds no filesystem rights of its own, and each
+    tool runs under the single policy built for it, instead of inheriting the
+    bridge's.
+
 ``hooks``
     Resolves and executes ``#``-prefixed hook scripts (project dir first, then
     the general ``~/.llm-bridge/hooks/``). See :doc:`hooks-internals`.

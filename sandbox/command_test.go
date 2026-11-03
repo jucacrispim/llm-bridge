@@ -169,6 +169,43 @@ func TestRunSetupFailureOverridesCleanExit(t *testing.T) {
 	}
 }
 
+// TestRunIOKeepsStreamsApart covers the two things RunIO adds to Run: a stdin
+// payload and stdout/stderr kept apart. A protocol response must not be
+// corrupted by a warning on stderr.
+func TestRunIOKeepsStreamsApart(t *testing.T) {
+	sb, err := New(fakeCaged(t, `cat; printf 'a warning' >&2`), Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := sb.RunIO(context.Background(), "", "cat", []byte("request\n"))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if string(stdout) != "request\n" {
+		t.Errorf("stdout: got %q", stdout)
+	}
+	if string(stderr) != "a warning" {
+		t.Errorf("stderr: got %q", stderr)
+	}
+}
+
+// TestRunIOReportsSetupFailure: the report descriptor means the sandbox did not
+// apply, so nothing the command wrote may be taken as a result.
+func TestRunIOReportsSetupFailure(t *testing.T) {
+	sb, err := New(fakeCaged(t, `cat; printf 'caged: boom' >&3; exit 125`), Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = sb.RunIO(context.Background(), "", "cat", []byte("request\n"))
+	var se *SetupError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected a *SetupError, got %v", err)
+	}
+	if se.Code != ExitSetupFailed {
+		t.Errorf("code: got %d want %d", se.Code, ExitSetupFailed)
+	}
+}
+
 // TestRunSilentWithoutReport checks that a clean run leaves the descriptor
 // empty and returns the output untouched.
 func TestRunSilentWithoutReport(t *testing.T) {

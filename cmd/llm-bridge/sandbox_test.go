@@ -23,6 +23,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"llm-bridge/tools"
 )
 
 // TestEnsureTempDirCreates checks the directory is created with 0700 and that a
@@ -241,6 +243,29 @@ func TestToolSandboxHasNoNetwork(t *testing.T) {
 	}
 }
 
+// TestToolSandboxGrantsToolBin checks the llm-tools binary is inside the tool
+// policy: the filesystem tools run as it, so without the grant every
+// read/write/glob/search_replace would fail to exec.
+func TestToolSandboxGrantsToolBin(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "bin", "llm-tools")
+	// existing() filters missing paths, and the real binary always exists.
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: t.TempDir(), toolBin: bin}
+	sb, err := c.toolSandbox()
+	if err != nil {
+		t.Fatalf("toolSandbox: %v", err)
+	}
+	want := filepath.Dir(bin)
+	for _, p := range sb.Policy.ReadOnly {
+		if p == want {
+			return
+		}
+	}
+	t.Errorf("the llm-tools directory %q is not granted (read-only: %v)", want, sb.Policy.ReadOnly)
+}
+
 // TestCurlSandboxMinimalFilesystem checks the curl sandbox is the inverse of the
 // tools one: network on, but nothing of the user's to read. The shared policy
 // (projects, home, KB, temp dir) must not leak into it — network plus a readable
@@ -347,10 +372,85 @@ func fakeCagedWithReportFD(t *testing.T) string {
 	return path
 }
 
+// fakeToolsBin writes a stub llm-tools that answers the handshake, which is
+// what validate() runs at startup (tools.CheckToolbox).
+func fakeToolsBin(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "llm-tools")
+	script := "#!/bin/sh\ncat > /dev/null\nprintf '{\"ok\":true,\"result\":\"llm-tools/" +
+		tools.ToolboxVersion + "\"}\\n'\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestCeilingGrantsToolBin covers the case that only shows up at runtime: the
+// tools are children of the bridge, so they inherit the ceiling. An -tools-bin
+// outside the bridge's own directory would be denied at exec time unless the
+// ceiling grants it too.
+func TestCeilingGrantsToolBin(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "elsewhere", "llm-tools")
+	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &sandboxConfig{tmpDir: t.TempDir(), toolBin: bin}
+	p, err := c.ceilingPolicy("/usr/bin/llm-bridge", "/usr/bin/caged")
+	if err != nil {
+		t.Fatalf("ceilingPolicy: %v", err)
+	}
+	want := filepath.Dir(bin)
+	for _, ro := range p.ReadOnly {
+		if ro == want {
+			return
+		}
+	}
+	t.Errorf("the ceiling does not grant the llm-tools directory %q (read-only: %v)", want, p.ReadOnly)
+}
+
+// TestValidateRequiresToolbox pins the startup contract: a missing helper is an
+// error like a missing caged, never a silent fallback to running the filesystem
+// tools inside the bridge.
+func TestValidateRequiresToolbox(t *testing.T) {
+	c := &sandboxConfig{
+		cagedBin: fakeCagedWithReportFD(t),
+		toolsBin: filepath.Join(t.TempDir(), "missing", "llm-tools"),
+		tmpDir:   t.TempDir(),
+	}
+	if err := c.validate(); err == nil {
+		t.Fatal("a missing llm-tools must fail the startup")
+	}
+}
+
+// TestValidateRejectsForeignToolbox: a binary that does not answer the
+// handshake is not llm-tools, whatever its name.
+func TestValidateRejectsForeignToolbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "llm-tools")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho 'not me'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: path, tmpDir: t.TempDir()}
+	if err := c.validate(); err == nil {
+		t.Fatal("a foreign binary must fail the startup")
+	}
+}
+
+// TestValidateLeavesToolboxUnsetWhenDisabled: with the sandbox off there is no
+// policy to run the helper under, so the filesystem tools stay in-process.
+func TestValidateLeavesToolboxUnsetWhenDisabled(t *testing.T) {
+	c := &sandboxConfig{disabled: true, toolsBin: "/nonexistent/llm-tools"}
+	if err := c.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if c.toolBin != "" {
+		t.Errorf("toolBin = %q, want empty with the sandbox off", c.toolBin)
+	}
+}
+
 // TestValidateAcceptsCurlConfig covers the happy path of validate: caged with
 // --report-fd, curl ports in range.
 func TestValidateAcceptsCurlConfig(t *testing.T) {
-	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), curlPorts: []int{443, 8443}}
+	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), curlPorts: []int{443, 8443}}
 	if err := c.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
@@ -361,9 +461,9 @@ func TestValidateAcceptsCurlConfig(t *testing.T) {
 // startup instead of silently running without the network it asked for.
 func TestValidateRejectsRemovedNetworkFlags(t *testing.T) {
 	for name, c := range map[string]*sandboxConfig{
-		"sandbox-network":         {cagedBin: fakeCagedWithReportFD(t), legacyNetwork: true},
-		"sandbox-connect-port":    {cagedBin: fakeCagedWithReportFD(t), legacyPorts: []int{443}},
-		"both, only connect-port": {cagedBin: fakeCagedWithReportFD(t), legacyNetwork: true, legacyPorts: []int{443}},
+		"sandbox-network":         {cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), legacyNetwork: true},
+		"sandbox-connect-port":    {cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), legacyPorts: []int{443}},
+		"both, only connect-port": {cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), legacyNetwork: true, legacyPorts: []int{443}},
 	} {
 		err := c.validate()
 		if err == nil {
@@ -379,7 +479,7 @@ func TestValidateRejectsRemovedNetworkFlags(t *testing.T) {
 // TestValidateRejectsBadCurlPort covers the range check of -curl-port.
 func TestValidateRejectsBadCurlPort(t *testing.T) {
 	for _, port := range []int{0, -1, 70000} {
-		c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), curlPorts: []int{port}}
+		c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), curlPorts: []int{port}}
 		if err := c.validate(); err == nil {
 			t.Errorf("port %d: expected an error", port)
 		}

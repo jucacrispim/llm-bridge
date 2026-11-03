@@ -187,9 +187,13 @@ only tighten the outer:
   policy** as the bridge (minus the log file), so a tool works on the same
   projects and knowledge base the bridge does. What a tool is denied, then, is
   the environment (no API keys: only caged's small base set is inherited), the
-  IPC (unix sockets and SysV IPC) and the network. The in-process tools
-  (``read``, ``write``, ``glob``, ``search_replace``) do not exec anything and
-  are therefore only bounded by the bridge's own (ceiling) permissions.
+  IPC (unix sockets and SysV IPC) and the network. The filesystem tools
+  (``read``, ``write``, ``glob``, ``search_replace``) run in the **llm-tools**
+  helper under this same policy, not inside the bridge: the path the model
+  asked for never reaches a syscall in the bridge process. ``llm-tools`` is a
+  second binary next to the bridge (override with ``-tools-bin``); a missing
+  one is a startup error, never a silent fallback to running the tools
+  in-process.
 - **curl** — the one tool with network access, and the only one that does
   **not** get the shared filesystem policy. It runs under its own caged policy
   with the system trees and nothing else (no projects, no home, no knowledge

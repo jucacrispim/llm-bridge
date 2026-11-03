@@ -53,6 +53,7 @@ package main
 // layers at once.
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -61,9 +62,16 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"llm-bridge/sandbox"
+	"llm-bridge/tools"
 )
+
+// toolboxHandshakeTimeout bounds the startup check of the llm-tools binary: it
+// answers one request and exits, so anything slower than this is a broken
+// binary, not a slow one.
+const toolboxHandshakeTimeout = 5 * time.Second
 
 // sandboxedEnv marks the re-executed process so a nested launch (e.g. the
 // bridge started by the Emacs client through caged) does not stack another
@@ -123,6 +131,12 @@ type sandboxConfig struct {
 	// logFile is the bridge log file, granted read+write to the ceiling as a
 	// single file (never its directory).
 	logFile string
+	// toolsBin is the llm-tools binary (empty: next to the bridge, then
+	// $PATH). It runs the filesystem tools out of process.
+	toolsBin string
+	// toolBin is toolsBin as resolved by validate(): absolute, verified and
+	// handshake-checked. Empty when the sandbox is off.
+	toolBin string
 	// tmpDir is the temporary directory granted read+write to both layers and
 	// exported as TMPDIR/GOTMPDIR/TMP/TEMP (default defaultTempDir).
 	tmpDir string
@@ -147,6 +161,35 @@ func (c *sandboxConfig) binary() (string, error) {
 		return path, nil
 	}
 	return filepath.Abs(path)
+}
+
+// toolsBinary resolves the llm-tools binary: the -tools-bin flag, then the
+// directory of the bridge itself, then $PATH.
+//
+// Next to the bridge comes before $PATH on purpose: the helper answers a
+// protocol the bridge defines, so the one that ships with this bridge is the
+// one to run. A stray llm-tools earlier in the PATH would be a different build
+// (the handshake below catches it, but picking the right file is better than
+// failing on it).
+func (c *sandboxConfig) toolsBinary() (string, error) {
+	if c.toolsBin != "" {
+		return filepath.Abs(c.toolsBin)
+	}
+	// os.Executable reads /proc, which the ceiling does not grant: this has to
+	// run before the re-exec (validate does).
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve own executable: %w", err)
+	}
+	cand := filepath.Join(filepath.Dir(self), "llm-tools")
+	if _, statErr := os.Stat(cand); statErr == nil {
+		return cand, nil
+	}
+	found, err := exec.LookPath("llm-tools")
+	if err != nil {
+		return "", fmt.Errorf("llm-tools not found next to %s nor in $PATH (use -tools-bin)", self)
+	}
+	return found, nil
 }
 
 // existing filters out paths that do not exist: caged opens every granted path
@@ -274,11 +317,18 @@ func ensureLogFile(path string) error {
 }
 
 // ceilingPolicy builds the policy the whole bridge runs under: the shared paths
-// plus the two binaries it must be able to execute and the log file, plus
+// plus the three binaries it must be able to execute and the log file, plus
 // network access (the bridge must reach the LLM API).
 func (c *sandboxConfig) ceilingPolicy(self, caged string) (sandbox.Policy, error) {
 	ro, rw := c.sharedPaths()
 	ro = append(ro, filepath.Dir(self), filepath.Dir(caged))
+	// The llm-tools directory is granted here too, even though the tool policy
+	// grants it as well: the tool is a child of the bridge, so it inherits this
+	// ceiling, and without it an -tools-bin outside the bridge's own directory
+	// would fail to exec inside the nested sandbox.
+	if c.toolBin != "" {
+		ro = append(ro, filepath.Dir(c.toolBin))
+	}
 
 	// The log file is granted as a single file: opening an existing file for
 	// append only needs write permission on the file, not on its directory,
@@ -394,6 +444,12 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 		return nil, err
 	}
 	ro, rw := c.sharedPaths()
+	// The llm-tools binary has to be readable and executable inside this
+	// policy: the filesystem tools run as it, so without the grant every
+	// read/write/glob/search_replace would fail to exec.
+	if c.toolBin != "" {
+		ro = append(ro, filepath.Dir(c.toolBin))
+	}
 	p := sandbox.Policy{
 		ReadOnly:  existing(ro),
 		ReadWrite: existing(rw),
@@ -489,6 +545,10 @@ func requireReportFD(bin string) error {
 // nothing is resolved and the binary is not required.
 func (c *sandboxConfig) validate() error {
 	if c.disabled {
+		// No sandbox means no policy to run the helper under, so the
+		// filesystem tools stay in-process: a process boundary without a
+		// policy buys nothing.
+		c.toolBin = ""
 		return nil
 	}
 	bin, err := c.binary()
@@ -498,6 +558,20 @@ func (c *sandboxConfig) validate() error {
 	if err := requireReportFD(bin); err != nil {
 		return err
 	}
+	// Resolved and checked here, before the re-exec, for the same reason as
+	// the caged binary: a missing or mismatched helper must stop the bridge at
+	// startup, never degrade a tool call later. It also needs /proc (see
+	// toolsBinary), which the ceiling does not grant.
+	toolBin, err := c.toolsBinary()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), toolboxHandshakeTimeout)
+	defer cancel()
+	if err := tools.CheckToolbox(ctx, toolBin); err != nil {
+		return err
+	}
+	c.toolBin = toolBin
 	if c.legacyNetwork || len(c.legacyPorts) > 0 {
 		return fmt.Errorf("-sandbox-network and -sandbox-connect-port were removed: only the curl tool has network access now (use -curl, -curl-port, -curl-any-port and -curl-allow-host)")
 	}
@@ -521,6 +595,8 @@ func registerSandboxFlags() *sandboxConfig {
 		"turn the process sandbox off; by default the bridge re-executes itself under caged (ceiling) and runs the shell/grep tools and hooks under a stricter caged policy (no network)")
 	flag.StringVar(&c.cagedBin, "caged-bin", "",
 		"path of the caged binary (default: $CAGED_BIN, then $PATH)")
+	flag.StringVar(&c.toolsBin, "tools-bin", "",
+		"path of the llm-tools binary, which runs the filesystem tools (read/write/glob/search_replace) under the tool sandbox (default: next to this binary, then $PATH)")
 	flag.StringVar(&c.tmpDir, "sandbox-tmp", defaultTempDir,
 		"temporary directory granted read-write to the bridge and the tools, exported as TMPDIR/GOTMPDIR/TMP/TEMP (created if missing; /tmp itself is not granted)")
 	flag.Func("sandbox-ro", "extra read-only path for the sandbox (bridge and tools; repeatable)", func(v string) error {

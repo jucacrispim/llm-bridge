@@ -61,8 +61,13 @@ var defaultSystemPrompt = func() string {
 // list, so the model is never offered a tool the bridge would refuse. CurlHosts,
 // when non-empty, restricts the curl tool to those hosts.
 type Sandboxes struct {
-	Tools     *sandbox.Sandbox
-	Curl      *sandbox.Sandbox
+	Tools *sandbox.Sandbox
+	Curl  *sandbox.Sandbox
+	// ToolBin is the path of the llm-tools binary, which runs the filesystem
+	// tools (read/write/glob/search_replace) under Tools. Empty keeps them
+	// in-process — the case when the sandbox is off, where a helper would add
+	// a process boundary without adding a policy.
+	ToolBin   string
 	CurlHosts []string
 }
 
@@ -331,7 +336,7 @@ func (st *state) executeTool(tc llm.ToolCall) {
 		st.resolveKnowledge(tc.ID, tc.Arguments)
 		return
 	}
-	exec := tools.NewExecutorWithSandboxes(st.cwd, st.sandboxes.Tools, st.sandboxes.Curl, st.sandboxes.CurlHosts)
+	exec := tools.NewExecutorWithToolbox(st.cwd, st.sandboxes.Tools, st.sandboxes.Curl, st.sandboxes.CurlHosts, st.sandboxes.ToolBin)
 	ctx, cancel := context.WithCancel(context.Background())
 	st.setCancel(cancel)
 	out, err := exec.Execute(ctx, tc.Name, tc.Arguments)

@@ -75,21 +75,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Sandbox ceiling: unless -disable-sandbox is given, re-execute the bridge
-	// under caged BEFORE opening the log file or starting any goroutine. caged
-	// closes every descriptor above stderr, so an already-open log fd would be
-	// silently lost, and it must be resolved while /proc is still reachable.
-	// On success syscall.Exec does not return.
-	if *logFile != "" {
-		sbCfg.logFile = *logFile
-	} else if *debug {
-		sbCfg.logFile = defaultLogFile
-	}
-	if err := sbCfg.enterCeiling(); err != nil {
-		fmt.Fprintf(os.Stderr, "sandbox setup failed: %v\n", err)
-		os.Exit(1)
-	}
-
 	if *aggressivePrune && *prune {
 		fmt.Fprintf(os.Stderr, "error: -aggressive-prune and -prune are mutually exclusive\n")
 		os.Exit(1)
@@ -274,8 +259,8 @@ func main() {
 	}
 
 	// Tool sandbox: every external process the bridge spawns (shell, grep,
-	// hooks) runs under caged with a policy stricter than the bridge's own.
-	// nil (only with -disable-sandbox) means "run them as before".
+	// hooks) and the llm-tools helper run under caged with the policy built for
+	// them. nil (only with -disable-sandbox) means "run them as before".
 	sb, err := sbCfg.toolSandbox()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox setup failed: %v\n", err)

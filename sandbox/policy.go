@@ -75,8 +75,8 @@ type Policy struct {
 
 	// KeepEnv inherits the whole environment. Without it caged replaces the
 	// environment with its small base set (PATH, HOME, LANG, LANGUAGE,
-	// LC_*), which is what we want for tools: API keys must not leak into
-	// them even when the bridge itself was started with --keep-env.
+	// LC_*), which is what every policy here wants: the bridge's environment
+	// carries the API keys, and no tool has an use for them.
 	KeepEnv bool
 	// Env holds extra NAME=VALUE entries to set in the command environment.
 	Env []string

@@ -165,35 +165,42 @@ CLI flags
 Sandbox (caged)
 ---------------
 
-The bridge confines itself and the tools it runs with `caged
+The bridge confines the processes it runs with `caged
 <https://docs.poraodojuca.dev/caged>`_, a small Landlock + seccomp sandbox. The
-sandbox is **on by default** and has
-two layers; Landlock rulesets stack by **intersection**, so the inner one can
-only tighten the outer:
+sandbox is **on by default**, and every process gets **exactly one policy**: the
+bridge itself runs unconfined, and each tool it spawns is a caged child with the
+policy built for it.
 
-- **ceiling** — the bridge **re-executes itself** under caged at startup. The
-  ceiling grants the system trees, the bridge and caged binaries, the
+.. note::
+
+   Until v0.7.0 the bridge re-executed *itself* under a loose "ceiling" policy
+   and the tools ran under a stricter one, Landlock intersecting the two. The
+   ceiling is gone: a process that is already confined cannot give its child a
+   namespace, because caged's namespace support has to write
+   ``/proc/self/uid_map`` during setup and that file cannot be granted from
+   above (a Landlock rule is per inode, and the grant would resolve to the
+   ceiling's own ``uid_map``) nor opened to the model (``/proc/<pid>/environ``
+   of the bridge carries the API keys). The price is that the bridge is no
+   longer bounded by the kernel, which is why no tool that takes a path from the
+   model may run inside it.
+
+What the bridge spawns, and under which policy:
+
+- **tools** — every **external process** the bridge runs (the ``shell`` and
+  ``grep`` tools and the hooks) runs under caged with the system trees, the
   knowledge-base locations (``~/.cache/llm-bridge`` read-only,
-  ``~/.local/share/llm-bridge`` writable), the log file (that file only, never
-  its directory) and network access (the bridge must reach the LLM API). It
-  does **not** grant the projects: where they live is the caller's business, so
-  the directories the bridge will work on have to be passed with
-  ``-sandbox-rw`` (the ceiling is frozen at startup while the project changes at
-  runtime via ``set_cwd``). When the bridge is already sandboxed at launch (the
-  client started it through caged), the re-exec is skipped, so the layers do not
-  duplicate.
-- **tools** — every **external process** the bridge spawns (the ``shell`` and
-  ``grep`` tools and the hooks) runs under caged with the **same filesystem
-  policy** as the bridge (minus the log file), so a tool works on the same
-  projects and knowledge base the bridge does. What a tool is denied, then, is
-  the environment (no API keys: only caged's small base set is inherited), the
-  IPC (unix sockets and SysV IPC) and the network. The filesystem tools
-  (``read``, ``write``, ``glob``, ``search_replace``) run in the **llm-tools**
-  helper under this same policy, not inside the bridge: the path the model
-  asked for never reaches a syscall in the bridge process. ``llm-tools`` is a
-  second binary next to the bridge (override with ``-tools-bin``); a missing
-  one is a startup error, never a silent fallback to running the tools
-  in-process.
+  ``~/.local/share/llm-bridge`` writable) and whatever ``-sandbox-ro`` /
+  ``-sandbox-rw`` added. The projects are **not** granted by default: where they
+  live is the caller's business, so the directories the bridge will work on have
+  to be passed with ``-sandbox-rw`` (the policy is frozen at startup while the
+  project changes at runtime via ``set_cwd``). A tool is denied the environment
+  (no API keys: only caged's small base set is inherited), the IPC (unix sockets
+  and SysV IPC) and the network. The filesystem tools (``read``, ``write``,
+  ``glob``, ``search_replace``) run in the **llm-tools** helper under this same
+  policy, not inside the bridge: the path the model asked for never reaches a
+  syscall in the bridge process. ``llm-tools`` is a second binary next to the
+  bridge (override with ``-tools-bin``); a missing one is a startup error, never
+  a silent fallback to running the tools in-process.
 - **curl** — the one tool with network access, and the only one that does
   **not** get the shared filesystem policy. It runs under its own caged policy
   with the system trees and nothing else (no projects, no home, no knowledge
@@ -217,18 +224,17 @@ installing it): a missing binary is a **startup error**, never a silent
 fallback to unsandboxed execution.
 
 ``--disable-sandbox``
-    Turn both layers off (nothing is sandboxed).
+    Turn the sandbox off (no tool runs under caged).
 
 ``--caged-bin <path>``
     Path of the `caged binary <https://docs.poraodojuca.dev/caged>`_. Defaults
     to ``$CAGED_BIN`` and then ``$PATH``.
 
 ``--sandbox-ro`` / ``--sandbox-rw`` (repeatable)
-    Extra read-only / read-write paths, for the bridge **and** for the tools
-    (they share the filesystem policy). The projects root belongs here: without
-    ``-sandbox-rw ~/mysrc`` neither the bridge nor the tools can read or write
-    any project (and the knowledge base of a project cannot be stored). On a Go
-    project, ``-sandbox-rw ~/.cache/go-build`` (the ``GOCACHE``) and
+    Extra read-only / read-write paths for the tool policies. The projects
+    root belongs here: without ``-sandbox-rw ~/mysrc`` the tools cannot read or
+    write any project (and the knowledge base of a project cannot be stored).
+    On a Go project, ``-sandbox-rw ~/.cache/go-build`` (the ``GOCACHE``) and
     ``-sandbox-rw ~/go/pkg/mod`` (the module cache; writable only really needed
     for ``go get``) are what ``go build``/``go test`` need inside the sandbox.
 

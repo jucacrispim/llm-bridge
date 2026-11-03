@@ -73,15 +73,15 @@ func TestEnsureTempDirEmpty(t *testing.T) {
 	}
 }
 
-// TestSharedPathsGrantsTempDir checks the temp directory is in the read-write
-// list, which is what both layers (ceiling and tools) share.
-func TestSharedPathsGrantsTempDir(t *testing.T) {
+// TestToolPathsGrantsTempDir checks the temp directory is in the read-write
+// list of the tool policy.
+func TestToolPathsGrantsTempDir(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "llm-bridge")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	c := &sandboxConfig{tmpDir: dir}
-	ro, rw := c.sharedPaths()
+	ro, rw := c.toolPaths()
 
 	if !contains(rw, dir) {
 		t.Errorf("temp dir %q not granted read-write: %v", dir, rw)
@@ -94,15 +94,15 @@ func TestSharedPathsGrantsTempDir(t *testing.T) {
 	}
 }
 
-// TestSharedPathsMissingTempDirFiltered documents the ordering assumption:
-// sharedPaths lists the temp directory unconditionally and existing() drops it
+// TestToolPathsMissingTempDirFiltered documents the ordering assumption:
+// toolPaths lists the temp directory unconditionally and existing() drops it
 // when it is absent (caged exits 125 on a path it cannot open). validate()
 // creates it before anything else, so in the real flow it is always there.
-func TestSharedPathsMissingTempDirFiltered(t *testing.T) {
+func TestToolPathsMissingTempDirFiltered(t *testing.T) {
 	c := &sandboxConfig{tmpDir: filepath.Join(t.TempDir(), "missing")}
-	_, rw := c.sharedPaths()
+	_, rw := c.toolPaths()
 	if !contains(rw, c.tmpDir) {
-		t.Errorf("sharedPaths should list the temp dir unconditionally: %v", rw)
+		t.Errorf("toolPaths should list the temp dir unconditionally: %v", rw)
 	}
 	if contains(existing(rw), c.tmpDir) {
 		t.Errorf("a missing temp dir should be filtered out: %v", existing(rw))
@@ -146,53 +146,6 @@ func TestTempEnvEmpty(t *testing.T) {
 	}
 }
 
-// TestReexecEnvOverridesTempVars checks the re-executed bridge gets the temp
-// block pointing at the granted directory, replacing whatever the parent
-// exported (an inherited TMPDIR=/tmp would point at a denied path), while the
-// rest of the environment survives untouched.
-func TestReexecEnvOverridesTempVars(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "llm-bridge")
-	parent := []string{
-		"FOO=bar",
-		"TMPDIR=/tmp",
-		"GOTMPDIR=/tmp",
-		"TMP=/tmp",
-		"TEMP=/tmp",
-		"TMPDIR_OLD=/tmp", // a different variable, must survive
-		sandboxedEnv + "=0",
-	}
-	env := reexecEnv(parent, dir)
-
-	if !contains(env, "FOO=bar") {
-		t.Errorf("inherited variable lost: %v", env)
-	}
-	if !contains(env, "TMPDIR_OLD=/tmp") {
-		t.Errorf("lookalike variable was dropped: %v", env)
-	}
-	if contains(env, "TMPDIR=/tmp") || contains(env, "GOTMPDIR=/tmp") ||
-		contains(env, "TMP=/tmp") || contains(env, "TEMP=/tmp") {
-		t.Errorf("parent temp variables were not replaced: %v", env)
-	}
-	for _, name := range tempEnvNames {
-		want := name + "=" + dir
-		if n := count(env, want); n != 1 {
-			t.Errorf("%q appears %d times, want 1: %v", want, n, env)
-		}
-	}
-	if n := count(env, sandboxedEnv+"=1"); n != 1 {
-		t.Errorf("guard appears %d times: %v", n, env)
-	}
-}
-
-// TestReexecEnvKeepsParentTempVarsWithoutFlag checks that with no temp dir
-// configured (empty -sandbox-tmp) the parent's variables are left alone.
-func TestReexecEnvKeepsParentTempVarsWithoutFlag(t *testing.T) {
-	env := reexecEnv([]string{"TMPDIR=/tmp"}, "")
-	if !contains(env, "TMPDIR=/tmp") {
-		t.Errorf("parent TMPDIR should survive: %v", env)
-	}
-}
-
 // fakeCagedPath returns the path of a stub caged binary: enough for
 // sandboxConfig.binary(), which only resolves the path.
 func fakeCagedPath(t *testing.T) string {
@@ -212,17 +165,6 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
-}
-
-// count returns how many entries of list equal s.
-func count(list []string, s string) int {
-	n := 0
-	for _, v := range list {
-		if strings.TrimSpace(v) == s {
-			n++
-		}
-	}
-	return n
 }
 
 // TestToolSandboxHasNoNetwork checks the shell/grep/hooks sandbox has no network
@@ -383,29 +325,6 @@ func fakeToolsBin(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
-}
-
-// TestCeilingGrantsToolBin covers the case that only shows up at runtime: the
-// tools are children of the bridge, so they inherit the ceiling. An -tools-bin
-// outside the bridge's own directory would be denied at exec time unless the
-// ceiling grants it too.
-func TestCeilingGrantsToolBin(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "elsewhere", "llm-tools")
-	if err := os.MkdirAll(filepath.Dir(bin), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	c := &sandboxConfig{tmpDir: t.TempDir(), toolBin: bin}
-	p, err := c.ceilingPolicy("/usr/bin/llm-bridge", "/usr/bin/caged")
-	if err != nil {
-		t.Fatalf("ceilingPolicy: %v", err)
-	}
-	want := filepath.Dir(bin)
-	for _, ro := range p.ReadOnly {
-		if ro == want {
-			return
-		}
-	}
-	t.Errorf("the ceiling does not grant the llm-tools directory %q (read-only: %v)", want, p.ReadOnly)
 }
 
 // TestValidateRequiresToolbox pins the startup contract: a missing helper is an

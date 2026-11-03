@@ -4,18 +4,23 @@ Changelog
 Unreleased
 ----------
 
-The bridge no longer opens a path the model chose. ``read``, ``write``,
-``glob`` and ``search_replace`` moved out of the bridge process into
-``llm-tools``, a second binary that the bridge runs under ``caged`` with the
-tool policy.
+The bridge no longer re-executes itself under caged. Every process it starts
+gets exactly one policy: the bridge runs unconfined, and each tool is a caged
+child with the policy built for it.
 
-Why: those four tools used to run in-process (``os.ReadFile``/``os.WriteFile``),
-so the only thing bounding the path the model asked for was the bridge's own
-ceiling. That made the bridge a privileged process — and, because Landlock and
-seccomp are inherited, every external process the bridge spawned ran under two
-stacked policies, which is what blocks giving the tools their own namespaces
-(a user namespace needs ``/proc/<self>/uid_map``, which cannot be granted from
-above and must not be opened to the model).
+Why: the "ceiling" made the bridge a privileged process, and — because Landlock
+and seccomp are inherited — every external process it spawned ran under two
+stacked policies. That is what blocks giving a tool its own namespace: caged's
+namespace support has to write ``/proc/self/uid_map`` during setup, and from
+inside a ceiling that file cannot be granted (a Landlock rule is per inode, and
+the grant resolves to the ceiling's own ``uid_map``) nor opened to the model
+(``/proc/<pid>/environ`` of the bridge carries the API keys). One policy per
+process is what makes namespaces possible at all.
+
+The trade is explicit: the bridge itself is no longer bounded by the kernel. The
+invariant that keeps that honest is that **no tool may open a path the model
+chose inside the bridge process** — which is why the four filesystem tools moved
+to ``llm-tools`` in the same release.
 
 Breaking changes
 ~~~~~~~~~~~~~~~~
@@ -29,6 +34,12 @@ Breaking changes
   binary fails loudly instead of answering requests it does not understand.
   With ``-disable-sandbox`` there is no policy to run the helper under, so the
   filesystem tools stay in-process.
+- The bridge is **no longer confined at startup**: ``LLM_BRIDGE_SANDBOXED`` and
+  the re-exec are gone, ``-logfile`` is opened by the bridge itself (there is no
+  longer a policy that has to grant it before the fact), and the log file is not
+  part of any tool policy. A launch under an outer sandbox (the client wrapping
+  the bridge in caged) still works, but the tools are then nested under that
+  outer policy — the two layers are no longer managed by the bridge.
 
 Changed
 ~~~~~~~

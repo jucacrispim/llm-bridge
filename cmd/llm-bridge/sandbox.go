@@ -21,21 +21,25 @@ package main
 
 // notest
 
-// Sandboxing is ON by default and lives in two layers, because Landlock
-// rulesets stack by intersection (a child policy can only tighten the
-// parent's):
+// Sandboxing is ON by default and gives every process the bridge starts exactly
+// one policy: the bridge itself runs unconfined, and each tool it spawns is a
+// caged child with the policy built for it.
 //
-//   - ceiling: the bridge re-executes itself under caged at startup.
-//     Everything it does — reading the project, writing the KB, talking to the
-//     LLM over HTTPS — must fit the ceiling.
-//   - tools: every external process the bridge spawns (the shell/grep tools
-//     and hooks) runs under the same filesystem policy as the bridge, minus the
-//     log file, and with no environment, no IPC and no network. Landlock
-//     intersects the two, so nothing here has to know about the ceiling.
+// It used to be two layers — the bridge re-executed itself under a loose
+// "ceiling" and the tools ran under a stricter one, Landlock intersecting the
+// two. That is gone, for one reason: a process that is already confined cannot
+// give its child a namespace. caged's own namespace support needs
+// /proc/self/uid_map written during setup; from inside a ceiling that file
+// cannot be granted (Landlock rules are per inode, and the grant would resolve
+// to the ceiling's own uid_map) and must not be granted either (/proc/<pid>/
+// environ of the bridge carries the API keys). One policy per process is what
+// makes namespaces possible, and the price is that the bridge is no longer
+// bounded by the kernel itself — which is why no tool that takes a path from
+// the model may run inside it (see llm-tools).
 //
-// The split is deliberate: the filesystem policy is shared (a tool works on the
-// projects, so it needs what the bridge needs), while the environment (API
-// keys), the IPC and the network are what the tools are denied.
+// The filesystem policy is shared in spirit (a tool works on the projects, so
+// it needs what the bridge needs), while the environment (API keys), the IPC
+// and the network are what the tools are denied.
 //
 // The one exception is the curl tool: it is the ONLY tool with network access,
 // and it pays for it with a much narrower filesystem policy. curl runs under its
@@ -46,11 +50,10 @@ package main
 // port allowlist (and, optionally, a host allowlist enforced by the bridge)
 // bounds where it may go.
 //
-// -disable-sandbox turns both layers off. A missing caged binary is a startup
-// error rather than a silent fallback to unsandboxed execution.
+// -disable-sandbox turns it off. A missing caged binary is a startup error
+// rather than a silent fallback to unsandboxed execution.
 //
-// These defaults are a starting point; -sandbox-ro/-sandbox-rw extend both
-// layers at once.
+// These defaults are a starting point; -sandbox-ro/-sandbox-rw extend them.
 
 import (
 	"context"
@@ -61,7 +64,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"llm-bridge/sandbox"
@@ -73,15 +75,10 @@ import (
 // binary, not a slow one.
 const toolboxHandshakeTimeout = 5 * time.Second
 
-// sandboxedEnv marks the re-executed process so a nested launch (e.g. the
-// bridge started by the Emacs client through caged) does not stack another
-// identical layer.
-const sandboxedEnv = "LLM_BRIDGE_SANDBOXED"
-
-// defaultTempDir is the temporary directory the bridge and its tools use. /tmp
-// itself is NOT granted (any process could read another one's scratch files);
-// a dedicated directory gives programs that need a writable temp dir — go
-// build/test, mkstemp, gcc, git — a place that the policy actually allows.
+// defaultTempDir is the temporary directory the tools use. /tmp itself is NOT
+// granted (any process could read another one's scratch files); a dedicated
+// directory gives programs that need a writable temp dir — go build/test,
+// mkstemp, gcc, git — a place that the policy actually allows.
 const defaultTempDir = "/tmp/llm-bridge"
 
 // tempEnvNames are the environment variables that point at the temporary
@@ -103,13 +100,12 @@ var systemReadOnly = []string{"/usr", "/lib", "/lib64", "/bin", "/etc"}
 // sandboxConfig holds the sandbox command-line options.
 type sandboxConfig struct {
 	// disabled turns the whole sandbox off (-disable-sandbox). The sandbox is
-	// on by default: both layers (ceiling and tools) are always applied
-	// together.
+	// on by default: every tool the bridge spawns runs under caged.
 	disabled bool
 	// cagedBin is the path of the caged binary (empty: $CAGED_BIN, then
 	// $PATH).
 	cagedBin string
-	// ro/rw extend the read-only/read-write lists shared by both layers.
+	// ro/rw extend the read-only/read-write lists of the tool policies.
 	ro []string
 	rw []string
 	// curl exposes the curl tool, the only tool with network access.
@@ -128,23 +124,20 @@ type sandboxConfig struct {
 	// the curl tool has it now.
 	legacyNetwork bool
 	legacyPorts   []int
-	// logFile is the bridge log file, granted read+write to the ceiling as a
-	// single file (never its directory).
-	logFile string
 	// toolsBin is the llm-tools binary (empty: next to the bridge, then
 	// $PATH). It runs the filesystem tools out of process.
 	toolsBin string
 	// toolBin is toolsBin as resolved by validate(): absolute, verified and
 	// handshake-checked. Empty when the sandbox is off.
 	toolBin string
-	// tmpDir is the temporary directory granted read+write to both layers and
+	// tmpDir is the temporary directory granted read-write to the tools and
 	// exported as TMPDIR/GOTMPDIR/TMP/TEMP (default defaultTempDir).
 	tmpDir string
 }
 
 // binary resolves the caged binary: the -caged-bin flag, then $CAGED_BIN, then
-// $PATH. It returns an absolute path, since the ceiling has to grant access to
-// the binary's directory.
+// $PATH. It returns an absolute path, since a policy has to grant access to the
+// binary's directory.
 func (c *sandboxConfig) binary() (string, error) {
 	path := c.cagedBin
 	if path == "" {
@@ -175,8 +168,6 @@ func (c *sandboxConfig) toolsBinary() (string, error) {
 	if c.toolsBin != "" {
 		return filepath.Abs(c.toolsBin)
 	}
-	// os.Executable reads /proc, which the ceiling does not grant: this has to
-	// run before the re-exec (validate does).
 	self, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("resolve own executable: %w", err)
@@ -207,15 +198,14 @@ func existing(paths []string) []string {
 	return out
 }
 
-// sharedPaths returns the read-only and read-write paths used by BOTH layers:
-// the system trees, the knowledge-base locations (assets read-only, per-project
-// data read-write) and whatever -sandbox-ro/-sandbox-rw added.
+// toolPaths returns the read-only and read-write paths of the shell/grep/hooks
+// policy: the system trees, the knowledge-base locations (assets read-only,
+// per-project data read-write) and whatever -sandbox-ro/-sandbox-rw added.
 //
-// No project directory is granted: the ceiling is frozen at startup while the
-// project changes at runtime (set_cwd), so whoever starts the bridge passes the
-// projects root with -sandbox-rw. The tools inherit it from this same list,
-// since they work on exactly the directories the bridge works on.
-func (c *sandboxConfig) sharedPaths() (ro, rw []string) {
+// No project directory is granted by default: the project changes at runtime
+// (set_cwd), so whoever starts the bridge passes the projects root with
+// -sandbox-rw.
+func (c *sandboxConfig) toolPaths() (ro, rw []string) {
 	home, _ := os.UserHomeDir()
 	ro = append([]string{}, systemReadOnly...)
 	// /dev/urandom is read-only on purpose: reading a character device needs
@@ -243,10 +233,9 @@ func (c *sandboxConfig) sharedPaths() (ro, rw []string) {
 		// Per-project knowledge bases (data.json) and the bridge's own config.
 		rw = append(rw, filepath.Join(home, ".local", "share", "llm-bridge"))
 	}
-	// The temp dir is writable by both layers: the tools run go build/test,
-	// mkstemp and friends, and the bridge itself may use os.TempDir(). It is
-	// created before the re-exec (see ensureTempDir), so it exists by the time
-	// caged opens it.
+	// The temp dir is writable by the tools: they run go build/test, mkstemp
+	// and friends. It is created at startup (see ensureTempDir), so it exists
+	// by the time caged opens it.
 	if c.tmpDir != "" {
 		rw = append(rw, c.tmpDir)
 	}
@@ -254,12 +243,10 @@ func (c *sandboxConfig) sharedPaths() (ro, rw []string) {
 	return ro, rw
 }
 
-// ensureTempDir creates the temporary directory before the re-exec, for the
-// same reason as ensureLogFile: caged opens every granted path with O_PATH when
-// it builds the sandbox, so a missing one makes it fail with exit 125. It is
-// also what makes the tools work when the bridge was already launched inside a
-// sandbox (LLM_BRIDGE_SANDBOXED=1, no re-exec): without the directory the first
-// shell/grep call would fail as a setup error.
+// ensureTempDir creates the temporary directory at startup: caged opens every
+// granted path with O_PATH when it builds a policy, so a missing one makes it
+// fail with exit 125 (and the first shell/grep call would fail as a setup
+// error).
 //
 // 0700 on purpose: it is this user's scratch space, and a world-writable
 // directory in /tmp would let another user plant files (or symlinks) there.
@@ -276,9 +263,8 @@ func (c *sandboxConfig) ensureTempDir() error {
 }
 
 // tempEnv returns the environment entries that point every temporary-directory
-// convention at dir. It is used for the re-executed bridge (whose env is
-// inherited) and for the tools (which get caged's base env, with no TMPDIR at
-// all, so without this a tool would fall back to /tmp and be denied).
+// convention at dir. The tools get caged's base env, with no TMPDIR at all, so
+// without this a tool would fall back to /tmp and be denied.
 func tempEnv(dir string) []string {
 	if dir == "" {
 		return nil
@@ -290,146 +276,16 @@ func tempEnv(dir string) []string {
 	return env
 }
 
-// isTempEnv reports whether kv sets one of the temporary-directory variables.
-func isTempEnv(kv string) bool {
-	for _, name := range tempEnvNames {
-		if strings.HasPrefix(kv, name+"=") {
-			return true
-		}
-	}
-	return false
-}
-
-// ensureLogFile creates the log file (and its directory) before the re-exec:
-// caged opens every granted path with O_PATH when it builds the sandbox, so a
-// missing file makes it fail with exit 125. The descriptor itself does not
-// survive the re-exec (caged closes everything above stderr); the file only has
-// to exist so the sandboxed bridge can reopen it.
-func ensureLogFile(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create log directory: %w", err)
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return fmt.Errorf("create log file: %w", err)
-	}
-	return f.Close()
-}
-
-// ceilingPolicy builds the policy the whole bridge runs under: the shared paths
-// plus the three binaries it must be able to execute and the log file, plus
-// network access (the bridge must reach the LLM API).
-func (c *sandboxConfig) ceilingPolicy(self, caged string) (sandbox.Policy, error) {
-	ro, rw := c.sharedPaths()
-	ro = append(ro, filepath.Dir(self), filepath.Dir(caged))
-	// The llm-tools directory is granted here too, even though the tool policy
-	// grants it as well: the tool is a child of the bridge, so it inherits this
-	// ceiling, and without it an -tools-bin outside the bridge's own directory
-	// would fail to exec inside the nested sandbox.
-	if c.toolBin != "" {
-		ro = append(ro, filepath.Dir(c.toolBin))
-	}
-
-	// The log file is granted as a single file: opening an existing file for
-	// append only needs write permission on the file, not on its directory,
-	// and granting the directory (e.g. /tmp) would be far too broad. Only the
-	// ceiling gets it — the tools have no business writing the bridge's log.
-	if c.logFile != "" {
-		if err := ensureLogFile(c.logFile); err != nil {
-			return sandbox.Policy{}, err
-		}
-		rw = append(rw, c.logFile)
-	}
-
-	p := sandbox.Policy{
-		ReadOnly:  existing(ro),
-		ReadWrite: existing(rw),
-		// The bridge needs the network: it talks to the LLM API over HTTPS.
-		// The TCP port is not pinned because endpoints are configurable
-		// (DEEPSEEK_URL/GOOGLE_URL, proxies, local servers).
-		AllowNetworkSockets: true,
-		ConnectTCP:          true,
-		// The environment carries the API keys: keep it. The tools do not
-		// inherit it (their policy has no KeepEnv).
-		KeepEnv: true,
-	}
-	if err := p.Validate(); err != nil {
-		return sandbox.Policy{}, err
-	}
-	return p, nil
-}
-
-// enterCeiling re-executes the bridge under caged (the outer layer). It must
-// run before the log file is opened and before any goroutine starts: caged
-// closes every inherited descriptor above stderr, and os.Executable() has to
-// be resolved while /proc is still readable (the ceiling does not grant it).
-func (c *sandboxConfig) enterCeiling() error {
-	if c.disabled {
-		return nil
-	}
-	if os.Getenv(sandboxedEnv) == "1" {
-		// Already inside a sandbox (e.g. launched by the client through
-		// caged): stacking another layer would only duplicate it.
-		return nil
-	}
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve own executable: %w", err)
-	}
-	caged, err := c.binary()
-	if err != nil {
-		return err
-	}
-	policy, err := c.ceilingPolicy(self, caged)
-	if err != nil {
-		return err
-	}
-	argv := append(policy.Args(), "--", self)
-	argv = append(argv, os.Args[1:]...)
-	// syscall.Exec replaces this process: same pid, same stdio pipes, so the
-	// client's JSON-lines protocol is unaffected.
-	return syscall.Exec(caged, append([]string{caged}, argv...), reexecEnv(os.Environ(), c.tmpDir))
-}
-
-// reexecEnv returns the environment for the re-executed bridge: this process's
-// own environment plus the guard, so nothing the parent exported is lost.
-//
-// The temporary-directory variables are the exception: they are set from tmpDir
-// (replacing whatever the parent exported), because they have to point at the
-// one temp directory the ceiling grants — an inherited TMPDIR=/tmp would point
-// at a path the sandbox denies.
-//
-// caged's own switches travel here too and are forwarded as the parent set
-// them, never decided here: when the launcher (e.g. the Emacs client) exports
-// CAGED_DISABLE_WARNINGS, caged inherits it and stays quiet about the Landlock
-// ABI features the kernel lacks — that warning goes to stderr and a client
-// waiting for the `ready` event may take it for a launch failure.
-func reexecEnv(environ []string, tmpDir string) []string {
-	env := make([]string, 0, len(environ)+len(tempEnvNames)+1)
-	for _, kv := range environ {
-		if strings.HasPrefix(kv, sandboxedEnv+"=") {
-			continue
-		}
-		if tmpDir != "" && isTempEnv(kv) {
-			continue
-		}
-		env = append(env, kv)
-	}
-	env = append(env, tempEnv(tmpDir)...)
-	return append(env, sandboxedEnv+"=1")
-}
-
 // toolSandbox builds the sandbox for the external processes the bridge spawns
 // (shell, grep, hooks). It returns nil when the sandbox is off, which means
 // "run the tools as before".
 //
-// A tool gets the same filesystem policy as the bridge (so it can work on the
-// projects and on the knowledge base) but not the log file, and it is denied
-// what the bridge is not: the environment (no KeepEnv: caged's small base set
-// only, so the API keys never reach it), the IPC (unix sockets and SysV IPC are
-// denied by default) and the network (seccomp denies the socket families: no
-// flag turns it on for these tools — network access belongs to the curl tool
-// alone, see curlSandbox).
+// A tool gets a filesystem policy that lets it work on the projects and on the
+// knowledge base, and it is denied the environment the bridge holds (no
+// KeepEnv: caged's small base set only, so the API keys never reach it), the
+// IPC (unix sockets and SysV IPC are denied by default) and the network
+// (seccomp denies the socket families: no flag turns it on for these tools —
+// network access belongs to the curl tool alone, see curlSandbox).
 //
 // The one thing added to the environment is the temporary-directory block:
 // caged's base set has no TMPDIR, so without it programs that need a scratch
@@ -443,7 +299,7 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	ro, rw := c.sharedPaths()
+	ro, rw := c.toolPaths()
 	// The llm-tools binary has to be readable and executable inside this
 	// policy: the filesystem tools run as it, so without the grant every
 	// read/write/glob/search_replace would fail to exec.
@@ -558,10 +414,9 @@ func (c *sandboxConfig) validate() error {
 	if err := requireReportFD(bin); err != nil {
 		return err
 	}
-	// Resolved and checked here, before the re-exec, for the same reason as
-	// the caged binary: a missing or mismatched helper must stop the bridge at
-	// startup, never degrade a tool call later. It also needs /proc (see
-	// toolsBinary), which the ceiling does not grant.
+	// Resolved and checked here, at startup, for the same reason as the caged
+	// binary: a missing or mismatched helper must stop the bridge at startup,
+	// never degrade a tool call later.
 	toolBin, err := c.toolsBinary()
 	if err != nil {
 		return err
@@ -587,12 +442,11 @@ func (c *sandboxConfig) validate() error {
 }
 
 // registerSandboxFlags registers the sandbox flags and returns the config they
-// fill. Logging is not wired yet at this point (the re-exec happens before the
-// log file is opened), so errors go to stderr.
+// fill. Logging is not wired yet at this point, so errors go to stderr.
 func registerSandboxFlags() *sandboxConfig {
 	c := &sandboxConfig{}
 	flag.BoolVar(&c.disabled, "disable-sandbox", false,
-		"turn the process sandbox off; by default the bridge re-executes itself under caged (ceiling) and runs the shell/grep tools and hooks under a stricter caged policy (no network)")
+		"turn the process sandbox off; by default the bridge runs the shell/grep tools and hooks under caged (no network, no IPC, no inherited environment)")
 	flag.StringVar(&c.cagedBin, "caged-bin", "",
 		"path of the caged binary (default: $CAGED_BIN, then $PATH)")
 	flag.StringVar(&c.toolsBin, "tools-bin", "",

@@ -12,11 +12,11 @@ SCRIPTS_DIR=./scripts/
 
 .PHONY: build # - Creates the binary under the build/ directory
 build:
-	$(GOBUILD) $(OUTFLAG) ./cmd/bridge
+	$(GOBUILD) $(OUTFLAG) ./cmd/llm-bridge
 
 .PHONY: build-kb # - Build with knowledge base (ONNX) enabled
 build-kb:
-	CGO_ENABLED=1 CGO_LDFLAGS="-L$(HOME)/.cache/llm-bridge/libtokenizers" $(GOBUILD) -tags knowledge_onnx $(OUTFLAG) ./cmd/bridge
+	CGO_ENABLED=1 CGO_LDFLAGS="-L$(HOME)/.cache/llm-bridge/libtokenizers" $(GOBUILD) -tags knowledge_onnx $(OUTFLAG) ./cmd/llm-bridge
 
 .PHONY: test # - Run all tests
 test:
@@ -51,13 +51,13 @@ run:
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: install # - Copy the binary to the path
+.PHONY: install # - Copy the binary(ies) to the path
 install: build
-	go install
+	$(GOCMD) install ./cmd/...
 
-.PHONY: uninstall # - Remove the binary from path
+.PHONY: uninstall # - Remove the binary(ies) from path
 uninstall:
-	go clean -i llm-bridge/$(BIN_NAME)
+	$(GOCLEAN) -i ./cmd/...
 
 
 all: build build-kb test install

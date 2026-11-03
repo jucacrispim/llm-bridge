@@ -115,7 +115,7 @@ nothing is embedded again.
 Wiring
 ------
 
-``cmd/bridge`` resolves the base directory and the embedder and passes a
+``cmd/llm-bridge`` resolves the base directory and the embedder and passes a
 ``-kb-scope`` (``global`` by default, or ``project``/``both``) to
 ``server.RunWithKnowledgeBase``. The server builds the ``Set`` for the
 effective scope in ``loadKB``: on ``set_cwd`` and whenever a prompt changes the

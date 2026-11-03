@@ -10,7 +10,7 @@ Package layout
 
 The bridge is organized into focused packages:
 
-``cmd/bridge``
+``cmd/llm-bridge``
     The executable entry point. Parses the CLI flags (``--provider``,
     ``--model``, ``--thinking``, ``--reasoning-effort``, ``-prune``,
     ``-populate-project-kb``, etc.), builds the provider registry, wires the
@@ -75,7 +75,7 @@ which funnel into the single ``run`` function:
   global system prompt.
 - ``RunWithOptions(...)`` — adds the prune flags.
 - ``RunWithKnowledgeBase(...)`` — adds the knowledge base (base dir, scope +
-  embedder). This is what ``cmd/bridge/main.go`` calls.
+  embedder). This is what ``cmd/llm-bridge/main.go`` calls.
 
 Every variant reads from ``r`` and writes to ``w``, so the bridge is easily
 testable with in-memory readers/writers.

@@ -9,7 +9,7 @@ Directory layout
 The bridge is organized into focused packages (see :doc:`architecture` for how
 they fit together):
 
-``cmd/bridge``
+``cmd/llm-bridge``
     The executable entry point. Parses the CLI flags, builds the provider
     registry, wires the knowledge base and logging, and calls
     ``server.RunWithKnowledgeBase``. Also implements the standalone

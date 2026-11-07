@@ -60,6 +60,21 @@ Changed
   which made the message look like a sandbox problem; ``flag`` rejects it while
   parsing, before anything is validated.
 
+Fixed
+~~~~~
+
+- **The ``shell`` risk label no longer fires on ordinary commands.** The
+  markers in ``tools.Risk`` were matched as plain substrings, and most of them
+  are two or three letters long: ``nc `` matched inside ``func `` and ``sync ``,
+  so ``go test -run TestFunc`` was reported as **high** risk, and ``| sh``
+  matched inside ``| shellcheck``. They are now pre-compiled regular expressions
+  anchored on word boundaries (``\bnc\b``, ``\bsu\s+-``, …), flag clusters are
+  written as ``-[a-z]*r`` so ``rm -rf``/``rm -fr``/``rm -rfv`` all match without
+  enumerating orderings, and the pipe-to-shell shape is a single expression
+  whose trailing ``\b`` keeps ``| shellcheck`` and ``| ssh`` out. The label
+  stays advisory — it never blocks a call — but a false positive now costs
+  nothing instead of drowning the real ones.
+
 v0.6.0
 ------
 

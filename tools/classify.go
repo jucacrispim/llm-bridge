@@ -32,6 +32,7 @@ package tools
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -178,43 +179,78 @@ func Segments(command string) []string {
 // there. The list is deliberately small and readable: it is a hint for the
 // human (and for a client that may want a typed confirmation), never a verdict,
 // and a false positive only costs attention.
+//
+// The markers are regular expressions anchored on word boundaries, not plain
+// substrings, because most of them are two or three letters long. Matching
+// "nc " as a substring flagged every command containing "func " and "sync ",
+// so `go test -run TestFunc` came out as high risk — the label stopped carrying
+// information exactly where it was needed most. `\bnc\b` still catches
+// `nc -l 1234` and leaves `func`, `sync`, `TestSync` and `encore` alone.
+//
+// Flag clusters are written as `-[a-z]*r` so that `rm -rf`, `rm -fr`, `rm -r`
+// and `rm -rfv` all match (the segment is lowercased first, so `-R` counts too)
+// without listing every ordering.
 var riskPatterns = []struct {
 	level   string
-	markers []string
+	markers []*regexp.Regexp
 }{
-	{"high", []string{
-		"rm -rf", "rm -fr", "rm -r", "mkfs", "dd of=", "shred ",
-		"chmod -r", "chown -r", ":(){", "> /dev/sd", "git push",
-		"sudo ", "su -", "doas ", "shutdown", "reboot", "kill -9",
-		"curl ", "wget ", "nc ", "ncat ", "ssh ", "scp ", "rsync ",
-		"eval ", "base64 -d", "sh -c", "bash -c",
+	{"high", []*regexp.Regexp{
+		regexp.MustCompile(`\brm\s+-[a-z]*r`), // -r, -rf, -fr, -rfv
+		regexp.MustCompile(`\bmkfs`),
+		regexp.MustCompile(`\bdd\b.*\bof=`),
+		regexp.MustCompile(`\bshred\b`),
+		regexp.MustCompile(`\bch(mod|own)\s+-[a-z]*r`),
+		regexp.MustCompile(`:\(\)\{`),
+		regexp.MustCompile(`>\s*/dev/sd`),
+		regexp.MustCompile(`\bgit\s+push\b`),
+		regexp.MustCompile(`\bsudo\b`),
+		regexp.MustCompile(`\bsu\s+-`),
+		regexp.MustCompile(`\bdoas\b`),
+		regexp.MustCompile(`\bshutdown\b`),
+		regexp.MustCompile(`\breboot\b`),
+		regexp.MustCompile(`\bkill\s+-9\b`),
+		regexp.MustCompile(`\bcurl\b`),
+		regexp.MustCompile(`\bwget\b`),
+		regexp.MustCompile(`\bnc\b`),
+		regexp.MustCompile(`\bncat\b`),
+		regexp.MustCompile(`\bssh\b`),
+		regexp.MustCompile(`\bscp\b`),
+		regexp.MustCompile(`\brsync\b`),
+		regexp.MustCompile(`\beval\b`),
+		regexp.MustCompile(`\bbase64\s+-d\b`),
+		regexp.MustCompile(`\bsh\s+-c\b`),
+		regexp.MustCompile(`\bbash\s+-c\b`),
 	}},
-	{"medium", []string{
-		"git commit", "git checkout", "git reset", "npm publish",
-		"pip install", "go install", "make install", "docker ",
+	{"medium", []*regexp.Regexp{
+		regexp.MustCompile(`\bgit\s+commit\b`),
+		regexp.MustCompile(`\bgit\s+checkout\b`),
+		regexp.MustCompile(`\bgit\s+reset\b`),
+		regexp.MustCompile(`\bnpm\s+publish\b`),
+		regexp.MustCompile(`\bpip[0-9.]*\s+install\b`),
+		regexp.MustCompile(`\bgo\s+install\b`),
+		regexp.MustCompile(`\bmake\s+install\b`),
+		regexp.MustCompile(`\bdocker\b`),
 	}},
 }
 
 // pipeToShell matches `... | sh` / `| bash` / `| python`, the classic way to
-// turn downloaded text into code.
-var pipeToShell = []string{"| sh", "| bash", "| zsh", "| dash", "| python", "| perl", "| ruby", "| node"}
+// turn downloaded text into code. The trailing \b is what keeps `| shellcheck`
+// and `| ssh` out: without it `| sh` matched both.
+var pipeToShell = regexp.MustCompile(`\|\s*(sh|bash|zsh|dash|python[0-9.]*|perl|ruby|node)\b`)
 
 // Risk classifies a shell command as "high", "medium" or "low". command is the
 // original string (needed for the pipe-to-shell shape, which splitting on `|`
 // destroys) and segments the result of Segments.
 func Risk(command string, segments []string) string {
-	lower := strings.ToLower(command)
-	for _, marker := range pipeToShell {
-		if strings.Contains(lower, marker) {
-			return "high"
-		}
+	if pipeToShell.MatchString(strings.ToLower(command)) {
+		return "high"
 	}
 	level := "low"
 	for _, seg := range segments {
 		seg = strings.ToLower(seg)
 		for _, rule := range riskPatterns {
 			for _, marker := range rule.markers {
-				if strings.Contains(seg, marker) {
+				if marker.MatchString(seg) {
 					if rule.level == "high" {
 						return "high"
 					}

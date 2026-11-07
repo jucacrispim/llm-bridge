@@ -117,13 +117,6 @@ type sandboxConfig struct {
 	curlAnyPort bool
 	// curlHosts restricts the curl tool to these hosts (empty means any).
 	curlHosts []string
-	// legacyNetwork/legacyPorts are the removed -sandbox-network and
-	// -sandbox-connect-port flags: still parsed (so an old configuration gets
-	// a clear message instead of "flag provided but not defined") and rejected
-	// by validate. Giving the tools network access as a whole is gone: only
-	// the curl tool has it now.
-	legacyNetwork bool
-	legacyPorts   []int
 	// toolsBin is the llm-tools binary (empty: next to the bridge, then
 	// $PATH). It runs the filesystem tools out of process.
 	toolsBin string
@@ -498,9 +491,6 @@ func (c *sandboxConfig) validate() error {
 		return err
 	}
 	c.toolBin = toolBin
-	if c.legacyNetwork || len(c.legacyPorts) > 0 {
-		return fmt.Errorf("-sandbox-network and -sandbox-connect-port were removed: only the curl tool has network access now (use -curl, -curl-port, -curl-any-port and -curl-allow-host)")
-	}
 	for _, port := range c.curlPorts {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("-curl-port %d out of range 1..65535", port)
@@ -548,18 +538,6 @@ func registerSandboxFlags() *sandboxConfig {
 		"let the curl tool connect to any TCP port (default: only -curl-port, 443 and 80)")
 	flag.Func("curl-allow-host", "restrict the curl tool to this host (repeatable; a leading dot matches any subdomain; default: any host)", func(v string) error {
 		c.curlHosts = append(c.curlHosts, v)
-		return nil
-	})
-	// Removed flags, still parsed so an old configuration fails with a
-	// sentence instead of "flag provided but not defined".
-	flag.BoolVar(&c.legacyNetwork, "sandbox-network", false,
-		"removed: only the curl tool has network access now (use -curl/-curl-port)")
-	flag.Func("sandbox-connect-port", "removed: use -curl-port", func(v string) error {
-		port, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("invalid port %q: %w", v, err)
-		}
-		c.legacyPorts = append(c.legacyPorts, port)
 		return nil
 	})
 	return c

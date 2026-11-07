@@ -214,11 +214,13 @@ What the bridge spawns, and under which policy:
 
 .. note::
 
-   ``-sandbox-network`` and ``-sandbox-connect-port`` were **removed**: network
-   access is not a property of the tools in general anymore, only of the curl
-   tool. A configuration that still passes them fails at startup with a message
-   pointing at ``-curl``/``-curl-port``, instead of silently running without the
-   network it asked for.
+   ``-sandbox-network`` and ``-sandbox-connect-port`` were **removed** and are
+   no longer recognized: network access is not a property of the tools in
+   general anymore, only of the curl tool. A configuration that still passes
+   them fails at startup with ``flag provided but not defined`` (the flag
+   package's own error, exit status 2); replace them with ``-curl`` /
+   ``-curl-port``. The flags are deliberately not kept around as
+   "removed, use X instead" stubs.
 
 Because the sandbox is on by default, ``caged`` must be available (see its
 `documentation <https://docs.poraodojuca.dev/caged>`_ for building and

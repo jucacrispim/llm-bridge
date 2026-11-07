@@ -426,26 +426,6 @@ func TestValidateAcceptsCurlConfig(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsRemovedNetworkFlags covers the removal of
-// -sandbox-network/-sandbox-connect-port: an old configuration fails loudly at
-// startup instead of silently running without the network it asked for.
-func TestValidateRejectsRemovedNetworkFlags(t *testing.T) {
-	for name, c := range map[string]*sandboxConfig{
-		"sandbox-network":         {cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), legacyNetwork: true},
-		"sandbox-connect-port":    {cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), legacyPorts: []int{443}},
-		"both, only connect-port": {cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), legacyNetwork: true, legacyPorts: []int{443}},
-	} {
-		err := c.validate()
-		if err == nil {
-			t.Errorf("%s: expected an error", name)
-			continue
-		}
-		if !strings.Contains(err.Error(), "-curl-port") {
-			t.Errorf("%s: error should point at the replacement: %v", name, err)
-		}
-	}
-}
-
 // TestValidateRejectsBadCurlPort covers the range check of -curl-port.
 func TestValidateRejectsBadCurlPort(t *testing.T) {
 	for _, port := range []int{0, -1, 70000} {

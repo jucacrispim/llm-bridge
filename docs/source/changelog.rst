@@ -51,6 +51,14 @@ Changed
 - ``tools.IsFileTool`` names the tools the helper serves. ``shell``, ``grep``
   and ``curl`` are deliberately not among them: they exec external programs, so
   they have to be the sandboxed command itself.
+- **The removed flags are no longer stubs.** ``-sandbox-network`` and
+  ``-sandbox-connect-port`` were kept parsed since v0.6.0 only to fail with a
+  sentence pointing at ``-curl``/``-curl-port``; that shim is gone and the flags
+  are simply not defined anymore, so an old configuration now gets the ``flag``
+  package's own ``flag provided but not defined`` and exit status 2. The check
+  also ran late (after the ``caged`` probes and the ``llm-tools`` handshake),
+  which made the message look like a sandbox problem; ``flag`` rejects it while
+  parsing, before anything is validated.
 
 v0.6.0
 ------

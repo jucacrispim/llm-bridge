@@ -49,6 +49,29 @@ func TestPolicyArgs(t *testing.T) {
 			},
 		},
 		{
+			name:   "loopback only",
+			policy: Policy{LoopbackOnly: true},
+			want:   []string{"--loopback-only"},
+		},
+		{
+			// The combination the bridge emits for -sandbox-loopback-only: the
+			// families and the ports are released because the namespace is what
+			// bounds where a connection can go.
+			name: "loopback with any-port network",
+			policy: Policy{
+				LoopbackOnly:        true,
+				AllowNetworkSockets: true,
+				ConnectTCP:          true,
+				BindTCP:             true,
+			},
+			want: []string{
+				"--loopback-only",
+				"--allow-network-sockets",
+				"--allow-connect-tcp",
+				"--allow-bind-tcp",
+			},
+		},
+		{
 			name:   "connect tcp and bind tcp",
 			policy: Policy{ConnectTCP: true, BindTCP: true},
 			want:   []string{"--allow-connect-tcp", "--allow-bind-tcp"},

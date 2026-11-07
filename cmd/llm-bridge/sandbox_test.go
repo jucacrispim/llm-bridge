@@ -24,6 +24,7 @@ import (
 	"strings"
 	"testing"
 
+	"llm-bridge/sandbox"
 	"llm-bridge/tools"
 )
 
@@ -167,9 +168,11 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// TestToolSandboxHasNoNetwork checks the shell/grep/hooks sandbox has no network
-// at all: that is the curl tool's privilege, not a general one. It would show up
-// both in the policy (flags) and, if it leaked, in caged's argv.
+// TestToolSandboxHasNoNetwork checks the default shell/grep/hooks sandbox has no
+// network at all: that is the curl tool's privilege, not a general one.
+// -sandbox-loopback-only is the opt-in exception (TestToolSandboxLoopbackOnly),
+// and it still has no way out. It would show up both in the policy (flags) and,
+// if it leaked, in caged's argv.
 func TestToolSandboxHasNoNetwork(t *testing.T) {
 	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: t.TempDir()}
 	sb, err := c.toolSandbox()
@@ -182,6 +185,54 @@ func TestToolSandboxHasNoNetwork(t *testing.T) {
 	args := strings.Join(sb.Policy.Args(), " ")
 	if strings.Contains(args, "--allow-network-sockets") || strings.Contains(args, "--allow-connect") {
 		t.Errorf("tools argv grants network: %s", args)
+	}
+}
+
+// TestToolSandboxLoopbackOnly checks -sandbox-loopback-only is the one exception
+// to "the tools have no network", and that it is the whole package: the
+// namespace (the bound) plus the families and any-port connect/bind (without
+// which the namespace would have nothing to allow).
+func TestToolSandboxLoopbackOnly(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: t.TempDir(), loopback: true}
+	sb, err := c.toolSandbox()
+	if err != nil {
+		t.Fatalf("toolSandbox: %v", err)
+	}
+	p := sb.Policy
+	if !p.LoopbackOnly || !p.AllowNetworkSockets || !p.ConnectTCP || !p.BindTCP {
+		t.Fatalf("loopback policy is incomplete: %+v", p)
+	}
+	if len(p.ConnectPorts) > 0 || len(p.BindPorts) > 0 {
+		t.Errorf("port lists are meaningless with any-port on: %+v", p)
+	}
+	want := []string{
+		"--loopback-only",
+		"--allow-network-sockets",
+		"--allow-connect-tcp",
+		"--allow-bind-tcp",
+	}
+	args := sb.Policy.Args()
+	for _, flag := range want {
+		if !contains(args, flag) {
+			t.Errorf("%s missing from caged args: %v", flag, args)
+		}
+	}
+}
+
+// TestCurlSandboxIgnoresLoopback checks the curl tool does not inherit
+// -sandbox-loopback-only: a curl that can only reach its own loopback fetches
+// nothing, and the tool is bounded by its port rule instead.
+func TestCurlSandboxIgnoresLoopback(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), curl: true, loopback: true}
+	sb, err := c.curlSandbox()
+	if err != nil {
+		t.Fatalf("curlSandbox: %v", err)
+	}
+	if sb.Policy.LoopbackOnly {
+		t.Error("curl must keep its real network access")
+	}
+	if contains(sb.Policy.Args(), "--loopback-only") {
+		t.Errorf("curl args carry --loopback-only: %v", sb.Policy.Args())
 	}
 }
 
@@ -415,6 +466,74 @@ func TestRequireReportFDRejectsOldCaged(t *testing.T) {
 	}
 	if err := requireReportFD(fakeCagedWithReportFD(t)); err != nil {
 		t.Fatalf("new caged rejected: %v", err)
+	}
+}
+
+// fakeCagedFailing writes a stub caged that answers --help (so the startup
+// checks get past requireReportFD) and fails every real invocation the way the
+// real one does: a message on the report descriptor and exit 125 for a setup
+// that did not apply, or a message on stderr and exit 2 for an option it does
+// not know (an old caged).
+func fakeCagedFailing(t *testing.T, code int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "caged")
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in --help) echo 'usage: caged [--ro DIR] [--report-fd N] -- CMD'; exit 0;; esac\n"
+	if code == 125 {
+		script += "echo 'caged: error setting up the loopback network namespace' >&3\nexit 125\n"
+	} else {
+		script += "echo \"caged: unrecognized option '--loopback-only'\" >&2\nexit 2\n"
+	}
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestValidateProbesLoopback covers the happy path: -sandbox-loopback-only runs
+// the throwaway caged probe and passes when the namespace can be built.
+func TestValidateProbesLoopback(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), loopback: true}
+	if err := c.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+}
+
+// TestValidateRejectsBrokenLoopback pins the probe's reason to exist: a caged
+// that cannot build the namespace (AppArmor, unprivileged_userns_clone=0, the
+// bridge itself inside a cage) or that does not know the flag must stop the
+// bridge at startup, not turn every tool call into a *SetupError.
+func TestValidateRejectsBrokenLoopback(t *testing.T) {
+	for name, code := range map[string]int{
+		"setup failed (exit 125)":   sandbox.ExitSetupFailed,
+		"old caged (usage, exit 2)": sandbox.ExitUsage,
+	} {
+		c := &sandboxConfig{
+			cagedBin: fakeCagedFailing(t, code),
+			toolsBin: fakeToolsBin(t),
+			loopback: true,
+		}
+		err := c.validate()
+		if err == nil {
+			t.Errorf("%s: expected an error", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "network namespace") {
+			t.Errorf("%s: error should say what failed: %v", name, err)
+		}
+	}
+}
+
+// TestValidateSkipsProbeWithoutLoopback checks the probe only runs when the flag
+// is on: a caged that fails it must still be accepted otherwise.
+func TestValidateSkipsProbeWithoutLoopback(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedFailing(t, sandbox.ExitSetupFailed), toolsBin: fakeToolsBin(t)}
+	if err := c.validate(); err != nil {
+		t.Fatalf("validate without the flag must not probe: %v", err)
+	}
+	c.loopback = true
+	if err := c.validate(); err == nil {
+		t.Fatal("validate with the flag must run the probe")
 	}
 }
 

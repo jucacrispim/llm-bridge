@@ -133,6 +133,10 @@ type sandboxConfig struct {
 	// tmpDir is the temporary directory granted read-write to the tools and
 	// exported as TMPDIR/GOTMPDIR/TMP/TEMP (default defaultTempDir).
 	tmpDir string
+	// loopback gives the tools their own network namespace with only loopback
+	// up: they can talk to a server they start themselves, and to nothing
+	// else (-sandbox-loopback-only).
+	loopback bool
 }
 
 // binary resolves the caged binary: the -caged-bin flag, then $CAGED_BIN, then
@@ -284,13 +288,25 @@ func tempEnv(dir string) []string {
 // knowledge base, and it is denied the environment the bridge holds (no
 // KeepEnv: caged's small base set only, so the API keys never reach it), the
 // IPC (unix sockets and SysV IPC are denied by default) and the network
-// (seccomp denies the socket families: no flag turns it on for these tools —
-// network access belongs to the curl tool alone, see curlSandbox).
+// (seccomp denies the socket families by default; -sandbox-loopback-only
+// releases them inside a namespace whose only interface is loopback, and real
+// outbound access belongs to the curl tool alone, see curlSandbox).
 //
 // The one thing added to the environment is the temporary-directory block:
 // caged's base set has no TMPDIR, so without it programs that need a scratch
 // dir (go build/test, mkstemp, gcc, git) would fall back to /tmp, which the
 // policy denies.
+//
+// -sandbox-loopback-only is the single exception to "the tools have no
+// network", and it is a narrow one: the socket families are released (they have
+// to be, or seccomp denies socket(AF_INET) before anything else) together with
+// any-port connect and bind, but the process is in a network namespace that
+// contains only loopback. The bound is topological, not a filter: an address
+// outside 127.0.0.0/8 does not exist in there. That is the only way to say
+// "localhost only" — Landlock has no address field and seccomp cannot read the
+// sockaddr — and it is what a tool that starts a test server and talks to it in
+// the same command needs. It does not reach the curl sandbox: a loopback-only
+// curl could fetch nothing.
 func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 	if c.disabled {
 		return nil, nil
@@ -316,6 +332,16 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 		// KeepEnv, so the API keys stay out, but tools still get a writable
 		// scratch dir instead of falling back to a denied /tmp.
 		Env: tempEnv(c.tmpDir),
+	}
+	if c.loopback {
+		// The namespace is the bound: releasing the families and the ports is
+		// safe precisely because there is nowhere to go. Each tool run gets a
+		// fresh namespace, so a server started by one call is not reachable
+		// from the next.
+		p.LoopbackOnly = true
+		p.AllowNetworkSockets = true
+		p.ConnectTCP = true
+		p.BindTCP = true
 	}
 	return sandbox.New(caged, p)
 }
@@ -396,6 +422,45 @@ func requireReportFD(bin string) error {
 	return nil
 }
 
+// loopbackProbeTimeout bounds the startup probe of -sandbox-loopback-only.
+// caged's namespace setup is a handful of syscalls; anything slower than this
+// means it is not going to work at all.
+const loopbackProbeTimeout = 10 * time.Second
+
+// probeLoopback runs one throwaway command under --loopback-only, so the
+// namespace is built (and the command run) before the first tool call.
+//
+// The flag cannot be checked the way --report-fd is: a --help that lists
+// --loopback-only says nothing about whether this process can actually create a
+// namespace. unshare(CLONE_NEWUSER) fails with EPERM or EINVAL for reasons that
+// are all environmental (unprivileged_userns_clone=0, an AppArmor profile such
+// as the one Ubuntu 23.10+ ships, a bridge that is itself running inside another
+// cage), and the setup also needs to write /proc/self/uid_map. A bridge that
+// accepted the flag and then failed in every tool call would turn a startup
+// problem into a hundred *SetupErrors; this way it stops at startup, like a
+// missing binary.
+//
+// The exit status catches an old caged (unknown option: usage error, exit 2) and
+// the report descriptor catches a setup that did not apply (exit 125); both come
+// back as an error from Run.
+func probeLoopback(bin string) error {
+	sb, err := sandbox.New(bin, sandbox.Policy{
+		ReadOnly: existing(systemReadOnly),
+		// LoopbackOnly alone: the probe is about the namespace, and granting
+		// nothing it does not need keeps it from failing for another reason.
+		LoopbackOnly: true,
+	})
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), loopbackProbeTimeout)
+	defer cancel()
+	if _, err := sb.Run(ctx, "", "/bin/true"); err != nil {
+		return fmt.Errorf("-sandbox-loopback-only: caged %s could not build a private network namespace (it needs unshare(CLONE_NEWUSER), a writable /proc/self/uid_map and unshare(CLONE_NEWNET); a bridge that is itself running inside a cage cannot): %w", bin, err)
+	}
+	return nil
+}
+
 // validate resolves the caged binary early, so a missing or misspelled path
 // does not surface only when the first tool runs. With -disable-sandbox
 // nothing is resolved and the binary is not required.
@@ -413,6 +478,12 @@ func (c *sandboxConfig) validate() error {
 	}
 	if err := requireReportFD(bin); err != nil {
 		return err
+	}
+	// Checked by running it, not by reading --help: see probeLoopback.
+	if c.loopback {
+		if err := probeLoopback(bin); err != nil {
+			return err
+		}
 	}
 	// Resolved and checked here, at startup, for the same reason as the caged
 	// binary: a missing or mismatched helper must stop the bridge at startup,
@@ -453,6 +524,8 @@ func registerSandboxFlags() *sandboxConfig {
 		"path of the llm-tools binary, which runs the filesystem tools (read/write/glob/search_replace) under the tool sandbox (default: next to this binary, then $PATH)")
 	flag.StringVar(&c.tmpDir, "sandbox-tmp", defaultTempDir,
 		"temporary directory granted read-write to the bridge and the tools, exported as TMPDIR/GOTMPDIR/TMP/TEMP (created if missing; /tmp itself is not granted)")
+	flag.BoolVar(&c.loopback, "sandbox-loopback-only", false,
+		"give the tools their own network namespace with only loopback up: a tool can reach a server it starts itself (test servers, local ports) and nothing outside, so DNS does not resolve and no data leaves; the curl tool is unaffected")
 	flag.Func("sandbox-ro", "extra read-only path for the sandbox (bridge and tools; repeatable)", func(v string) error {
 		c.ro = append(c.ro, v)
 		return nil

@@ -53,6 +53,19 @@ type Policy struct {
 	// enough, e.g. the bridge log file; a directory is never needed for it.
 	ReadWrite []string
 
+	// LoopbackOnly gives the command its own network namespace, with loopback
+	// brought up and no route to anywhere else. It is topology, not a filter:
+	// an address outside 127.0.0.0/8 does not exist in there, so an outbound
+	// connection fails with ENETUNREACH instead of EACCES.
+	//
+	// On its own it changes nothing: it does not release the socket families,
+	// so seccomp still denies socket(AF_INET). It is meant to be combined with
+	// AllowNetworkSockets (and ConnectTCP/BindTCP), which is what makes
+	// "network access, but only to this sandbox's own loopback" expressible:
+	// caged's port rules and seccomp cannot say "localhost only" — Landlock has
+	// no address field and seccomp cannot read the sockaddr.
+	LoopbackOnly bool
+
 	// AllowNetworkSockets releases the socket families AF_INET, AF_INET6 and
 	// AF_NETLINK (denied by seccomp otherwise). Without it a process cannot
 	// create a TCP socket at all, no matter what the Landlock rules say.
@@ -136,6 +149,9 @@ func (p Policy) Args() []string {
 	}
 	for _, path := range p.ReadWrite {
 		args = append(args, "--rw", path)
+	}
+	if p.LoopbackOnly {
+		args = append(args, "--loopback-only")
 	}
 	if p.AllowNetworkSockets {
 		args = append(args, "--allow-network-sockets")

@@ -93,6 +93,17 @@ Added
 - Flags: ``-curl`` (default ``true``), ``-curl-port`` (repeatable, default 443
   and 80), ``-curl-any-port`` and ``-curl-allow-host`` (repeatable; the host
   filter is enforced by the bridge, since Landlock has no host rules).
+- **``-sandbox-loopback-only``.** The tools run in their own network namespace
+  with loopback up and no route anywhere else, so a tool can start a server and
+  talk to it in the same command (a test suite against a local port) and nothing
+  it does leaves the machine: an external address does not exist in there, so
+  the connection fails with ``ENETUNREACH`` and DNS does not resolve. The bound
+  is the namespace, not a rule — which is why the socket families and any-port
+  connect/bind are released along with it. Each tool call gets a fresh
+  namespace: a server started by one call is not reachable from the next. It is
+  checked at startup by running caged once, so a kernel or LSM that refuses
+  unprivileged user namespaces (or a bridge running inside another cage) is a
+  startup error instead of a sandbox failure on every tool call.
 - ``-kb-scope`` (``global``/``project``/``both``) selects which knowledge
   base(s) are in use, and a prompt can change it for the rest of the
   conversation with ``kb_scope`` (same persistence as ``model``/``provider``).

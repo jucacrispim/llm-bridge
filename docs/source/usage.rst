@@ -195,7 +195,9 @@ What the bridge spawns, and under which policy:
   to be passed with ``-sandbox-rw`` (the policy is frozen at startup while the
   project changes at runtime via ``set_cwd``). A tool is denied the environment
   (no API keys: only caged's small base set is inherited), the IPC (unix sockets
-  and SysV IPC) and the network. The filesystem tools (``read``, ``write``,
+  and SysV IPC) and the network, unless ``-sandbox-loopback-only`` is given: then
+  it gets a private network namespace whose only interface is loopback (see
+  below). The filesystem tools (``read``, ``write``,
   ``glob``, ``search_replace``) run in the **llm-tools** helper under this same
   policy, not inside the bridge: the path the model asked for never reaches a
   syscall in the bridge process. ``llm-tools`` is a second binary next to the
@@ -262,6 +264,31 @@ fallback to unsandboxed execution.
     Restrict the curl tool to these hosts; a leading dot (or ``*.``) also matches
     any subdomain. Default: any host. Landlock cannot filter hosts, so this is
     enforced by the bridge: it compares ``url.Hostname()`` before running curl.
+
+``--sandbox-loopback-only``
+    Run the tools in their own network namespace, with loopback up and no route
+    anywhere else. A tool can then start a server and talk to it **in the same
+    command** (a test suite against a local port), and nothing it does reaches
+    the outside world: an external address does not exist in that namespace, so
+    the connection fails with ``ENETUNREACH`` and DNS does not resolve.
+
+    It is **topology, not a filter**. The bound is the namespace, and that is
+    why the socket families and any-port connect/bind are released together
+    with it: without them seccomp and Landlock would deny the socket before the
+    namespace could matter. There is no address allowlist behind it — Landlock
+    has no address field and seccomp cannot dereference the ``sockaddr``, so
+    this is the only way to say "localhost only".
+
+    Each tool call gets its own namespace, so a server started by one call is
+    not reachable from the next: start the server and the client in the same
+    ``shell`` invocation. The ``curl`` tool is unaffected (a curl limited to
+    loopback would fetch nothing).
+
+    The flag is checked at **startup**, by running caged once with it: a kernel
+    or an LSM that refuses unprivileged user namespaces (``AppArmor`` on Ubuntu
+    23.10+, ``unprivileged_userns_clone=0``), a ``caged`` too old to know the
+    flag, or a bridge that is itself running inside another cage is a startup
+    error — never a sandbox failure on every tool call.
 
 ``--sandbox-tmp <dir>``
     Temporary directory granted read-write to the bridge **and** the tools, and

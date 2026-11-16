@@ -1,59 +1,9 @@
 Development
 ===========
 
-Guidelines and references for working on the bridge code.
-
-Directory layout
-----------------
-
-The bridge is organized into focused packages (see :doc:`architecture` for how
-they fit together):
-
-``cmd/llm-bridge``
-    The executable entry point. Parses the CLI flags, builds the provider
-    registry, wires the knowledge base and logging, and calls
-    ``server.RunWithKnowledgeBase``. Also implements the standalone
-    ``-populate-project-kb`` mode.
-
-``server``
-    The core: the ``state`` struct, ``handleLine``, ``runToolCycle``,
-    ``cancelTurn`` and the ``run`` entry point. Holds the embedded default
-    system prompt (``system_prompt.md`` via ``//go:embed``).
-
-``llm``
-    The provider abstraction (``LLMProvider``, ``ChatRequest``,
-    ``ChatResponse``, ``Message``, ``ToolCall``) and the **DeepSeek** and
-    **Google/Gemini** implementations.
-
-``protocol``
-    Wire types and helpers: ``InboundCommand`` (client → bridge) and the
-    outbound event constructors (``NewChunk``, ``NewToolCall``, ``NewTurnEnd``,
-    ``NewHook``, …).
-
-``tools``
-    ``tools.All()`` returns the tool definitions exposed to the LLM: ``read``,
-    ``write``, ``shell``, ``grep``, ``glob``, ``search_replace`` and
-    ``knowledge``.
-
-``hooks``
-    Resolves and executes ``#``-prefixed hook scripts (see
-    :doc:`hooks-internals`).
-
-``knowledge``
-    The knowledge base: index, embedders, ``Manager``/``Set`` and seed
-    handling (see :doc:`knowledge-internals`).
-
-``context``
-    Loads the Markdown context files injected on the first turn (see
-    :doc:`context-internals`).
-
-``history``
-    Helpers to manage the conversation history slice (append/sanitize,
-    ephemeral stripping, collapse/prune).
-
-``logger``
-    The leveled logger used across the bridge (logs to a file, never to
-    stdout).
+Guidelines and references for working on the bridge code. The packages and what
+each one owns are in :doc:`architecture`, and a new package has to land there
+too.
 
 Testing
 -------
@@ -64,14 +14,13 @@ Run the test suite with:
 
    $ make test        # go build ./... && go test -v ./...
 
-The server package has focused unit tests (``server/server_test.go``)
-covering helpers that were historically untested:
+The server package has focused unit tests (``server/server_test.go``):
 
-- ``TestRecordFileChanged`` — path guard, append and dedup of
+- ``TestRecordFileChanged`` - path guard, append and dedup of
   ``turnFilesChanged``.
-- ``TestParseHook`` — ``#ls -l`` → ``("ls", ["-l"])``, ``#algo`` →
+- ``TestParseHook`` - ``#ls -l`` → ``("ls", ["-l"])``, ``#algo`` →
   ``("algo", nil)``, ``#`` → ``("", nil)``.
-- ``TestFilePathFromArgs`` — extracting the ``path`` from tool-call JSON
+- ``TestFilePathFromArgs`` - extracting the ``path`` from tool-call JSON
   arguments.
 
 The hook branch in ``handleLine`` is exercised asynchronously:
@@ -85,7 +34,7 @@ not return a synchronous response.
 When the tool loop writes files via the ``write`` / ``search_replace`` tools,
 the bridge emits a ``files_changed`` event after ``turn_end`` listing the
 modified paths (see :doc:`/protocol`). A client (e.g. Emacs) can hook into this
-to trigger automated tests for the changed Go files — e.g. running
+to trigger automated tests for the changed Go files, e.g.
 ``go test ./<dir> -v -run '<Test funcs>'`` for the affected package. The
 ``custom-commands.el`` helper in this repo shows one approach.
 

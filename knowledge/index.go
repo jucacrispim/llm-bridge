@@ -15,13 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with llm-bridge. If not, see <http://www.gnu.org/licenses/>.
 
-// Package knowledge implements a small local knowledge base for the bridge.
+// Package knowledge implements the bridge's small local knowledge base: a
+// vector index, persistence, seeding and the `knowledge` tool. The embedding
+// provider sits behind the Embedder interface.
 //
-// It provides an embedder-agnostic index (brute-force cosine via normalized
-// dot product) and, in later phases, persistence, seeding and the `knowledge`
-// tool. The embedding provider is pluggable behind the Embedder interface
-// (ONNX-backed with the knowledge_onnx build tag, or a stub that reports
-// embeddings are disabled).
+// Internals are in docs/source/hacking/knowledge-internals.rst.
 package knowledge
 
 import (
@@ -36,10 +34,10 @@ type Result struct {
 	Text  string  `json:"text"`
 }
 
-// Index is a vector store over normalized embeddings. Because vectors are
-// normalized on insert, cosine similarity equals the dot product.
+// Index is a vector store over normalized embeddings, so cosine similarity is
+// the dot product.
 type Index interface {
-	// Search returns the top-k vectors most similar to q (normalized).
+	// Search returns the top-k vectors most similar to q.
 	Search(q []float32, k int) []Result
 	// Add inserts a vector under a label/text and returns its id.
 	Add(vec []float32, label, text string) int
@@ -47,9 +45,8 @@ type Index interface {
 	Len() int
 }
 
-// bruteForce is a simple O(N*d) Index over normalized vectors. Good enough for
-// the expected scale (tens to low hundreds of thousands of chunks); the Index
-// interface exists so a fancier structure (e.g. HNSW) can be swapped in later.
+// bruteForce is an O(N*d) Index over normalized vectors, enough for the scale
+// of a KB. The interface exists so another structure can replace it.
 type bruteForce struct {
 	vecs  [][]float32
 	label []string
@@ -73,8 +70,8 @@ func (b *bruteForce) Add(vec []float32, label, text string) int {
 // Len returns the number of stored vectors.
 func (b *bruteForce) Len() int { return len(b.vecs) }
 
-// Search returns the top-k vectors closest to q by cosine (dot product on
-// normalized vectors). q is normalized in place. k <= 0 falls back to 5.
+// Search returns the top-k vectors closest to q by cosine. q is normalized in
+// place; k <= 0 means 5.
 func (b *bruteForce) Search(q []float32, k int) []Result {
 	if k <= 0 {
 		k = 5

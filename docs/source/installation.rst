@@ -8,18 +8,18 @@ page covers the prerequisites and both builds.
 Prerequisites
 -------------
 
-- **Git** — to clone the repository (see `Getting the source`_ below).
+- **Git**, to clone the repository (see `Getting the source`_ below).
 - **Go** and ``make``. See ``go.mod`` for the required toolchain version.
-- A **C compiler** is only needed for the knowledge base build
-  (``make build-kb`` sets ``CGO_ENABLED=1``).
-- ``curl`` and ``tar`` if you use ``scripts/fetch_kb.sh`` to download the
+- A **C compiler**, only for the knowledge base build (``make build-kb`` sets
+  ``CGO_ENABLED=1``).
+- ``curl`` and ``tar``, if you use ``scripts/fetch_kb.sh`` to download the
   knowledge base assets.
 
-API keys are read from the **environment at runtime**; they are not needed to
+API keys are read from the **environment at runtime**. You do not need them to
 build:
 
-- ``DEEPSEEK_API_KEY`` — for the DeepSeek provider.
-- ``GOOGLE_API_KEY`` (or ``GEMINI_API_KEY``) — for the Google/Gemini provider.
+- ``DEEPSEEK_API_KEY`` for the DeepSeek provider.
+- ``GOOGLE_API_KEY`` (or ``GEMINI_API_KEY``) for the Google/Gemini provider.
 
 Getting the source
 ------------------
@@ -43,6 +43,13 @@ Plain build (no knowledge base)
 This does not use the ``knowledge_onnx`` build tag, so the knowledge base is
 compiled out and the ``knowledge`` tool is not exposed. Everything else works
 normally, and this is the build to use if you do not need the KB.
+
+Check the binary you just built:
+
+.. code-block:: sh
+
+   $ ./build/llm-bridge -h 2>&1 | head -1
+   Usage of ./build/llm-bridge:
 
 Build with the knowledge base (ONNX)
 ------------------------------------
@@ -73,8 +80,8 @@ downloaded ONNX runtime library:
 .. note::
 
    If the assets or ``LLM_BRIDGE_ONNXRUNTIME_LIB`` are missing, the knowledge
-   base starts **disabled** with a warning and the bridge keeps running — the
-   ``knowledge`` tool is simply absent. The KB never takes the bridge down.
+   base starts **disabled** with a warning, and you get a working bridge
+   without the ``knowledge`` tool.
 
 See :doc:`knowledge` for how the knowledge base works and :doc:`usage` for the
 KB-related flags and environment variables.

@@ -27,10 +27,8 @@ const (
 	MethodSetCwd            Method = "set_cwd"
 	MethodSetKnowledgeBases Method = "set_knowledge_bases"
 	MethodToolResult        Method = "tool_result"
-	// MethodToolConfirm is sent by the client to approve a mutating tool call
-	// the bridge offered via a `tool_confirm` event. Its params carry the tool
-	// call id; the bridge then executes the tool itself. A denied tool is not
-	// signalled with this method — the client sends `cancel` instead.
+	// MethodToolConfirm approves a mutating tool call offered via a
+	// `tool_confirm` event. A denied tool is signalled with `cancel`.
 	MethodToolConfirm Method = "tool_confirm"
 	MethodQuit        Method = "quit"
 )
@@ -42,9 +40,8 @@ const (
 	EventChunk    Event = "chunk"
 	EventThinking Event = "thinking"
 	EventToolCall Event = "tool_call"
-	// EventToolConfirm is emitted for a mutating tool call: the bridge asks the
-	// client to approve it before running it. Read-only tools are emitted as
-	// `tool_call` (already executed by the bridge) instead.
+	// EventToolConfirm asks the client to approve a mutating call before the
+	// bridge runs it. Read-only tools come as `tool_call`, already executed.
 	EventToolConfirm  Event = "tool_confirm"
 	EventTurnEnd      Event = "turn_end"
 	EventError        Event = "error"
@@ -62,52 +59,42 @@ type Command struct {
 type PromptParams struct {
 	Text  string `json:"text"`
 	Model string `json:"model"`
-	// Provider optionally switches the LLM provider for this and subsequent
-	// prompts (e.g. "deepseek" or "google"). Omitted keeps the current
-	// provider. Like Model/Thinking/ReasoningEffort, the override persists
-	// between prompts.
+	// Provider switches the LLM provider for this and subsequent prompts (e.g.
+	// "deepseek" or "google"). Omitted keeps the current one, like the other
+	// overrides.
 	Provider string `json:"provider,omitempty"`
-	// KBScope optionally switches which knowledge base(s) are used for this and
-	// subsequent prompts: "global" (the shared KB), "project" (the cwd
-	// project's KB) or "both". Omitted keeps the configured -kb-scope. Like
-	// Model/Provider, the override persists between prompts.
+	// KBScope switches which knowledge base(s) are used for this and subsequent
+	// prompts: "global", "project" or "both". Omitted keeps -kb-scope.
 	KBScope string `json:"kb_scope,omitempty"`
-	// Thinking optionally overrides thinking mode for the conversation:
-	// true → deepseek-flash, false → deepseek-chat. Omitted keeps the
-	// provider's configured mode.
+	// Thinking overrides thinking mode for the conversation: true →
+	// deepseek-flash, false → deepseek-chat. Omitted keeps the configured mode.
 	Thinking *bool `json:"thinking,omitempty"`
-	// ReasoningEffort optionally overrides reasoning_effort when thinking is
-	// on (e.g. "low", "medium", "high"). An empty string disables sending the
-	// parameter. Omitted keeps the provider's configured value.
+	// ReasoningEffort overrides reasoning_effort when thinking is on (e.g. "low",
+	// "medium", "high"). "" stops sending the parameter.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
-	// System optionally overrides the system prompt for this and subsequent
-	// prompts. Like Model/Provider, the override persists between prompts.
+	// System overrides the system prompt, and persists like the other
+	// overrides.
 	System string `json:"system,omitempty"`
 	// SystemPrompt is an alias for System.
 	SystemPrompt string `json:"system_prompt,omitempty"`
-	// Images are optional image attachments for this prompt. Each image may be
-	// given by path (a local file, resolved against the current cwd), by url
-	// (an external http(s) link passed through to the provider) or inline as
-	// base64 data / data URL (used for clipboard-pasted images).
+	// Images are optional attachments: a local path, an http(s) url or inline
+	// base64.
 	Images []ImageParam `json:"images,omitempty"`
 }
 
-// ImageParam describes one image attached to a prompt. The bridge resolves it
-// into an inline image (path/data) or a pass-through URL and then maps it to
-// the active provider's wire format.
+// ImageParam is one image attached to a prompt, resolved by the bridge into the
+// active provider's wire format.
 type ImageParam struct {
-	// Path is a local file path: absolute, or relative to the current cwd.
+	// Path is a local file, absolute or relative to the cwd.
 	Path string `json:"path,omitempty"`
-	// URL is an external http(s) image URL, passed through to the provider.
+	// URL is an http(s) image link, passed through to the provider.
 	URL string `json:"url,omitempty"`
-	// Data is inline base64 image data: raw base64, or a full data: URL
-	// (data:<mime>;base64,<payload>). Used for clipboard-pasted images.
+	// Data is inline base64, raw or as a full data: URL.
 	Data string `json:"data,omitempty"`
-	// MIME optionally declares the media type (image/png, image/jpeg,
-	// image/gif, image/webp); otherwise it is detected from the bytes.
+	// MIME declares the media type; otherwise it is detected from the bytes.
 	MIME string `json:"mime_type,omitempty"`
-	// Detail optionally controls image processing ("low"/"high"/"original"/
-	// "auto" for DeepSeek). Ignored by providers without the concept.
+	// Detail controls image processing for DeepSeek ("low", "high", "original",
+	// "auto"). Ignored elsewhere.
 	Detail string `json:"detail,omitempty"`
 }
 

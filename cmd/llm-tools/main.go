@@ -18,18 +18,11 @@
 //go:build !test
 
 // llm-tools runs the bridge's filesystem tools out of process, so the bridge
-// itself never opens a path that came from the model.
+// process itself never opens a path that came from the model.
 //
-// It has no policy of its own and none of the bridge's privileges: the bridge
-// runs it under caged, with the same policy a shell command gets, and it only
-// knows how to read, write, glob and search-and-replace. It says nothing about
-// what it may touch — the kernel does, from the policy the bridge chose.
-//
-// The protocol is in the tools package (see tools/toolbox.go): one JSON request
-// per line on stdin, one JSON response per line on stdout, until stdin closes.
-// Running it by hand is not a sandbox bypass (there is no sandbox to bypass at
-// that point, exactly as running `cat` by hand is not): it just does what you
-// ask, with your own permissions.
+// It holds no policy and no privilege: the bridge runs it under caged with the
+// policy a shell command gets, and the kernel decides what it may touch. The
+// protocol is in tools/toolbox.go and docs/source/tools.rst.
 package main
 
 // notest

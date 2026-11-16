@@ -41,9 +41,8 @@ type Chunk struct {
 	Text  string `json:"text"`
 }
 
-// Thinking is a streaming fragment of the model's chain-of-thought
-// (reasoning_content), emitted before the content chunks when thinking mode is
-// enabled. The client concatenates the Text fragments, mirroring Chunk.
+// Thinking is a fragment of the chain-of-thought, emitted before the content
+// chunks. The client concatenates the Text fragments, like Chunk.
 type Thinking struct {
 	Event Event  `json:"event"`
 	Text  string `json:"text"`
@@ -55,19 +54,11 @@ type ToolCallEvent struct {
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
 
-	// Segments, Risk and Tainted are only set on `tool_confirm` events, and
-	// only on this bridge (an older client ignores them). They exist because a
-	// single approval can run far more than it looks like:
-	//
-	//   - Segments lists the commands a shell one-liner actually runs, split on
-	//     `;`, `&&`, `||`, `|` and newlines, so a client can show "3 commands"
-	//     instead of one line a human will not read;
-	//   - Risk is a coarse label ("high"/"medium"/"low") for a destructive,
-	//     remote or privileged command, so a client can demand a typed
-	//     confirmation for those;
-	//   - Tainted marks a call whose arguments reproduce content fetched earlier
-	//     in the session — the "read this page, then run what it says" shape.
-	//     It is advisory: a legitimate command quoting the page matches too.
+	// Segments, Risk and Tainted are only set on `tool_confirm` events, and an
+	// older client ignores them. One approval can run far more than it looks
+	// like: Segments lists the commands the one-liner runs, Risk labels a
+	// destructive, remote or privileged one, and Tainted marks arguments that
+	// reproduce content fetched earlier in the session. All three are advisory.
 	Segments []string `json:"segments,omitempty"`
 	Risk     string   `json:"risk,omitempty"`
 	Tainted  bool     `json:"tainted,omitempty"`
@@ -77,21 +68,18 @@ type TurnEnd struct {
 	Event      Event    `json:"event"`
 	StopReason string   `json:"stop_reason"`
 	ContextPct *float64 `json:"context_pct"`
-	// ContextTokens is the size of the context actually sent on the last
-	// provider call of the turn (the full prompt: system prompt, history,
-	// tool results and images), and ContextWindow is that model's static
-	// context window. ContextPct is ContextTokens/ContextWindow, or null when
-	// the model's window is unknown.
+	// ContextTokens is the size of the prompt sent on the last provider call of
+	// the turn, and ContextWindow is that model's static window. ContextPct is
+	// their ratio, or null when the window is unknown.
 	ContextTokens int    `json:"context_tokens"`
 	ContextWindow int    `json:"context_window"`
 	Model         string `json:"model,omitempty"`
 	InputTokens   int    `json:"input_tokens"`
 	OutputTokens  int    `json:"output_tokens"`
 	TotalTokens   int    `json:"total_tokens"`
-	// CacheHitTokens/CacheMissTokens are the prompt cache accounting for the
-	// whole turn, summed over every provider call made in it (the turn may
-	// include several tool-cycle round trips). Providers without cache
-	// reporting leave them at zero.
+	// CacheHitTokens/CacheMissTokens sum the cache accounting over every
+	// provider call in the turn. Providers without cache reporting leave them
+	// at zero.
 	CacheHitTokens  int `json:"cache_hit_tokens"`
 	CacheMissTokens int `json:"cache_miss_tokens"`
 }
@@ -112,9 +100,8 @@ type UsageDelta struct {
 	TotalTokens  int   `json:"total_tokens"`
 }
 
-// FilesChanged reports the paths that were written or modified during the
-// just-completed turn (via the write and search_replace tools). Reads are not
-// included. The client can use it to refresh buffers/status for those files.
+// FilesChanged reports the paths written during the turn (write and
+// search_replace; reads are not included), so a client can refresh them.
 type FilesChanged struct {
 	Event Event    `json:"event"`
 	Files []string `json:"files"`
@@ -147,25 +134,22 @@ func NewToolCall(id, name string, input any) ([]byte, error) {
 	return json.Marshal(evt)
 }
 
-// ConfirmMeta carries the extra detail a mutating tool call is offered with:
-// the commands a one-liner really runs, a coarse risk label and whether the
-// arguments quote content fetched earlier in the session. All three are
-// advisory (they never block anything) and optional in the wire format.
+// ConfirmMeta carries the detail a mutating call is offered with: the commands
+// a one-liner runs, a coarse risk label and whether the arguments quote content
+// fetched earlier. All three are advisory and optional on the wire.
 type ConfirmMeta struct {
 	Segments []string
 	Risk     string
 	Tainted  bool
 }
 
-// NewToolConfirm serializes a `tool_confirm` event asking the client to approve
-// a mutating tool call. It reuses the tool_call shape (id/name/input) with the
-// tool_confirm event name.
+// NewToolConfirm serializes a `tool_confirm` event, the tool_call shape with
+// the tool_confirm name.
 func NewToolConfirm(id, name string, input any) ([]byte, error) {
 	return NewToolConfirmWithMeta(id, name, input, ConfirmMeta{})
 }
 
-// NewToolConfirmWithMeta is NewToolConfirm plus the detail a human needs to
-// judge what is being approved.
+// NewToolConfirmWithMeta is NewToolConfirm plus the detail shown to the human.
 func NewToolConfirmWithMeta(id, name string, input any, meta ConfirmMeta) ([]byte, error) {
 	rawInput, err := json.Marshal(input)
 	if err != nil {
@@ -204,18 +188,16 @@ func NewUsageDelta(inputTokens, outputTokens, totalTokens int) []byte {
 	return b
 }
 
-// NewFilesChanged serializes a files_changed event for the given modified file
-// paths. An empty list is allowed (the client can just ignore the event).
+// NewFilesChanged serializes a files_changed event. An empty list is allowed.
 func NewFilesChanged(files []string) []byte {
 	evt := FilesChanged{Event: EventFilesChanged, Files: files}
 	b, _ := json.Marshal(evt)
 	return b
 }
 
-// HookEvent reports the result of running a local hook script (triggered by a
-// message starting with "#"). Output carries the script's combined
-// stdout+stderr on success; Error carries the failure reason when the hook
-// could not be run or exited non-zero. Exactly one of Output/Error is set.
+// HookEvent reports the result of a hook script: Output carries its combined
+// stdout+stderr, Error the reason it could not run or exited non-zero. Exactly
+// one is set.
 type HookEvent struct {
 	Event  Event  `json:"event"`
 	Name   string `json:"name"`
@@ -223,9 +205,8 @@ type HookEvent struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// NewHook serializes a hook_action event for the given hook name. When errMsg
-// is non-empty it is reported in the Error field (Output is omitted);
-// otherwise output carries the script's result.
+// NewHook serializes a hook_action event. A non-empty errMsg goes in Error and
+// drops Output.
 func NewHook(name, output, errMsg string) []byte {
 	evt := HookEvent{Event: EventHookAction, Name: name, Output: output, Error: errMsg}
 	b, _ := json.Marshal(evt)

@@ -1,15 +1,13 @@
 Protocol
 ========
 
-The bridge speaks a simple **JSON-lines** protocol over stdio. Each line the
-client writes to the bridge's **stdin** is a command (a request); each line the
-bridge writes to its **stdout** is an event (a response or notification).
-There is one JSON object per line, no enclosing array and no newline inside a
-value.
+The bridge speaks a simple **JSON-lines** protocol over stdio. Each line you
+write to the bridge's **stdin** is a command, a request. Each line the bridge
+writes to its **stdout** is an event, a response or a notification. There is one
+JSON object per line, no enclosing array and no newline inside a value.
 
-Because stdout is reserved for the protocol, all logging goes to a file
-(via ``-logfile`` or ``-debug``) or is disabled; nothing is ever written to
-stdout except these JSON-lines events.
+Stdout is reserved for the protocol, so send the logs to a file (``-logfile`` or
+``-debug``) or drop them. Nothing else goes to stdout.
 
 .. note::
 
@@ -27,8 +25,8 @@ Every command has the shape:
    {"method": "prompt", "params": {}}
 
 ``prompt``
-    Send a message or instruction to the LLM (or, if the text starts with
-    ``#``, run a :doc:`hooks` instead).
+    Send a message to the LLM. When the text starts with ``#`` it runs a hook
+    instead (see :doc:`hooks`).
 
     .. code-block:: json
 
@@ -49,13 +47,13 @@ Every command has the shape:
     All fields except ``text`` are optional **overrides** and, once set,
     persist across subsequent prompts:
 
-    - ``model`` — force a model.
-    - ``provider`` — switch the active LLM provider (``"deepseek"`` /
+    - ``model`` - force a model.
+    - ``provider`` - switch the active LLM provider (``"deepseek"`` /
       ``"google"``).
-    - ``thinking`` — enable/disable thinking mode.
-    - ``reasoning_effort`` — reasoning effort for DeepSeek, or a numeric
+    - ``thinking`` - enable or disable thinking mode.
+    - ``reasoning_effort`` - reasoning effort for DeepSeek, or a numeric
       thinking budget for Google.
-    - ``system`` / ``system_prompt`` — override the system prompt.
+    - ``system`` / ``system_prompt`` - override the system prompt.
 
     ``images`` attaches one or more images to the prompt (see `Images`_ below).
 
@@ -67,23 +65,20 @@ Images
 A prompt may carry images via the ``images`` array. Each entry is resolved in
 this order of precedence:
 
-- ``url`` — an external ``http(s)`` link, passed through to the provider, which
-  downloads it (DeepSeek supports this natively; Gemini receives it as a
-  ``fileData`` URI and the bridge falls back to downloading and inlining the
-  image if the API rejects it).
-- ``data`` — inline base64 image data, either raw base64 or a full data URL
-  (``data:<mime>;base64,<payload>``). Use this for images that only exist in the
-  client (e.g. a clipboard paste), which have no file on disk the bridge could
-  read.
-- ``path`` — a local file path, read by the bridge and embedded inline.
-  Relative paths are resolved against the current cwd.
+- ``url`` - an external ``http(s)`` link, passed through to the provider, which
+  downloads it. DeepSeek takes it natively. Gemini wants a ``fileData`` URI, and
+  the bridge downloads and inlines the image when the API rejects that.
+- ``data`` - inline base64, either raw or as a full data URL
+  (``data:<mime>;base64,<payload>``). Use it for an image that only exists in
+  your client, like a clipboard paste, with no file on disk to read.
+- ``path`` - a local file, read by the bridge and embedded inline. A relative
+  path resolves against the current cwd.
 
-``mime_type`` optionally declares the media type and ``detail`` optionally
+``mime_type`` optionally declares the media type, and ``detail`` optionally
 controls image processing for DeepSeek (``low`` / ``high`` / ``original`` /
-``auto``). Supported formats (verified from the image bytes, not the name or
-declared type) are PNG, JPEG, GIF and WebP. Images are attached to user
-messages; the active model must support vision (on DeepSeek this is the Flash
-model).
+``auto``). The supported formats are PNG, JPEG, GIF and WebP, detected from the
+bytes and not from the name. An image only attaches to a user message, and the
+active model has to support vision, which on DeepSeek is the Flash model.
 
 .. code-block:: json
 
@@ -198,8 +193,8 @@ Events (bridge → client)
     For a ``shell`` call the event carries three optional fields describing what
     the approval really does: ``segments`` (the commands the one-liner runs),
     ``risk`` (``high`` / ``medium`` / ``low``) and ``tainted`` (the arguments
-    quote content fetched earlier in the session). Clients that do not know them
-    can ignore them; see :doc:`tools`.
+    quote content fetched earlier in the session). A client that does not know
+    them can ignore them. See :doc:`tools`.
 
     .. code-block:: json
 
@@ -222,8 +217,8 @@ Events (bridge → client)
     (see :ref:`providers-context-window`) ``context_pct`` is ``null`` and
     ``context_window`` is ``0``, rather than guessing a window.
     ``cache_hit_tokens`` / ``cache_miss_tokens`` are the prompt cache accounting
-    summed over every provider call made in the turn (a tool-calling turn makes
-    several); providers without cache reporting leave them at ``0``.
+    summed over every provider call of the turn, and a tool-calling turn makes
+    several. A provider without cache reporting leaves them at ``0``.
 
     .. code-block:: json
 
@@ -249,10 +244,9 @@ Events (bridge → client)
        {"event": "usage_delta", "input_tokens": 128, "output_tokens": 64, "total_tokens": 192}
 
 ``files_changed``
-    Lists the file paths written or modified by the ``write`` / ``search_replace``
-    tools during the just-completed turn (reads are not included). Emitted
-    after ``turn_end``. The client can use it to refresh buffers or trigger
-    automated tests.
+    The file paths written by ``write`` / ``search_replace`` in the turn that
+    just ended, reads excluded. It arrives after ``turn_end``, so your client can
+    refresh a buffer or run the tests.
 
     .. code-block:: json
 

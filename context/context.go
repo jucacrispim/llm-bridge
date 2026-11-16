@@ -15,15 +15,11 @@
 // You should have received a copy of the GNU General Public License
 // along with llm-bridge. If not, see <http://www.gnu.org/licenses/>.
 
-// Package context loads the conversation context from Markdown files.
+// Package context loads the conversation context from Markdown files:
+// ~/.llm-bridge/*.md first (general), then <cwd>/.llm-bridge/*.md (the
+// project). Within a directory the files come alphabetically.
 //
-// The context is composed of two sources:
-//   - General context: ~/.llm-bridge/*.md (applies to all conversations)
-//   - Local context:   <cwd>/.llm-bridge/*.md (applies to the current project/directory)
-//
-// The general context comes before the local one. Within each directory, files
-// are sorted alphabetically. Each file becomes a persistent (non-ephemeral)
-// user message, preserving its original path.
+// Internals are in docs/source/hacking/context-internals.rst.
 package context
 
 import (
@@ -41,13 +37,13 @@ const (
 	entryEnd   = "--- CONTEXT ENTRY END ---"
 )
 
-// Entry represents a single loaded context file.
+// Entry is a single loaded context file.
 type Entry struct {
 	Path    string // full path of the file
 	Content string // content read from the file
 }
 
-// Render wraps the entry in the format expected by the conversation:
+// Render wraps the entry in the markers the conversation expects:
 //
 //	--- CONTEXT ENTRY BEGIN ---
 //	[<path>]
@@ -58,8 +54,8 @@ func (e Entry) Render() string {
 }
 
 // Load reads the general (~/.llm-bridge) and local (<cwd>/.llm-bridge) context,
-// returning general before local, each directory in alphabetical order.
-// Missing directories are ignored without error.
+// general first, each directory in alphabetical order. A missing directory is
+// not an error.
 func Load(cwd string) ([]Entry, error) {
 	entries := []Entry{}
 
@@ -97,9 +93,9 @@ func Load(cwd string) ([]Entry, error) {
 	return entries, nil
 }
 
-// readDir lists the *.md files in dir in alphabetical order, reading the
-// contents of each one. If the directory does not exist, it returns empty
-// without error. Files that fail to be read are skipped with a log.
+// readDir lists the *.md files in dir alphabetically and reads each one. A
+// missing directory gives an empty result; a file that fails to read is skipped
+// with a log.
 func readDir(dir string) ([]Entry, error) {
 	entries := []Entry{}
 
@@ -138,8 +134,7 @@ func readDir(dir string) ([]Entry, error) {
 	return entries, nil
 }
 
-// BuildMessages converts the entries into persistent user messages,
-// preserving the order.
+// BuildMessages converts the entries into persistent user messages, in order.
 func BuildMessages(entries []Entry) []llm.Message {
 	msgs := make([]llm.Message, 0, len(entries))
 	for _, e := range entries {

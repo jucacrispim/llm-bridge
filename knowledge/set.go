@@ -24,21 +24,18 @@ import (
 	"strings"
 )
 
-// Scope names. ScopeGlobal and ScopeProject name real knowledge bases;
-// ScopeBoth is not a KB itself but a valid value for the -kb-scope flag /
-// the prompt's kb_scope override, meaning "global + project at the same time".
+// Scope names. ScopeBoth is not a KB of its own: it is a valid -kb-scope /
+// kb_scope value meaning global plus project.
 const (
 	ScopeGlobal  = "global"
 	ScopeProject = "project"
 	ScopeBoth    = "both"
 
-	// GlobalKey is the storage key (the directory name under the KB base dir)
-	// of the global, shared knowledge base.
+	// GlobalKey is the storage key, the directory name, of the shared KB.
 	GlobalKey = "_global"
 )
 
-// defaultLimit is the number of results a search returns when the caller does
-// not ask for a specific number.
+// defaultLimit is how many results a search returns when the caller does not ask.
 const defaultLimit = 5
 
 // IsScope reports whether name is a valid -kb-scope / kb_scope value.
@@ -53,14 +50,9 @@ type Scope struct {
 	M    *Manager
 }
 
-// Set is the knowledge base surface exposed to the `knowledge` tool: one or
-// two scoped Managers (the global shared KB and/or the current project's KB).
-//
-// Reads (show/search) cover every scope in the set; writes (add/delete/reset)
-// target exactly one manager: the one named by the tool's "scope" argument, or
-// the default scope when the argument is omitted. The default is the only
-// scope in single-scope configurations and ScopeGlobal in the "both" mode (so
-// notes are shared unless the caller explicitly asks for the project KB).
+// Set is the KB surface the `knowledge` tool talks to: one or two scoped
+// Managers. Reads cover every scope; writes target one, named by the tool's
+// "scope" argument or the default.
 type Set struct {
 	scopes []Scope
 	def    string
@@ -110,13 +102,10 @@ func (s *Set) find(name string) *Manager {
 	return nil
 }
 
-// resolve returns the manager a write should target — the scope named in the
-// tool arguments, or the default scope when none was given — along with the
-// name it is registered under in the set and an optional note for the model. In
-// a single-scope setup the only KB always wins (a scope argument naming a KB
-// that is not active is reported as a note, not an error); with two scopes an
-// unknown name is an error listing the available ones, so the model can correct
-// itself.
+// resolve returns the manager a write should target: the scope named in the
+// arguments, or the default. With one scope that KB always wins, and a
+// mismatched name becomes a note for the model; with two, an unknown name is an
+// error listing the available ones.
 func (s *Set) resolve(name string) (*Manager, string, string, error) {
 	want := name
 	if name == "" {
@@ -126,9 +115,8 @@ func (s *Set) resolve(name string) (*Manager, string, string, error) {
 		return m, name, "", nil
 	}
 	if len(s.scopes) == 1 {
-		// The only KB is the answer whatever was asked for: no scope at all, its
-		// own scope name, or the project key the model may have passed instead
-		// of the scope name.
+		// The only KB is the answer whatever was asked for: no scope, its own
+		// scope name, or the project key passed instead of the scope name.
 		only := s.scopes[0]
 		if want == "" || want == only.Name || want == only.M.Project() {
 			return only.M, only.Name, "", nil
@@ -140,9 +128,8 @@ func (s *Set) resolve(name string) (*Manager, string, string, error) {
 		name, strings.Join(s.Scopes(), ", "))
 }
 
-// Execute handles a `knowledge` tool invocation against the set: reads cover
-// every scope (results merged by score), writes go to the scope named in the
-// arguments (see toolArgs.Scope) or to the default scope.
+// Execute handles a `knowledge` tool call. Reads cover every scope with the
+// results merged; writes go to the scope in the arguments or the default.
 func (s *Set) Execute(args json.RawMessage) (string, error) {
 	p, err := parseToolArgs(args)
 	if err != nil {
@@ -169,8 +156,7 @@ func (s *Set) Execute(args json.RawMessage) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// Only say which KB was written when there is a choice to be made;
-		// with a single active KB the reply stays as short as before.
+		// Say which KB was written only when there was a choice.
 		if len(s.scopes) > 1 {
 			out += fmt.Sprintf(" (scope %q)", name)
 		}
@@ -180,8 +166,8 @@ func (s *Set) Execute(args json.RawMessage) (string, error) {
 	}
 }
 
-// show renders the labels of every scope, grouped by scope name. A single
-// scope renders exactly like Manager.Show.
+// show renders the labels of every scope, grouped by scope name. A single scope
+// renders exactly like Manager.Show.
 func (s *Set) show() string {
 	if len(s.scopes) == 1 {
 		return s.scopes[0].M.Show()

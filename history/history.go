@@ -59,29 +59,21 @@ func AppendUser(hist *[]llm.Message, content string) {
 	AppendUserWithImages(hist, content, nil)
 }
 
-// AppendUserWithImages appends a user message carrying optional image
-// attachments. Images are only meaningful on user messages (both DeepSeek and
-// Gemini reject images elsewhere).
+// AppendUserWithImages appends a user message with optional images. Only a user
+// message carries them.
 func AppendUserWithImages(hist *[]llm.Message, content string, images []llm.Image) {
 	*hist = append(*hist, llm.Message{Role: llm.RoleUser, Content: content, Images: images})
 }
 
 func AppendAssistant(hist *[]llm.Message, resp *llm.ChatResponse) {
-	// An assistant message must carry either content or tool_calls; the
-	// OpenAI-compatible API rejects an empty one (both unset) with HTTP 400.
-	// A partial turn cancelled mid-stream can leave a ChatResponse with only
-	// reasoning and no content, and that reasoning is stripped below for
-	// messages without tool calls — so dropping it here prevents an empty
-	// assistant message from ever reaching the history.
+	// An assistant message with neither content nor tool_calls gets HTTP 400
+	// from the OpenAI-compatible API. A turn cancelled mid-stream can leave one.
 	if resp.Content == "" && len(resp.ToolCalls) == 0 {
 		return
 	}
-	// Reasoning (chain-of-thought) is never sent back to a provider for an
-	// assistant message without tool calls: DeepSeek omits reasoning_content
-	// for those (only re-sends it when the message performed tool calls, to
-	// satisfy a 400), and Gemini has no input channel for reasoning at all.
-	// Storing it here would be dead weight in the bridge's history, so it is
-	// kept only when the message actually carried tool calls.
+	// Reasoning goes back to the provider only on a message that made tool
+	// calls, where deepseek answers 400 without it. For a plain answer it is
+	// dead weight in the history.
 	reasoning := resp.Reasoning
 	if len(resp.ToolCalls) == 0 {
 		reasoning = ""

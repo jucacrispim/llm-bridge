@@ -17,27 +17,14 @@
 
 package tools
 
-// Both ends of the llm-tools protocol.
-//
-// The filesystem tools (read/write/glob/search_replace) take a path that comes
-// straight from the model, so running them inside the bridge process means the
-// bridge itself needs a filesystem policy — and, because Landlock and seccomp
-// are inherited, every external process the bridge spawns would then run under
-// two stacked policies. Moving them out keeps one policy per process: the
-// bridge holds no filesystem rights at all, and each tool gets exactly the
-// policy built for it.
-//
-// The protocol is the smallest thing that can carry a tool call: one JSON
-// object in, one JSON object out. There is no flag and no subcommand for the
-// tool name, because the name is already part of the call:
+// Both ends of the llm-tools protocol: one JSON object per line in, one per
+// line out, until the input ends.
 //
 //	{"name":"read","args":{"path":"main.go"}}
 //	{"ok":true,"result":"..."}          or  {"ok":false,"error":"..."}
 //
-// A response per request, one line each, until the input ends. One process per
-// call is the current arrangement (the bridge sends one request and closes
-// stdin); the loop is written so a persistent process would need no change
-// here.
+// The tool name is part of the call, so there is no flag and no subcommand.
+// Design notes are in docs/source/tools.rst.
 
 import (
 	"bytes"
@@ -51,12 +38,10 @@ import (
 
 const (
 	// ToolboxVersion is the protocol version the binary speaks. It goes in the
-	// handshake so a stale llm-tools next to a newer bridge fails at startup
-	// instead of answering requests it does not understand.
+	// handshake, so a stale llm-tools fails at startup.
 	ToolboxVersion = "1"
 
-	// toolboxPing is the handshake request. It is not a tool name and never
-	// reaches the dispatcher.
+	// toolboxPing is the handshake request. It never reaches the dispatcher.
 	toolboxPing = "__ping"
 
 	// toolboxProduct is what the handshake response must start with.
@@ -77,11 +62,9 @@ type toolboxResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// IsFileTool reports whether name is one of the tools that touch the
-// filesystem through plain syscalls, i.e. the ones llm-tools serves. shell,
-// grep and curl are deliberately not here: they exec external programs, so
-// they must be the sandboxed command itself, not a child of a helper that is
-// already confined by a policy built for the tool.
+// IsFileTool reports whether name is one of the tools llm-tools serves. shell,
+// grep and curl are not here: they exec an external program, so they have to be
+// the sandboxed command itself.
 func IsFileTool(name string) bool {
 	switch name {
 	case "read", "write", "glob", "search_replace":
@@ -91,9 +74,8 @@ func IsFileTool(name string) bool {
 }
 
 // Serve runs the llm-tools loop: read a request, run it, write the response,
-// until in is exhausted. Contexts are not plumbed through because these tools
-// do no blocking I/O that a cancellation could interrupt: they read, write or
-// list a path and return.
+// until in is exhausted. There is no context because these tools do no blocking
+// I/O a cancellation could interrupt.
 func Serve(in io.Reader, out io.Writer) error {
 	dec := json.NewDecoder(in)
 	enc := json.NewEncoder(out)
@@ -132,12 +114,9 @@ func serveOne(exec *Executor, req toolboxRequest) toolboxResponse {
 	return toolboxResponse{OK: true, Result: result}
 }
 
-// toolboxRequestLine renders one call as the JSON line llm-tools reads.
-//
-// A malformed argument payload is replaced by an empty object, mirroring the
-// in-process path: the individual tool then reports its own missing-field
-// error, which is more useful to the model than a parse error about JSON it
-// just sent.
+// toolboxRequestLine renders one call as the JSON line llm-tools reads. A
+// malformed payload becomes an empty object, so the tool reports its own
+// missing field instead of a parse error about JSON the model just sent.
 func toolboxRequestLine(name, rawArgs string) ([]byte, error) {
 	args := json.RawMessage(rawArgs)
 	if len(bytes.TrimSpace(args)) == 0 || !json.Valid(args) {
@@ -151,9 +130,8 @@ func toolboxRequestLine(name, rawArgs string) ([]byte, error) {
 }
 
 // decodeToolboxResponse turns the helper's stdout into a tool result. Anything
-// that is not a well-formed response is an error, never a result: an empty or
-// garbled reply means the helper did not run (or died), and handing that to the
-// model as the tool's output would hide a broken sandbox.
+// that is not a well-formed response is an error: an empty or garbled reply
+// means the helper did not run, or died.
 func decodeToolboxResponse(stdout []byte) (string, error) {
 	var resp toolboxResponse
 	if err := json.Unmarshal(bytes.TrimSpace(stdout), &resp); err != nil {
@@ -168,12 +146,9 @@ func decodeToolboxResponse(stdout []byte) (string, error) {
 	return resp.Result, nil
 }
 
-// CheckToolbox runs bin once, with the handshake request on stdin, and verifies
-// that it is an llm-tools speaking this protocol version.
-//
-// It is the counterpart of requireReportFD: a missing, stale or foreign binary
-// is a startup error. The alternative — discovering it on the first `read` —
-// would surface as a tool error the model then tries to work around.
+// CheckToolbox runs bin once with the handshake request and verifies that it is
+// an llm-tools speaking this protocol version. A missing, stale or foreign
+// binary is a startup error, like a caged without --report-fd.
 func CheckToolbox(ctx context.Context, bin string) error {
 	ping, err := toolboxRequestLine(toolboxPing, "")
 	if err != nil {

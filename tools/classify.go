@@ -17,18 +17,10 @@
 
 package tools
 
-// Classification helpers for the confirmation step. They answer three
-// questions the server asks before offering a tool to the human:
-//
-//   - does this call mutate anything? (a `knowledge add` does, a `knowledge
-//     show` does not, so the same tool cannot be classified once for all)
-//   - what does this one-liner actually run? (models join everything with &&
-//     and |, and a human who approves "build the project" approves all of it)
-//   - how bad is it? (a coarse risk label, deliberately heuristic)
-//
-// Everything here is advisory and cheap: it never blocks a call by itself. The
-// one hard limit, MaxShellSegments, is enforced by the server, which refuses to
-// offer an approval that would run dozens of commands at once.
+// Classification helpers for the confirmation step: does this call mutate
+// anything, what does this one-liner actually run, and how bad is it. The
+// answers are advisory and cheap. The one hard limit, MaxShellSegments, is
+// enforced by the server.
 
 import (
 	"encoding/json"
@@ -36,26 +28,22 @@ import (
 	"strings"
 )
 
-// MaxShellSegments is the most commands a single `shell` call may contain. A
-// one-liner is approved with one keystroke, so it is the natural place to hide
-// extra work: past this limit the server refuses to offer it and tells the
-// model to split the command into separate calls.
+// MaxShellSegments is the most commands one `shell` call may contain. A
+// one-liner is approved with one keystroke, so past this limit the server
+// refuses it and tells the model to split the command.
 const MaxShellSegments = 10
 
-// TaintWindow is how many consecutive bytes an argument must share with
-// content fetched earlier in the session before it is flagged as copied. Long
-// enough not to match boilerplate, short enough to survive a reflowed copy.
+// TaintWindow is how many consecutive bytes an argument must share with content
+// fetched earlier in the session before it counts as copied. Short enough to
+// survive a reflowed copy, long enough to miss boilerplate.
 const TaintWindow = 16
 
-// MutatesCall reports whether a specific tool call mutates state, which is what
-// decides between running it inline and offering it for confirmation.
+// MutatesCall reports whether a specific call mutates state, which decides
+// between running it inline and offering it for confirmation.
 //
-// For every tool but `knowledge` this is the static classification. `knowledge`
-// is per call: add/delete/reset write to a persistent store, while show/search
-// only read it. Treating the whole tool as read-only would let an injected page
-// plant a note with no human in the loop; treating it as always mutating would
-// turn every lookup into a click. An unknown or malformed command is treated as
-// mutating, so a call we cannot classify is confirmed rather than executed.
+// Every tool but `knowledge` is classified once. `knowledge` is per call:
+// add/delete/reset write to a persistent store, while show/search read it. An
+// unknown or malformed command counts as mutating, so it is confirmed.
 func MutatesCall(name, rawArgs string) bool {
 	if name != "knowledge" {
 		return !IsReadOnly(name)
@@ -85,16 +73,11 @@ func CommandOf(rawArgs string) string {
 }
 
 // Segments splits a shell one-liner into the commands it runs: on `;`, `&&`,
-// `||`, `|`, a lone `&` and newlines, without splitting inside quotes. It is
-// what lets the client show "this approval runs 4 commands" instead of one long
-// line, and what the segment limit counts.
+// `||`, `|`, a lone `&` and newlines, without splitting inside quotes.
 //
-// Redirections are not separators: `cmd > out 2>&1` is one command, and the `&`
-// of `2>&1`, `>&2`, `<&3` and of the `&>`/`&>>` form belongs to the redirect.
-// Splitting there used to report `git describe --tags 2>&1 || true` as four
-// commands (`git describe --tags 2>`, `1`, ...) and to inflate the count the
-// limit is applied to. Heredoc bodies are still not parsed, so a `&` inside one
-// is treated as a separator.
+// A redirect is not a separator: the `&` of `2>&1` belongs to the redirect, so
+// `git describe --tags 2>&1 || true` is two commands, not four. A heredoc body
+// is not parsed, so a `&` inside one splits.
 func Segments(command string) []string {
 	var (
 		out     []string
@@ -176,20 +159,13 @@ func Segments(command string) []string {
 }
 
 // riskPatterns maps a coarse risk level to the markers that put a command
-// there. The list is deliberately small and readable: it is a hint for the
-// human (and for a client that may want a typed confirmation), never a verdict,
-// and a false positive only costs attention.
+// there. It is a hint for the human, not a verdict.
 //
-// The markers are regular expressions anchored on word boundaries, not plain
-// substrings, because most of them are two or three letters long. Matching
-// "nc " as a substring flagged every command containing "func " and "sync ",
-// so `go test -run TestFunc` came out as high risk — the label stopped carrying
-// information exactly where it was needed most. `\bnc\b` still catches
-// `nc -l 1234` and leaves `func`, `sync`, `TestSync` and `encore` alone.
-//
-// Flag clusters are written as `-[a-z]*r` so that `rm -rf`, `rm -fr`, `rm -r`
-// and `rm -rfv` all match (the segment is lowercased first, so `-R` counts too)
-// without listing every ordering.
+// The markers are word-boundary regexps because most are two or three letters
+// long: matching "nc " as a substring flagged `func ` and `sync `, so `go test
+// -run TestFunc` came out high risk. `\bnc\b` catches `nc -l 1234` and leaves
+// `func`, `sync`, `TestSync` and `encore` alone. Flag clusters are written
+// `-[a-z]*r`, so `rm -rf`, `rm -fr`, `rm -r` and `rm -rfv` all match.
 var riskPatterns = []struct {
 	level   string
 	markers []*regexp.Regexp
@@ -233,14 +209,13 @@ var riskPatterns = []struct {
 	}},
 }
 
-// pipeToShell matches `... | sh` / `| bash` / `| python`, the classic way to
-// turn downloaded text into code. The trailing \b is what keeps `| shellcheck`
-// and `| ssh` out: without it `| sh` matched both.
+// pipeToShell matches `... | sh` / `| bash` / `| python`, the way downloaded
+// text becomes code. The trailing \b keeps `| shellcheck` and `| ssh` out.
 var pipeToShell = regexp.MustCompile(`\|\s*(sh|bash|zsh|dash|python[0-9.]*|perl|ruby|node)\b`)
 
 // Risk classifies a shell command as "high", "medium" or "low". command is the
-// original string (needed for the pipe-to-shell shape, which splitting on `|`
-// destroys) and segments the result of Segments.
+// original string, which the pipe-to-shell shape needs because splitting on `|`
+// destroys it; segments is the output of Segments.
 func Risk(command string, segments []string) string {
 	if pipeToShell.MatchString(strings.ToLower(command)) {
 		return "high"
@@ -263,9 +238,9 @@ func Risk(command string, segments []string) string {
 }
 
 // Tainted reports whether any argument reproduces a run of TaintWindow bytes of
-// content fetched earlier in the session — the shape of "read this page, then
-// run what it says". It is advisory: a legitimate argument that happens to
-// quote the page also matches, which is exactly the case worth showing.
+// content fetched earlier in the session, the shape of "read this page, then run
+// what it says". It is advisory: a legitimate argument that quotes the page also
+// matches.
 func Tainted(args []string, fetched string) bool {
 	if fetched == "" {
 		return false
@@ -292,8 +267,7 @@ func squash(s string) string {
 }
 
 // Args returns every string argument of a tool call, for the taint check. It is
-// a flat list on purpose: whichever field the model filled, the value is what
-// matters.
+// a flat list: whichever field the model filled, the value is what matters.
 func Args(rawArgs string) []string {
 	var m map[string]any
 	if err := json.Unmarshal([]byte(rawArgs), &m); err != nil {

@@ -22,20 +22,12 @@ import (
 	"path/filepath"
 )
 
-// EnsureSeeded populates the knowledge base from seed .md files the first time
-// it is used for a project, so the KB starts with curated content instead of
-// being empty. Global seeds under seedRoot/*.md are combined with project
-// seeds under seedRoot/<seedProject>/*.md (see SetSeedProject; the shared KB
-// has an empty seed project, so it only takes the global seeds). It is
-// idempotent: if the index already has items, nothing is embedded.
-//
-// The label for each seed file is the path relative to seedRoot (prefixed
-// with "seed:"), so global and per-project files with the same basename never
-// collide under the Manager's label-keyed upsert; the body text is the raw
-// file content. Empty or unreadable files are skipped.
+// EnsureSeeded populates the KB from the seed .md files the first time it is
+// used, so it starts with curated content. It is idempotent: a KB that already
+// has items is left alone. Empty and unreadable files are skipped.
 func (m *Manager) EnsureSeeded(seedRoot string) error {
 	if m.idx.Len() > 0 {
-		return nil // already seeded (or populated another way) — never repeat.
+		return nil // already seeded (or populated another way): do not repeat.
 	}
 
 	files := []string{}
@@ -61,11 +53,8 @@ func (m *Manager) EnsureSeeded(seedRoot string) error {
 	return nil
 }
 
-// seedLabelFor derives the label for a seed file at `file` relative to
-// `seedRoot` (slash-separated). If the two paths cannot be made relative (e.g.
-// one is relative and the other absolute — `filepath.Rel` errors), it falls
-// back to the file's basename so a label is always produced. Kept as a small
-// helper so the fallback is independently testable.
+// seedLabelFor derives the label for a seed file: its path relative to
+// seedRoot, or the basename when filepath.Rel fails.
 func seedLabelFor(seedRoot, file string) string {
 	rel, err := filepath.Rel(seedRoot, file)
 	if err != nil {

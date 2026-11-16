@@ -38,8 +38,8 @@ The bridge is organized into focused packages:
 
 ``tools``
     ``tools.All()`` returns the tool definitions the bridge exposes to the
-    LLM: ``read``, ``write``, ``shell``, ``grep``, ``glob``, ``search_replace``
-    and ``knowledge``.
+    LLM: ``read``, ``write``, ``shell``, ``grep``, ``glob``, ``curl``,
+    ``search_replace`` and ``knowledge``.
 
 ``cmd/llm-tools``
     The helper that runs the filesystem tools (``read``, ``write``, ``glob``,
@@ -77,13 +77,13 @@ Entry points
 The public API of the ``server`` package is a set of ``Run*`` functions, all of
 which funnel into the single ``run`` function:
 
-- ``Run(r, w, provider)`` — a single fixed provider (legacy/testing).
-- ``RunWithProviders(r, w, providers, defaultName)`` — a named provider
+- ``Run(r, w, provider)`` - a single fixed provider (legacy/testing).
+- ``RunWithProviders(r, w, providers, defaultName)`` - a named provider
   registry, switchable per request.
-- ``RunWithSystemPrompt(r, w, providers, defaultName, systemPrompt)`` — adds a
+- ``RunWithSystemPrompt(r, w, providers, defaultName, systemPrompt)`` - adds a
   global system prompt.
-- ``RunWithOptions(...)`` — adds the prune flags.
-- ``RunWithKnowledgeBase(...)`` — adds the knowledge base (base dir, scope +
+- ``RunWithOptions(...)`` - adds the prune flags.
+- ``RunWithKnowledgeBase(...)`` - adds the knowledge base (base dir, scope +
   embedder). This is what ``cmd/llm-bridge/main.go`` calls.
 
 Every variant reads from ``r`` and writes to ``w``, so the bridge is easily
@@ -143,18 +143,18 @@ The request flow
    current history snapshot, all tools and the effective system prompt. It
    publishes the cancel function so the reader goroutine can interrupt the
    stream, then relays streaming ``chunk``/``thinking`` events to the client.
-#. If the model returned tool calls, the bridge classifies each one. **Read-only**
-   tools (``read``/``grep``/``glob``, plus the fully internal ``knowledge``) are
-   run by the bridge right away — the result is appended to the history and a
-   ``tool_call`` event is emitted for display only. **Mutating** tools
-   (``shell``/``write``/``search_replace``) are emitted as ``tool_confirm``
-   events and queued in ``pendingApprovals``; the loop returns, waiting for the
-   client to approve each one.
+#. If the model returned tool calls, the bridge classifies each one. A
+   **read-only** tool (``read``/``grep``/``glob``, and a ``knowledge`` lookup)
+   runs right away: the result is appended to the history and a ``tool_call``
+   event goes out for display only. A **mutating** tool
+   (``shell``/``write``/``search_replace``/``curl``, and a ``knowledge`` write)
+   goes out as ``tool_confirm`` and is queued in ``pendingApprovals``. The loop
+   returns and waits for the approvals.
 #. When a ``tool_confirm`` approval arrives, ``handleLine`` runs that tool
-   (``executeTool``), appends its result and — once ``pendingApprovals`` is empty
-   — calls ``runToolCycle`` again. The loop repeats until the model produces a
-   final answer with no tool calls. A denied tool is signalled with ``cancel``
-   (which aborts the turn).
+   (``executeTool``), appends its result and, once ``pendingApprovals`` is
+   empty, calls ``runToolCycle`` again. The loop repeats until the model
+   produces a final answer with no tool calls. A denied tool is signalled with
+   ``cancel``, which aborts the turn.
 #. On a final answer, the bridge emits ``turn_end`` (with stop reason, model
    and token counts), a ``files_changed`` event listing any paths written this
    turn, and a final ``usage_delta``. It then runs the optional pruning
@@ -205,7 +205,7 @@ Knowledge base
 The server builds the ``knowledge.Set`` for the effective scope on ``set_cwd``
 and when a prompt changes the scope via ``kb_scope``: the shared KB
 (``kbBaseDir/_global/data.json``) and/or the cwd project's
-(``kbBaseDir/<project>/data.json``); the set is cleared when the KB is
+(``kbBaseDir/<project>/data.json``). The set is cleared when the KB is
 disabled. The scope comes from ``-kb-scope`` (``global`` by default, or
 ``project``/``both``). The ``knowledge`` tool calls are resolved locally inside
 ``runToolCycle`` so they never wait on the client. A one-line note about the

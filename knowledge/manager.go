@@ -29,9 +29,8 @@ import (
 	"llm-bridge/logger"
 )
 
-// item is a single stored document plus its embedding. The JSON schema mirrors
-// the kiro format ({id, payload:{label,text}, vector}) so data.json stays a
-// simple, proven shape; we are not required to be byte-compatible with kiro.
+// item is one stored document plus its embedding. The shape mirrors kiro's
+// ({id, payload:{label,text}, vector}) so data.json stays simple.
 type item struct {
 	ID      int `json:"id"`
 	Payload struct {
@@ -41,23 +40,22 @@ type item struct {
 	Vector []float32 `json:"vector"`
 }
 
-// Manager ties together an Embedder, an Index and on-disk persistence. It is
-// scoped to a single knowledge base key; when dir is non-empty, Add persists
-// to dir/<key>/data.json after each insertion.
+// Manager ties an Embedder, an Index and on-disk persistence together, scoped to
+// one knowledge base key. A non-empty dir persists to dir/<key>/data.json after
+// every change.
 type Manager struct {
 	embed Embedder
 	idx   Index
 	dir   string // base dir ("" = in-memory only, no persistence)
-	// project is the storage key: the directory name under dir that holds this
-	// KB's data.json. For a project KB it is the last element of the cwd; for
-	// the global (shared) KB it is GlobalKey ("_global").
+	// project is the storage key: the directory name under dir holding this
+	// KB's data.json (the cwd's last element, or GlobalKey for the shared KB).
 	project string
-	// seedProject scopes the seed subdirectory used by EnsureSeeded
-	// (seedRoot/<seedProject>/*.md). Empty means "global seeds only". It
-	// defaults to project but is decoupled from it so the shared KB
-	// (project == "_global") does not look for a "_global" seed subdir.
+	// seedProject scopes the seed subdirectory EnsureSeeded reads
+	// (seedRoot/<seedProject>/*.md). Empty means global seeds only. It defaults
+	// to project but is separate from it, so the shared KB (_global) does not
+	// look for a "_global" seed subdir.
 	seedProject string
-	seedRoot    string // dir of seed .md files; used by Reset to rebuild from seed
+	seedRoot    string // dir of seed .md files, used by Reset
 	items       []item
 }
 
@@ -72,11 +70,10 @@ func NewManager(embed Embedder, project string) *Manager {
 	}
 }
 
-// Load returns a Manager for project whose data lives under baseDir (that is,
-// baseDir/<project>/data.json). If the file exists it is read and the index is
-// rebuilt from its vectors; otherwise the manager starts empty and the file is
-// created on the first Add. A non-parseable data.json is returned as an error
-// so callers can decide whether to warn or wipe.
+// Load returns a Manager for project whose data lives under
+// baseDir/<project>/data.json. A missing file starts the manager empty; the
+// file is created on the first Add. A corrupt one is an error, so the caller
+// decides between a warning and a wipe.
 func Load(baseDir, project string, embed Embedder) (*Manager, error) {
 	m := NewManager(embed, project)
 	m.dir = baseDir
@@ -85,7 +82,7 @@ func Load(baseDir, project string, embed Embedder) (*Manager, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return m, nil // nothing persisted yet — starts empty.
+			return m, nil // nothing persisted yet, starts empty.
 		}
 		return nil, err
 	}
@@ -126,11 +123,8 @@ func (m *Manager) save() error {
 }
 
 // Add embeds text with the passage prefix and stores it under label. It is an
-// **upsert by label**: if an item with that label already exists, its text and
-// vector are replaced (re-embedded with the new content) instead of inserting a
-// duplicate. The label is the stable identifier the model uses both to store a
-// note and to correct one it previously wrote. Returns the item's id and
-// persists to disk (if persistence is enabled).
+// upsert by label: an existing label gets its text and vector replaced, so the
+// model can correct a note it wrote earlier.
 func (m *Manager) Add(label, text string) (int, error) {
 	vec, err := m.embed.Embed(PassagePrefix+text, false)
 	if err != nil {
@@ -165,8 +159,8 @@ func (m *Manager) Add(label, text string) (int, error) {
 	return id, nil
 }
 
-// Search embeds query with the query prefix and returns the top-k hits.
-// limit <= 0 falls back to the index default (5).
+// Search embeds query with the query prefix and returns the top-k hits; a
+// limit <= 0 means 5.
 func (m *Manager) Search(query string, limit int) ([]Result, error) {
 	start := time.Now()
 	vec, err := m.embed.Embed(QueryPrefix+query, true)
@@ -194,22 +188,18 @@ func (m *Manager) Show() string {
 // Len returns the number of stored items.
 func (m *Manager) Len() int { return m.idx.Len() }
 
-// SetSeedRoot records the directory of the seed .md files used by Reset to
-// rebuild the knowledge base from curated content.
+// SetSeedRoot records the directory of the seed .md files Reset rebuilds from.
 func (m *Manager) SetSeedRoot(root string) { m.seedRoot = root }
 
-// SetSeedProject scopes which seed subdirectory EnsureSeeded reads
-// (seedRoot/<seedProject>/*.md). An empty value means "global seeds only",
-// which is what the shared KB uses. The default is the manager's project key.
+// SetSeedProject scopes the seed subdirectory EnsureSeeded reads. Empty means
+// global seeds only, which is what the shared KB uses.
 func (m *Manager) SetSeedProject(project string) { m.seedProject = project }
 
-// Project returns the storage key of this knowledge base (the directory name
-// under the KB base dir).
+// Project returns the storage key of this knowledge base.
 func (m *Manager) Project() string { return m.project }
 
-// rebuildIndex reconstructs the brute-force index from the current items. It is
-// used after any item mutation (upsert/delete) that the plain index cannot apply
-// in place. The KB is small, so a full rebuild is cheap.
+// rebuildIndex reconstructs the index from items, after a mutation the plain
+// index cannot apply in place. The KB is small, so a full rebuild is cheap.
 func (m *Manager) rebuildIndex() {
 	m.idx = NewBruteForce()
 	for _, it := range m.items {
@@ -235,11 +225,8 @@ func (m *Manager) Delete(label string) (bool, error) {
 	return false, nil
 }
 
-// Reset clears the knowledge base and rebuilds it from the seed .md files
-// (m.seedRoot, if set). It is how the curated seed content — the source of truth
-// for architecture/notes — is refreshed after being edited. Manual items added
-// during conversations are discarded. When no seed root is configured it simply
-// wipes the KB (a hard reset).
+// Reset clears the knowledge base and rebuilds it from the seed files, if a
+// seed root is set. Without one it just wipes the KB.
 func (m *Manager) Reset() error {
 	m.items = nil
 	m.idx = NewBruteForce()
@@ -252,9 +239,9 @@ func (m *Manager) Reset() error {
 	return m.EnsureSeeded(m.seedRoot)
 }
 
-// toolArgs is the JSON shape of the `knowledge` tool arguments. It is shared by
-// Manager.Execute (single KB) and Set.Execute (one or two scoped KBs); the
-// "scope" field is only meaningful for a Set.
+// toolArgs is the JSON shape of the `knowledge` tool arguments, shared by
+// Manager.Execute and Set.Execute. The scope field only means something to a
+// Set.
 type toolArgs struct {
 	Command string `json:"command"`
 	Query   string `json:"query"`
@@ -275,9 +262,8 @@ func parseToolArgs(args json.RawMessage) (toolArgs, error) {
 	return p, nil
 }
 
-// Execute handles a `knowledge` tool invocation (command: show|search|add) and
-// returns the formatted result to feed back to the model as the tool result.
-// args is the tool's raw JSON arguments.
+// Execute handles a `knowledge` tool call and returns the text to feed back to
+// the model.
 func (m *Manager) Execute(args json.RawMessage) (string, error) {
 	p, err := parseToolArgs(args)
 	if err != nil {
@@ -338,9 +324,7 @@ func formatResults(res []Result) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// projectDirFromPath returns the last path element of path (used as the
-// project key for seed lookup). Kept small here; the cwd wiring lives in the
-// server phase.
+// projectDirFromPath returns the last path element of path, the project key.
 func projectDirFromPath(path string) string {
 	return filepath.Base(path)
 }

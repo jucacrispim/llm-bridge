@@ -21,39 +21,15 @@ package main
 
 // notest
 
-// Sandboxing is ON by default and gives every process the bridge starts exactly
-// one policy: the bridge itself runs unconfined, and each tool it spawns is a
-// caged child with the policy built for it.
-//
-// It used to be two layers — the bridge re-executed itself under a loose
-// "ceiling" and the tools ran under a stricter one, Landlock intersecting the
-// two. That is gone, for one reason: a process that is already confined cannot
-// give its child a namespace. caged's own namespace support needs
-// /proc/self/uid_map written during setup; from inside a ceiling that file
-// cannot be granted (Landlock rules are per inode, and the grant would resolve
-// to the ceiling's own uid_map) and must not be granted either (/proc/<pid>/
-// environ of the bridge carries the API keys). One policy per process is what
-// makes namespaces possible, and the price is that the bridge is no longer
-// bounded by the kernel itself — which is why no tool that takes a path from
+// Sandboxing is on by default: every process the bridge spawns gets exactly one
+// policy. The bridge itself runs unconfined, so no tool that takes a path from
 // the model may run inside it (see llm-tools).
 //
-// The filesystem policy is shared in spirit (a tool works on the projects, so
-// it needs what the bridge needs), while the environment (API keys), the IPC
-// and the network are what the tools are denied.
+// -disable-sandbox turns it off. A missing caged binary is a startup error,
+// never a fallback to unsandboxed execution.
 //
-// The one exception is the curl tool: it is the ONLY tool with network access,
-// and it pays for it with a much narrower filesystem policy. curl runs under its
-// own caged policy that grants the system trees and nothing else (no projects,
-// no home, no temp directory), because network and "can read the user's files"
-// together are a data-exfiltration primitive: with no local file to read, a
-// fetch has nothing to leak beyond the conversation the model already has. A
-// port allowlist (and, optionally, a host allowlist enforced by the bridge)
-// bounds where it may go.
-//
-// -disable-sandbox turns it off. A missing caged binary is a startup error
-// rather than a silent fallback to unsandboxed execution.
-//
-// These defaults are a starting point; -sandbox-ro/-sandbox-rw extend them.
+// Design notes are in docs/source/sandbox.rst. The policies below are a
+// starting point; -sandbox-ro/-sandbox-rw extend them.
 
 import (
 	"context"
@@ -70,37 +46,30 @@ import (
 	"llm-bridge/tools"
 )
 
-// toolboxHandshakeTimeout bounds the startup check of the llm-tools binary: it
-// answers one request and exits, so anything slower than this is a broken
-// binary, not a slow one.
+// toolboxHandshakeTimeout bounds the startup check of the llm-tools binary,
+// which answers one request and exits.
 const toolboxHandshakeTimeout = 5 * time.Second
 
-// defaultTempDir is the temporary directory the tools use. /tmp itself is NOT
-// granted (any process could read another one's scratch files); a dedicated
-// directory gives programs that need a writable temp dir — go build/test,
-// mkstemp, gcc, git — a place that the policy actually allows.
+// defaultTempDir is the temporary directory the tools use. /tmp itself is not
+// granted: any process of the user could read another one's scratch files.
 const defaultTempDir = "/tmp/llm-bridge"
 
-// tempEnvNames are the environment variables that point at the temporary
-// directory. TMPDIR is the POSIX convention and what Go's os.TempDir() reads;
-// GOTMPDIR is the go command's own work directory; TMP and TEMP are the
-// portable fallbacks some programs consult after TMPDIR (Perl's File::Spec,
-// for instance).
+// tempEnvNames are the variables that point at the temporary directory: TMPDIR
+// is what os.TempDir reads, GOTMPDIR is the go command's own work directory,
+// and some programs consult TMP and TEMP after TMPDIR.
 var tempEnvNames = []string{"TMPDIR", "GOTMPDIR", "TMP", "TEMP"}
 
 // defaultCurlPorts are the destinations the curl tool may reach when no
-// -curl-port is given: HTTPS and HTTP, the two schemes the tool accepts.
+// -curl-port is given: HTTPS and HTTP, the two schemes it accepts.
 var defaultCurlPorts = []int{443, 80}
 
-// systemReadOnly are the trees a program needs to run at all: the binaries,
-// their shared libraries and the system configuration (CAs for TLS,
-// resolv.conf, nsswitch.conf, hosts).
+// systemReadOnly are the trees a program needs to run at all: binaries, shared
+// libraries and system configuration (CAs, resolv.conf, nsswitch.conf, hosts).
 var systemReadOnly = []string{"/usr", "/lib", "/lib64", "/bin", "/etc"}
 
 // sandboxConfig holds the sandbox command-line options.
 type sandboxConfig struct {
-	// disabled turns the whole sandbox off (-disable-sandbox). The sandbox is
-	// on by default: every tool the bridge spawns runs under caged.
+	// disabled turns the whole sandbox off (-disable-sandbox).
 	disabled bool
 	// cagedBin is the path of the caged binary (empty: $CAGED_BIN, then
 	// $PATH).
@@ -108,7 +77,7 @@ type sandboxConfig struct {
 	// ro/rw extend the read-only/read-write lists of the tool policies.
 	ro []string
 	rw []string
-	// curl exposes the curl tool, the only tool with network access.
+	// curl exposes the curl tool.
 	curl bool
 	// curlPorts are the TCP ports the curl tool may connect to (default
 	// defaultCurlPorts; ignored with curlAnyPort).
@@ -156,11 +125,9 @@ func (c *sandboxConfig) binary() (string, error) {
 // toolsBinary resolves the llm-tools binary: the -tools-bin flag, then the
 // directory of the bridge itself, then $PATH.
 //
-// Next to the bridge comes before $PATH on purpose: the helper answers a
-// protocol the bridge defines, so the one that ships with this bridge is the
-// one to run. A stray llm-tools earlier in the PATH would be a different build
-// (the handshake below catches it, but picking the right file is better than
-// failing on it).
+// Next to the bridge comes before $PATH: the helper answers a protocol this
+// bridge defines, so the copy that ships with it is the one to run. A
+// different build earlier in the PATH would be a different protocol version.
 func (c *sandboxConfig) toolsBinary() (string, error) {
 	if c.toolsBin != "" {
 		return filepath.Abs(c.toolsBin)
@@ -196,43 +163,32 @@ func existing(paths []string) []string {
 }
 
 // toolPaths returns the read-only and read-write paths of the shell/grep/hooks
-// policy: the system trees, the knowledge-base locations (assets read-only,
-// per-project data read-write) and whatever -sandbox-ro/-sandbox-rw added.
-//
-// No project directory is granted by default: the project changes at runtime
-// (set_cwd), so whoever starts the bridge passes the projects root with
-// -sandbox-rw.
+// policy. No project directory is granted: the project changes at runtime
+// (set_cwd), so the projects root comes in through -sandbox-rw.
 func (c *sandboxConfig) toolPaths() (ro, rw []string) {
 	home, _ := os.UserHomeDir()
 	ro = append([]string{}, systemReadOnly...)
-	// /dev/urandom is read-only on purpose: reading a character device needs
-	// only read access, and the tools spawn programs that read randomness
-	// (git writes objects through mkstemp, TLS handshakes). /dev/null, below,
-	// is the one that has to be writable: `cmd 2>/dev/null` opens it for
-	// writing, and read access alone would fail the open.
+	// Reading a character device needs only read access.
 	ro = append(ro, "/dev/urandom")
 	if home != "" {
 		// KB assets (ONNX model, tokenizer, libonnxruntime).
 		ro = append(ro, filepath.Join(home, ".cache", "llm-bridge"))
-		// Global context (~/.llm-bridge/*.md) and global hooks
-		// (~/.llm-bridge/hooks/*.sh). The bridge reads the context at startup
-		// and the tools exec the hook scripts, which is exactly what read
-		// access grants (read the file, execute it); without this both would
-		// silently disappear once the sandbox is on.
+		// Global context and hooks. The tools exec the hook scripts, and read
+		// access grants that; without the grant both stop being visible once
+		// the sandbox is on.
 		ro = append(ro, filepath.Join(home, ".llm-bridge"))
 	}
 	ro = append(ro, c.ro...)
 
-	// /dev/null is writable on purpose: `cmd 2>/dev/null` opens it for writing
-	// (read permission on it is not enough).
+	// A child with no stdin gets /dev/null opened for writing, so read access
+	// is not enough.
 	rw = []string{"/dev/null"}
 	if home != "" {
-		// Per-project knowledge bases (data.json) and the bridge's own config.
+		// Per-project knowledge bases (data.json) and the bridge's config.
 		rw = append(rw, filepath.Join(home, ".local", "share", "llm-bridge"))
 	}
-	// The temp dir is writable by the tools: they run go build/test, mkstemp
-	// and friends. It is created at startup (see ensureTempDir), so it exists
-	// by the time caged opens it.
+	// Created at startup by ensureTempDir, so caged finds it when it builds
+	// the policy.
 	if c.tmpDir != "" {
 		rw = append(rw, c.tmpDir)
 	}
@@ -240,15 +196,12 @@ func (c *sandboxConfig) toolPaths() (ro, rw []string) {
 	return ro, rw
 }
 
-// ensureTempDir creates the temporary directory at startup: caged opens every
-// granted path with O_PATH when it builds a policy, so a missing one makes it
-// fail with exit 125 (and the first shell/grep call would fail as a setup
-// error).
+// ensureTempDir creates the temporary directory before any policy grants it:
+// caged opens every granted path when it builds a policy, and a missing one is
+// exit 125.
 //
-// 0700 on purpose: it is this user's scratch space, and a world-writable
-// directory in /tmp would let another user plant files (or symlinks) there.
-// Failure is a startup error, never a silent fallback to /tmp, which is not
-// granted at all.
+// 0700: a world-writable directory in /tmp would let another user plant files
+// or symlinks there.
 func (c *sandboxConfig) ensureTempDir() error {
 	if c.tmpDir == "" {
 		return nil
@@ -259,9 +212,9 @@ func (c *sandboxConfig) ensureTempDir() error {
 	return nil
 }
 
-// tempEnv returns the environment entries that point every temporary-directory
-// convention at dir. The tools get caged's base env, with no TMPDIR at all, so
-// without this a tool would fall back to /tmp and be denied.
+// tempEnv returns the entries that point every temporary-directory convention
+// at dir. The tools get caged's base env, which has no TMPDIR, so without them
+// a tool falls back to /tmp and is denied.
 func tempEnv(dir string) []string {
 	if dir == "" {
 		return nil
@@ -274,32 +227,12 @@ func tempEnv(dir string) []string {
 }
 
 // toolSandbox builds the sandbox for the external processes the bridge spawns
-// (shell, grep, hooks). It returns nil when the sandbox is off, which means
-// "run the tools as before".
+// (shell, grep, hooks), or nil when the sandbox is off.
 //
-// A tool gets a filesystem policy that lets it work on the projects and on the
-// knowledge base, and it is denied the environment the bridge holds (no
-// KeepEnv: caged's small base set only, so the API keys never reach it), the
-// IPC (unix sockets and SysV IPC are denied by default) and the network
-// (seccomp denies the socket families by default; -sandbox-loopback-only
-// releases them inside a namespace whose only interface is loopback, and real
-// outbound access belongs to the curl tool alone, see curlSandbox).
-//
-// The one thing added to the environment is the temporary-directory block:
-// caged's base set has no TMPDIR, so without it programs that need a scratch
-// dir (go build/test, mkstemp, gcc, git) would fall back to /tmp, which the
-// policy denies.
-//
-// -sandbox-loopback-only is the single exception to "the tools have no
-// network", and it is a narrow one: the socket families are released (they have
-// to be, or seccomp denies socket(AF_INET) before anything else) together with
-// any-port connect and bind, but the process is in a network namespace that
-// contains only loopback. The bound is topological, not a filter: an address
-// outside 127.0.0.0/8 does not exist in there. That is the only way to say
-// "localhost only" — Landlock has no address field and seccomp cannot read the
-// sockaddr — and it is what a tool that starts a test server and talks to it in
-// the same command needs. It does not reach the curl sandbox: a loopback-only
-// curl could fetch nothing.
+// A tool gets no KeepEnv, so caged's base environment only and the API keys
+// stay out. -sandbox-loopback-only releases the socket families inside a
+// namespace whose only interface is loopback; real outbound access belongs to
+// curl alone (see curlSandbox).
 func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 	if c.disabled {
 		return nil, nil
@@ -309,28 +242,20 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 		return nil, err
 	}
 	ro, rw := c.toolPaths()
-	// The llm-tools binary has to be readable and executable inside this
-	// policy: the filesystem tools run as it, so without the grant every
-	// read/write/glob/search_replace would fail to exec.
+	// The filesystem tools run as llm-tools, so its directory has to be
+	// readable and executable inside this policy.
 	if c.toolBin != "" {
 		ro = append(ro, filepath.Dir(c.toolBin))
 	}
 	p := sandbox.Policy{
 		ReadOnly:  existing(ro),
 		ReadWrite: existing(rw),
-		// No KeepEnv on purpose: the tools run with caged's small base
-		// environment, so the API keys do not leak into them even though the
-		// bridge itself was started with --keep-env.
-		// The temporary-directory block, on top of caged's base env: no
-		// KeepEnv, so the API keys stay out, but tools still get a writable
-		// scratch dir instead of falling back to a denied /tmp.
-		Env: tempEnv(c.tmpDir),
+		Env:       tempEnv(c.tmpDir),
 	}
 	if c.loopback {
-		// The namespace is the bound: releasing the families and the ports is
-		// safe precisely because there is nowhere to go. Each tool run gets a
-		// fresh namespace, so a server started by one call is not reachable
-		// from the next.
+		// The namespace is the bound: there is nowhere to connect to, and each
+		// call gets a fresh one, so a server started by one call is not
+		// reachable from the next.
 		p.LoopbackOnly = true
 		p.AllowNetworkSockets = true
 		p.ConnectTCP = true
@@ -339,27 +264,9 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 	return sandbox.New(caged, p)
 }
 
-// curlSandbox builds the sandbox for the curl tool: the only tool with network
-// access, and this policy is the reason it can be the only one.
-//
-// curl gets the system trees and nothing else. No project, no home directory, no
-// knowledge base, no temp dir: it cannot read a single file of the user's, so a
-// fetch has nothing local to leak (no "at file", no file://, no cookie file, no
-// config file). That is the whole point: network plus "can read the projects"
-// together is an exfiltration primitive — the answer can be sent inside a URL
-// path, a header or a DNS query, and no flag allowlist changes that. With
-// nothing to read, the only data left to leak is the conversation the model
-// already has.
-//
-// Writing is granted for /dev/null only: os/exec opens it for the child's stdin
-// when none is set, and inside Landlock that open fails without the grant.
-//
-// The destination is bounded twice: by port, in the kernel (Landlock
-// NET_CONNECT_TCP via -curl-port; Landlock has no host filtering at all, and a
-// UDP DNS query is not covered by the port rule) and, optionally, by host — the
-// bridge compares url.Hostname() with -curl-allow-host before exec.
-//
-// nil means "the curl tool is off" and it is not offered to the model.
+// curlSandbox builds the sandbox for the curl tool: the system trees and
+// nothing else, so a fetch has no local file to read (and therefore nothing to
+// leak into a URL, a header or a DNS query). nil means the tool is off.
 func (c *sandboxConfig) curlSandbox() (*sandbox.Sandbox, error) {
 	if c.disabled || !c.curl {
 		return nil, nil
@@ -373,10 +280,8 @@ func (c *sandboxConfig) curlSandbox() (*sandbox.Sandbox, error) {
 	p := sandbox.Policy{
 		ReadOnly:  existing(ro),
 		ReadWrite: existing([]string{"/dev/null"}),
-		// The socket families have to be allowed for any TCP connection to
-		// exist at all; the port rules (or -curl-any-port) then narrow where it
-		// may go. No KeepEnv on purpose: caged's base environment only, so the
-		// API keys and the bridge's proxy variables never reach a fetch.
+		// The families have to be allowed for any TCP connection to exist; the
+		// port rules then narrow where it may go.
 		AllowNetworkSockets: true,
 		ConnectTCP:          c.curlAnyPort,
 	}
@@ -395,15 +300,9 @@ func (c *sandboxConfig) curlPortsOrDefault() []int {
 	return c.curlPorts
 }
 
-// requireReportFD checks that the caged binary understands --report-fd, the
-// descriptor the bridge uses to tell "the sandbox did not apply" from "the
-// command exited with that status".
-//
-// No exit status can make that distinction: caged replaces itself with the
-// command, so both share the status space and a tool like `ls` (exit 2) or any
-// program exiting 125 is indistinguishable from a broken sandbox. An old caged
-// therefore cannot be worked around — it is a startup error, like a missing
-// binary, never a silent downgrade to guessing.
+// requireReportFD checks at startup that bin understands --report-fd, the
+// descriptor that tells a failed sandbox from a command that exited with the
+// same status. An old caged is a startup error, not a downgrade to guessing.
 func requireReportFD(bin string) error {
 	out, err := exec.Command(bin, "--help").CombinedOutput()
 	if err != nil {
@@ -421,26 +320,20 @@ func requireReportFD(bin string) error {
 const loopbackProbeTimeout = 10 * time.Second
 
 // probeLoopback runs one throwaway command under --loopback-only, so the
-// namespace is built (and the command run) before the first tool call.
+// namespace is built before the first tool call.
 //
-// The flag cannot be checked the way --report-fd is: a --help that lists
-// --loopback-only says nothing about whether this process can actually create a
-// namespace. unshare(CLONE_NEWUSER) fails with EPERM or EINVAL for reasons that
-// are all environmental (unprivileged_userns_clone=0, an AppArmor profile such
-// as the one Ubuntu 23.10+ ships, a bridge that is itself running inside another
-// cage), and the setup also needs to write /proc/self/uid_map. A bridge that
-// accepted the flag and then failed in every tool call would turn a startup
-// problem into a hundred *SetupErrors; this way it stops at startup, like a
-// missing binary.
-//
-// The exit status catches an old caged (unknown option: usage error, exit 2) and
-// the report descriptor catches a setup that did not apply (exit 125); both come
-// back as an error from Run.
+// --help cannot answer this: listing the flag says nothing about whether this
+// process can create a namespace. unshare(CLONE_NEWUSER) fails for
+// environmental reasons (unprivileged_userns_clone=0, an AppArmor profile, a
+// bridge already inside another cage) and the setup has to write
+// /proc/self/uid_map. Failing here stops the bridge at startup instead of
+// failing every tool call. The exit status catches an old caged (exit 2), the
+// report descriptor catches a setup that did not apply (exit 125).
 func probeLoopback(bin string) error {
 	sb, err := sandbox.New(bin, sandbox.Policy{
 		ReadOnly: existing(systemReadOnly),
 		// LoopbackOnly alone: the probe is about the namespace, and granting
-		// nothing it does not need keeps it from failing for another reason.
+		// nothing else keeps it from failing for another reason.
 		LoopbackOnly: true,
 	})
 	if err != nil {

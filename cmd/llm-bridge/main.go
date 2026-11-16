@@ -60,7 +60,7 @@ func main() {
 	// exit. It does NOT enter the server loop. Uses the ONNX embedder
 	// (make build-kb) to embed every *.md in the seed dir (global + per-project)
 	// and does a FULL rebuild (wipe + re-embed), so edits to the seed are
-	// reflected. The seed stays decoupled from the binary — it is only read at
+	// reflected. The seed stays decoupled from the binary: it is only read at
 	// populate time.
 	if *populateKB != "" {
 		if err := populateProjectKB(*populateKB, *projectName, *knowledgeBase); err != nil {
@@ -193,27 +193,11 @@ func main() {
 		}
 	}
 
-	// Knowledge base wiring. The server builds the managers lazily on
-	// `set_cwd` (kbBaseDir/<key>/data.json), so here we only resolve the base
-	// dir, the scope and the embedder. With -kb-scope=global (the default) a
-	// single shared KB lives under kbBaseDir/_global and does not follow the
-	// cwd; -kb-scope=project keeps one KB per cwd project (the previous
-	// behavior) and -kb-scope=both loads the shared KB plus the project's,
-	// merging searches. The scope can be overridden per prompt (kb_scope).
-	//
-	// -knowledge=false disables the KB outright (embedder nil → the server
-	// treats it as disabled).
-	//
-	// When enabled, the load timing of the (heavy) ONNX model is controlled by
-	// -kb-load:
-	//   - "lazy" (default): wraps the embedder in a LazyEmbedder, so the model
-	//     is only loaded on the first embedding (first `knowledge` add/search).
-	//     The server starts fast; a failure to load surfaces as the result of
-	//     that first KB operation instead of crashing or delaying boot.
-	//   - "eager": the previous behavior — load the embedder at startup; if it
-	//     fails (model file missing, or the build is without the knowledge_onnx
-	//     tag, in which case NewEmbedder always errors), log a warning and fall
-	//     back to the disabled embedder so the bridge keeps running without a KB.
+	// Knowledge base wiring: resolve the base dir, the scope and the embedder.
+	// The server builds the managers lazily on `set_cwd`. -kb-load picks when
+	// the ONNX model is loaded: LazyEmbedder on first use (the default) or at
+	// startup, where a failure disables the KB with a warning. See
+	// docs/source/usage.rst.
 	var kbBaseDir string
 	var kbEmbed knowledge.Embedder
 	if *knowledgeEnabled {
@@ -289,7 +273,7 @@ func main() {
 // it, then returns (the caller exits). The seed dir layout follows EnsureSeeded:
 // <seedDir>/*.md (global) plus <seedDir>/<project>/*.md (per-project); for the
 // shared KB (project == "_global") only the global seeds are used. The rebuild
-// is total — the existing data.json is wiped and re-embedded from the seed, so
+// is total: the existing data.json is wiped and re-embedded from the seed, so
 // edits to the seed are reflected. Requires the ONNX embedder (knowledge_onnx
 // build tag); a failure to load it is fatal here.
 func populateProjectKB(seedDir, project, knowledgeBaseFlag string) error {

@@ -31,34 +31,28 @@ import (
 	"time"
 )
 
-// Exit codes caged uses for its own failures (see caged's main.c). They are a
-// hint, never a proof: caged replaces itself with the command, so the command
-// shares the status space and can exit with either number. What settles it is
-// the report descriptor (see Sandbox.Run).
+// Exit codes caged uses for its own failures. The command shares the status
+// space, so these only shape the error message (see docs/source/sandbox.rst).
 const (
-	// ExitUsage means caged could not parse the policy: a bug on our side.
+	// ExitUsage means caged rejected the policy argv.
 	ExitUsage = 2
-	// ExitSetupFailed means caged failed to build or apply the sandbox, or
-	// could not exec the command.
+	// ExitSetupFailed means caged could not apply the sandbox or exec the
+	// command.
 	ExitSetupFailed = 125
 )
 
-// ReportFD is the descriptor caged reports its own failures on (caged's
-// --report-fd): the first one above stderr, so the command's stdio is
-// untouched. caged marks it close-on-exec, so the command never sees it, and
-// writes nothing to it when the setup succeeded.
+// ReportFD is the descriptor caged reports its own failures on: the first one
+// above stderr, marked close-on-exec. caged writes nothing there when the
+// setup succeeded.
 const ReportFD = 3
 
-// waitDelay bounds how long we wait for the command's I/O pipes to close after
-// the process (group) was killed on cancellation, so a lingering grandchild
-// holding the pipe cannot block the bridge forever.
+// waitDelay bounds the wait for the output pipes after the process group was
+// killed, so a grandchild holding the pipe does not block the bridge.
 const waitDelay = 5 * time.Second
 
-// disableWarnings is set in caged's own environment so it does not print the
-// "this kernel does not support feature X" warnings. caged prints them on every
-// run, and a tool's output goes straight back to the model: repeating the same
-// three lines on every shell/grep call would only burn tokens. The bridge's own
-// run (the ceiling) still reports them once on stderr.
+// disableWarnings silences caged's "this kernel does not support feature X"
+// warnings. caged prints them on every run and a tool's output goes back to
+// the model verbatim, so they would burn tokens on every shell/grep call.
 const disableWarnings = "CAGED_DISABLE_WARNINGS=1"
 
 // Sandbox builds exec.Cmd values that run commands under a caged policy.
@@ -69,9 +63,9 @@ type Sandbox struct {
 	Policy Policy
 }
 
-// New validates bin and the policy and returns the sandbox. An empty bin or an
-// invalid policy is an error: the caller is expected to fail loudly, not to
-// fall back to unsandboxed execution.
+// New returns a sandbox for bin and p. An empty bin or an invalid policy is an
+// error, so a bad configuration stops at startup instead of at the first tool
+// call.
 func New(bin string, p Policy) (*Sandbox, error) {
 	if bin == "" {
 		return nil, errors.New("sandbox: empty caged binary path")
@@ -82,26 +76,12 @@ func New(bin string, p Policy) (*Sandbox, error) {
 	return &Sandbox{Bin: bin, Policy: p}, nil
 }
 
-// Command returns a command that runs name with args under the sandbox policy:
+// Command returns a command that runs name with args under the policy:
 //
 //	caged <policy flags> --report-fd 3 -- name args...
 //
-// Prefer Run, which also wires the report descriptor and turns caged's own
-// failures into a *SetupError. Use Command directly only when the caller needs
-// the raw *exec.Cmd (and does not need to tell a broken sandbox from a command
-// that exited with the same status).
-//
 // The command runs in its own process group, so cancelling the context kills
-// the whole subtree (the tool's `bash -c` may have spawned background
-// children: CommandContext alone would kill only caged, leaving them alive).
-//
-// Two caged limitations shape this:
-//
-//   - caged's close_range(3, ~0) discards inherited descriptors above stderr;
-//     only pipes survive, and only the report descriptor is spared. Do not set
-//     ExtraFiles on the returned command: Run uses it for the report pipe.
-//   - caged replaces the environment with its base set unless KeepEnv is set,
-//     so cmd.Env built by the caller is ignored on purpose.
+// whatever it spawned. Use Run unless you need the raw *exec.Cmd.
 func (s *Sandbox) Command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	flags := s.Policy.Args()
 	argv := make([]string, 0, len(flags)+4+len(args))
@@ -111,6 +91,8 @@ func (s *Sandbox) Command(ctx context.Context, name string, args ...string) *exe
 	argv = append(argv, args...)
 
 	cmd := exec.CommandContext(ctx, s.Bin, argv...)
+	// Env of the caged process, not of the command: caged filters it to its
+	// base set before exec.
 	cmd.Env = cagedEnv(os.Environ())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
@@ -130,32 +112,25 @@ func (s *Sandbox) Command(ctx context.Context, name string, args ...string) *exe
 	return cmd
 }
 
-// Run executes name with args under the sandbox policy, capturing the combined
-// stdout+stderr, and returns it with the command's error (typically an
-// *exec.ExitError carrying the command's own status).
+// Run executes name with args under the policy, in dir (empty means the bridge's
+// own working directory), and returns the combined stdout+stderr with the
+// command's error.
 //
-// When caged reports that the sandbox itself did not apply, the error is a
-// *SetupError instead: such a failure must never be handed to the model as the
-// tool's output, because the command did not run confined (or not at all) and
-// its status says nothing about the command. The decision is made from the
-// report descriptor, never from the exit status: the command shares the status
-// space with caged, so `ls` on a missing file (exit 2) or any program exiting
-// 125 would otherwise be indistinguishable from a broken sandbox.
-//
-// dir is the working directory (empty means the bridge's own).
+// When the sandbox itself did not apply, the error is a *SetupError instead.
+// Surface that as an error, not as the tool result: the command did not run
+// confined, or did not run at all.
 func (s *Sandbox) Run(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := s.Command(ctx, name, args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// The report pipe: caged writes its own diagnostics here and nothing when
-	// the setup succeeded, so an empty read is the proof that whatever
-	// happened was the command's doing.
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
 	defer pr.Close()
+	// caged closes every descriptor above stderr, so only this pipe reaches
+	// the command. Run owns ExtraFiles.
 	cmd.ExtraFiles = []*os.File{pw}
 
 	report := make(chan string, 1)
@@ -165,8 +140,8 @@ func (s *Sandbox) Run(ctx context.Context, dir, name string, args ...string) ([]
 	}()
 
 	out, runErr := cmd.CombinedOutput()
-	// Our copy of the write end is what keeps the reader from seeing EOF; the
-	// child's copy dies with FD_CLOEXEC as soon as caged execs the command.
+	// Our copy of the write end is what holds the reader open. The child's
+	// copy dies with FD_CLOEXEC when caged execs the command.
 	pw.Close()
 	if msg := <-report; msg != "" {
 		return out, &SetupError{Code: exitCode(runErr), Output: msg}
@@ -174,17 +149,10 @@ func (s *Sandbox) Run(ctx context.Context, dir, name string, args ...string) ([]
 	return out, runErr
 }
 
-// RunIO is Run with a stdin payload and stdout/stderr kept apart.
-//
-// It exists for the one tool that speaks a protocol instead of printing text
-// (llm-tools: one JSON request in, one JSON response out). Run's combined
-// output is what a shell command wants — the model should see stdout and
-// stderr interleaved, in the order the command wrote them — but it cannot carry
-// a response meant to be parsed: a single warning on stderr would corrupt it.
-//
-// The setup-failure contract is the same as Run's: a *SetupError comes back
-// when caged reports that the sandbox itself did not apply, and the caller must
-// not treat stdout as a result in that case.
+// RunIO is Run with a stdin payload and stdout/stderr kept apart. It serves
+// llm-tools, which answers one JSON request with one JSON response, so the
+// combined output of Run would corrupt the reply. The setup-failure contract
+// is the same.
 func (s *Sandbox) RunIO(ctx context.Context, dir, name string, stdin []byte, args ...string) (stdout, stderr []byte, err error) {
 	cmd := s.Command(ctx, name, args...)
 	if dir != "" {
@@ -226,10 +194,9 @@ func exitCode(err error) int {
 	return -1
 }
 
-// SetupError reports that the sandbox itself failed instead of the command. It
-// must never be returned to the model as the tool's output: a broken policy or
-// a sandbox that did not apply would silently look like a command that ran
-// unconfined (or that failed for its own reasons).
+// SetupError reports that the sandbox did not apply. Return it as an error,
+// not as the tool result: a broken policy would look like a command that ran
+// unconfined or failed for its own reasons.
 type SetupError struct {
 	// Code is the exit status caged exited with, or -1 when it did not exit
 	// normally. Informative only: Output is what proves the failure.
@@ -249,8 +216,8 @@ func (e *SetupError) Error() string {
 	return fmt.Sprintf("sandbox: caged reported a failure (exit %d): %s", e.Code, out)
 }
 
-// cagedEnv returns environ plus the switch that silences caged's ABI warnings,
-// replacing any inherited value so the variable appears only once.
+// cagedEnv returns environ with the warnings switch appended, replacing any
+// inherited value.
 func cagedEnv(environ []string) []string {
 	env := make([]string, 0, len(environ)+1)
 	for _, kv := range environ {

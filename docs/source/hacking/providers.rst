@@ -16,18 +16,18 @@ The active provider is selected at startup with ``--provider``
 (``deepseek`` or ``google``). Because both providers are registered up front,
 a single prompt can switch the active provider (and its model, thinking mode,
 reasoning effort or system prompt) through the per-request overrides described
-in :doc:`/protocol` — the override persists across subsequent prompts.
+in :doc:`/protocol`. An override persists across subsequent prompts.
 
 The shared request/response types (``llm/interface.go``) are:
 
-- ``ChatRequest`` — messages, tools, optional ``System``/``Model``, and the
+- ``ChatRequest`` - messages, tools, optional ``System``/``Model``, and the
   ``Thinking`` / ``ReasoningEffort`` overrides plus an ``OnReasoning`` callback
   invoked with each streamed chain-of-thought fragment.
-- ``ChatResponse`` — ``Content``, ``StopReason``, ``Usage``, ``ToolCalls``,
+- ``ChatResponse`` - ``Content``, ``StopReason``, ``Usage``, ``ToolCalls``,
   the actual ``Model`` used and the full ``Reasoning``.
-- ``Message`` — a history entry (role, content, optional tool calls / tool
-  call id, and the ``Reasoning`` chain-of-thought that accompanied it).
-- ``ToolCall`` — id, name, raw JSON arguments and, for Gemini, the
+- ``Message`` - a history entry: role, content, optional tool calls and tool
+  call id, plus the ``Reasoning`` that accompanied it.
+- ``ToolCall`` - id, name, raw JSON arguments and, for Gemini, the
   ``ThoughtSignature`` that must be echoed back.
 
 Common provider selection logic
@@ -40,7 +40,7 @@ Both providers honor, in order of priority:
    default provider, or ``DEEPSEEK_MODEL`` / ``GOOGLE_MODEL``).
 
 DeepSeek adds a third step: when no explicit model is configured anywhere, the
-model is **derived from the thinking mode** — ``deepseek-flash`` when
+model is **derived from the thinking mode**: ``deepseek-flash`` when
 thinking is on, ``deepseek-chat`` when off (``llm.DefaultModel``).
 
 Thinking and reasoning effort are also resolved per request through the same
@@ -66,12 +66,12 @@ Thinking (``ThinkingOptions``)
       ``reasoning_effort`` (default ``"high"``) that controls the strength of
       the reasoning stage.
     - **off** → ``{"thinking": {"type": "disabled"}}``. This is required even
-      for models that reason *by default* (e.g. ``deepseek-v4-flash``) — simply
-      omitting ``reasoning_effort`` is not enough to stop them.
+      for models that reason *by default* (e.g. ``deepseek-v4-flash``).
+      Omitting ``reasoning_effort`` alone does not stop them.
 
 Reasoning effort (``effectiveReasoningEffort``)
     Sent as ``reasoning_effort`` when thinking is on (e.g. ``low`` /
-    ``medium`` / ``high``; default ``high``). An empty value disables sending
+    ``medium`` / ``high``, default ``high``). An empty value stops sending
     the parameter. A per-request override wins over the provider's configured
     value.
 
@@ -83,15 +83,15 @@ Reasoning content
     Whether that reasoning stays in the conversation history depends on the
     flags:
 
-    - **Default mode (no pruning)** — the bridge keeps the full history,
+    - **Default mode (no pruning)** - the bridge keeps the full history,
       including each assistant message's chain-of-thought and every tool call
       and result, and sends it back to the API on each request. For DeepSeek,
-      the assistant's ``reasoning_content`` is sent back to the API. **only**
-      when that message performed tool calls (DeepSeek's thinking mode returns
-      HTTP 400 otherwise); for final answers without tool calls it is omitted
-      on the wire to save tokens. This is a per-request omission only — it
-      does **not** clean the history, which keeps everything.
-    - **With ``-prune`` or ``-aggressive-prune``** — the chain-of-thought (and,
+      the assistant's ``reasoning_content`` goes back to the API **only** when
+      that message performed tool calls, because the thinking mode answers
+      HTTP 400 otherwise. A final answer without tool calls omits it on the
+      wire, to save tokens. That is a per-request omission, not a clean: the
+      history keeps everything.
+    - **With ``-prune`` or ``-aggressive-prune``** - the chain-of-thought (and,
       for ``-aggressive-prune``, the intermediate tool calls and tool results
       too) is actually **removed from the stored history** once the turn
       completes. See :doc:`/usage` for the difference between the two modes.
@@ -131,7 +131,7 @@ Thinking budget (``effectiveThinkingBudget``)
 Function calls and ``thought_signature``
     Gemini emits a function call as a part carrying ``functionCall``
     (``name`` + ``args`` object, unlike OpenAI's JSON-string ``arguments``),
-    plus — when thinking is on — a **sibling** ``thoughtSignature`` field. The
+    plus, when thinking is on, a **sibling** ``thoughtSignature`` field. The
     provider preserves it in ``ToolCall.ThoughtSignature`` so it can be echoed
     back on the same part when re-sending history. Tool results are matched by
     **name**, so the call id *is* the function name.
@@ -143,7 +143,7 @@ Tool results as objects
     ``{"result": ...}`` to avoid HTTP 400.
 
 Environment variables
-    ``GOOGLE_API_KEY`` (required; ``GEMINI_API_KEY`` also honored),
+    ``GOOGLE_API_KEY`` (required, and ``GEMINI_API_KEY`` is honored too),
     ``GOOGLE_URL`` (default ``https://generativelanguage.googleapis.com/v1beta``),
     ``GOOGLE_MODEL`` / ``GEMINI_MODEL`` (default ``gemini-3-flash``),
     ``GOOGLE_THINKING`` (default ``true``) and ``GOOGLE_THINKING_BUDGET``

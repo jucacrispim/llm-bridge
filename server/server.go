@@ -53,20 +53,16 @@ var defaultSystemPrompt = func() string {
 	return strings.TrimSpace(string(b))
 }()
 
-// Sandboxes groups the sandboxes the server uses. Tools covers the external
-// processes the bridge spawns (the shell and grep tools and the hooks); Curl
-// covers the curl tool, which alone has network access and therefore runs under
-// a filesystem-minimal policy (no project, home or temp paths). A nil pointer
-// means "run unsandboxed"; a nil Curl also keeps the curl tool out of the tool
-// list, so the model is never offered a tool the bridge would refuse. CurlHosts,
-// when non-empty, restricts the curl tool to those hosts.
+// Sandboxes groups the sandboxes the server uses: Tools for the external
+// processes (shell, grep, hooks), Curl for the curl tool, which alone has
+// network access and runs under its own minimal policy. A nil Tools means "run
+// unsandboxed", and a nil Curl also keeps curl out of the tool list.
 type Sandboxes struct {
 	Tools *sandbox.Sandbox
 	Curl  *sandbox.Sandbox
-	// ToolBin is the path of the llm-tools binary, which runs the filesystem
-	// tools (read/write/glob/search_replace) under Tools. Empty keeps them
-	// in-process — the case when the sandbox is off, where a helper would add
-	// a process boundary without adding a policy.
+	// ToolBin is the llm-tools binary that runs the filesystem tools under
+	// Tools. Empty keeps them in-process, which is the case with the sandbox
+	// off: a process boundary without a policy buys nothing.
 	ToolBin   string
 	CurlHosts []string
 }
@@ -74,32 +70,23 @@ type Sandboxes struct {
 type state struct {
 	cwd            string
 	knowledgeBases []json.RawMessage
-	// kbEmbed is the embedder to use for the knowledge base(s). nil means the
-	// knowledge base is disabled. It may itself be a LazyEmbedder (the
-	// -kb-load default) that defers the ONNX model load until the first
-	// embedding. The managers are (re)built by loadKB on `set_cwd` and when the
-	// scope changes.
+	// kbEmbed is the embedder for the knowledge base(s); nil means disabled. It
+	// may be a LazyEmbedder, which loads the ONNX model on first use.
 	kbEmbed knowledge.Embedder
-	// kbBaseDir is the base directory where the knowledge bases live
-	// (kbBaseDir/<key>/data.json). Empty means the KB is disabled.
+	// kbBaseDir is where the bases live (kbBaseDir/<key>/data.json). Empty
+	// means disabled.
 	kbBaseDir string
-	// kbScope is the configured KB scope (knowledge.ScopeGlobal,
-	// knowledge.ScopeProject or knowledge.ScopeBoth), set from -kb-scope.
+	// kbScope is the configured scope, set from -kb-scope.
 	kbScope string
 	// kbScopeOverride is the per-prompt kb_scope override, which persists
-	// between prompts like the other overrides (model, provider, thinking).
-	// Empty means "use kbScope".
+	// between prompts like the model, provider and thinking overrides. Empty
+	// means "use kbScope".
 	kbScopeOverride string
-	// kb is the knowledge base surface used to resolve `knowledge` tool calls
-	// locally: one or two scoped managers (global and/or the current project).
-	// nil means disabled.
+	// kb resolves `knowledge` calls locally: one or two scoped managers, global
+	// and/or the current project. nil means disabled.
 	kb *knowledge.Set
-	// sandboxes holds the sandbox of the external processes the bridge spawns
-	// (the shell/grep tools and hooks) and the separate one of the curl tool,
-	// the only tool with network access. A nil Tools means the tools run
-	// unsandboxed; a nil Curl means the curl tool is not offered. The policies
-	// are built once at startup; the project cwd (which changes via set_cwd) is
-	// added per command.
+	// sandboxes holds the policies built at startup. The cwd is not part of
+	// them: it changes via set_cwd and is passed per command.
 	sandboxes Sandboxes
 	// provider is the single fixed provider used when no registry is set
 	// (kept for the runWithProvider/Run entry points and existing tests).
@@ -111,11 +98,9 @@ type state struct {
 	// providerName is the currently active provider in the registry.
 	providerName string
 
-	// pendingApprovals holds the mutating tool calls of the current turn that
-	// are still waiting on the client's approval (a `tool_confirm` command).
-	// Each approval executes its tool immediately; when the map is empty the
-	// turn resumes with the next provider call. Read-only tools never enter
-	// this map (the bridge runs them itself, in the same turn).
+	// pendingApprovals holds the mutating tool calls of the current turn still
+	// waiting on the client. Each approval runs its tool at once, and the turn
+	// resumes when the map is empty. Read-only tools never enter this map.
 	pendingApprovals map[string]llm.ToolCall
 	history          []llm.Message
 	inToolCycle      bool
@@ -127,31 +112,24 @@ type state struct {
 	systemOverride          string
 	systemPrompt            string
 
-	// aggressivePrune, when enabled, collapses each completed tool-calling turn
-	// into just the user prompt + the final assistant answer, dropping the
-	// intermediate tool_calls, tool results, and their chain-of-thought. Off by
-	// default; enabled via the -aggressive-prune flag.
+	// aggressivePrune collapses each completed tool-calling turn into the user
+	// prompt plus the final answer (-aggressive-prune).
 	aggressivePrune bool
 
-	// prune, when enabled, collapses reasoning and tool results of file tools
-	// into user snapshots (read/write/replace), preserving file state without
-	// storing tool calls or reasoning.
+	// prune collapses reasoning and tool results into <State>/<Replace>
+	// snapshots, keeping the file states and dropping the rest (-prune).
 	prune bool
 
-	// fetched holds the tail of what the curl tool has returned in this
-	// session (bounded), so a later mutating call can be checked for content
-	// copied from a fetched page: the "read this page, then run what it says"
-	// shape. Only the turn loop touches it, so it needs no lock.
+	// fetched holds the tail of what the curl tool returned in this session, so
+	// a later mutating call can be checked for copied content. Only the turn
+	// loop touches it, so it needs no lock.
 	fetched string
 
 	cancel context.CancelFunc
-	// cancelled reports whether the current turn was cancelled (as opposed to
-	// having completed). It is set by cancelTurn and cleared when a new prompt
-	// starts. A tool_result that arrives for an already-cancelled turn is
-	// silently ignored instead of erroring with "tool_result without pending
-	// tool call", because some clients queue a tool_result right before their
-	// own cancel (e.g. when a user denies a tool), and the reader goroutine may
-	// process the cancel before the main loop gets to the queued tool_result.
+	// cancelled reports whether the current turn was cancelled. Some clients
+	// queue a tool_result right before their own cancel (when the user denies a
+	// tool) and the reader goroutine may handle the cancel first, so a
+	// tool_result for a cancelled turn is ignored instead of erroring.
 	cancelled bool
 
 	historyLenBeforeTurn int
@@ -163,39 +141,29 @@ type state struct {
 	turnPromptTokens     int
 	turnCompletionTokens int
 	// lastPromptTokens is the prompt_tokens of the last provider call in the
-	// current turn (assigned, not summed): the size of the full context sent
-	// in that request. Used to report context usage on the turn_end event.
+	// turn (assigned, not summed): the size of the context sent in it.
 	lastPromptTokens int
-	// turnCacheHitTokens/turnCacheMissTokens sum the provider's prompt cache
-	// accounting over every call in the current turn, surfaced to the client
-	// in the turn_end event. Reset at the start of each prompt.
+	// turnCacheHitTokens/turnCacheMissTokens sum the provider's cache accounting
+	// over the turn, and go out in turn_end.
 	turnCacheHitTokens  int
 	turnCacheMissTokens int
-	// turnFilesChanged collects the paths written or modified during the
-	// current turn (via write and search_replace tools), reported to the
-	// client as a files_changed event at the end of the turn. Reset at the
-	// start of each prompt.
+	// turnFilesChanged holds the paths written in the turn, reported as a
+	// files_changed event at its end. Reset at the start of each prompt.
 	turnFilesChanged []string
 
-	// cancelMut guards the `cancel` field. It is read/written concurrently by
-	// the reader goroutine (which handles `cancel` immediately) and by
-	// runToolCycle while a Chat is streaming.
+	// cancelMut guards the `cancel` field, which the reader goroutine writes
+	// while runToolCycle reads it.
 	cancelMut sync.Mutex
-	// writeMut serializes all writes to the bridge's stdout so that the reader
-	// goroutine's `cancelled` event never interleaves with the chunks the
-	// provider's streaming callbacks are writing.
+	// writeMut serializes every write to stdout, so the reader goroutine's
+	// `cancelled` event cannot interleave with streaming chunks.
 	writeMut sync.Mutex
-	// historyMut guards the `history` slice. It is accessed concurrently by the
-	// reader goroutine (cancelTurn → history.Sanitize) and by runToolCycle
-	// (AppendAssistant once the cancelled Chat returns), so every read/write of
-	// the shared history must go through the locked helpers below.
+	// historyMut guards the `history` slice, touched by the reader goroutine
+	// (cancelTurn) and by runToolCycle. Go through the locked helpers below.
 	historyMut sync.Mutex
 }
 
-// activeProvider returns the provider to use for the current request. When a
-// provider registry is set it resolves the active provider by name (falling back
-// to any registered provider if the name is missing); otherwise it returns the
-// single fixed provider.
+// activeProvider returns the provider for the current request: the registry
+// entry named providerName, or the single fixed provider.
 func (st *state) activeProvider() llm.LLMProvider {
 	if len(st.providers) > 0 {
 		if p, ok := st.providers[st.providerName]; ok {
@@ -208,8 +176,8 @@ func (st *state) activeProvider() llm.LLMProvider {
 	return st.provider
 }
 
-// effectiveSystem returns the system prompt to use for the current request,
-// resolving per-request override, global server system prompt, and default.
+// effectiveSystem returns the system prompt of the request: override, server
+// prompt, then the embedded default.
 func (st *state) effectiveSystem() string {
 	if st.systemOverride != "" {
 		return st.systemOverride
@@ -225,16 +193,16 @@ func (st *state) appendUser(content string) {
 	st.appendUserWithImages(content, nil)
 }
 
-// appendUserWithImages appends a user message carrying optional image
-// attachments to the shared conversation history.
+// appendUserWithImages appends a user message with optional images to the
+// shared history.
 func (st *state) appendUserWithImages(content string, images []llm.Image) {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
 	history.AppendUserWithImages(&st.history, content, images)
 }
 
-// appendAssistant appends an assistant message to the shared conversation
-// history, preserving any partial thinking/content collected from a stream.
+// appendAssistant appends an assistant message to the shared history, keeping
+// any partial thinking/content collected from the stream.
 func (st *state) appendAssistant(resp *llm.ChatResponse) {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
@@ -248,12 +216,9 @@ func (st *state) appendToolResult(id, content string) {
 	history.AppendToolResult(&st.history, id, content)
 }
 
-// resolveKnowledge executes a knowledge tool call locally and appends its real
-// result to the history. It never waits for the client (fire-and-forget): the
-// knowledge base is always executed internally, so a client round-trip would
-// only stall the turn. If the knowledge base is disabled (kb nil), it appends a
-// plain "disabled" result so the model still gets the tool response the
-// provider requires for each tool_call.
+// resolveKnowledge executes a knowledge tool call locally and appends the
+// result, so the model always gets one response per tool_call even when the KB
+// is disabled.
 func (st *state) resolveKnowledge(id, args string) {
 	if st.kb == nil {
 		st.appendToolResult(id, "knowledge base disabled")
@@ -270,10 +235,8 @@ func (st *state) resolveKnowledge(id, args string) {
 	st.appendToolResult(id, out)
 }
 
-// availableTools returns the tools offered to the model. The curl tool is only
-// included when its sandbox exists: with the sandbox off, or with -curl=false,
-// there is nobody to run it, so offering it would only invite a call that can
-// never succeed.
+// availableTools returns the tools offered to the model. curl is left out when
+// its sandbox is nil, because nobody could run it.
 func (st *state) availableTools() []llm.Tool {
 	all := tools.All()
 	if st.sandboxes.Curl != nil {
@@ -289,14 +252,13 @@ func (st *state) availableTools() []llm.Tool {
 	return out
 }
 
-// fetchedTailLimit bounds what the taint check keeps: enough to cover a page
-// body, small enough that a long session does not grow without bound.
+// fetchedTailLimit bounds what the taint check keeps: a page body fits, and a
+// long session does not grow without bound.
 const fetchedTailLimit = 64 << 10
 
-// rememberFetched keeps the tail of what the curl tool returned, so a later
-// mutating call can be checked for text copied from it. The wrapped result is
-// stored as-is (the envelope included): a match on the body is what matters,
-// and the extra header bytes only make the check marginally more sensitive.
+// rememberFetched keeps the tail of what curl returned, so a later mutating
+// call can be checked against it. The envelope stays: a match on the body is
+// what matters.
 func (st *state) rememberFetched(out string) {
 	st.fetched = out
 	if len(st.fetched) > fetchedTailLimit {
@@ -305,14 +267,8 @@ func (st *state) rememberFetched(out string) {
 }
 
 // confirmMeta builds the extra detail a `tool_confirm` carries: the commands a
-// shell one-liner really runs, a coarse risk label, and whether the arguments
-// reproduce content fetched earlier in the session.
-//
-// The point is the approval-fatigue defence: a human who approves "build the
-// project" is really approving every segment of the line, and the client can
-// only say so if the bridge tells it. Taint is advisory and deliberately
-// blunt — a legitimate command that happens to quote the page also matches,
-// which is precisely the case worth showing.
+// shell one-liner really runs, a coarse risk label and whether the arguments
+// copy content fetched earlier in the session.
 func (st *state) confirmMeta(tc llm.ToolCall) protocol.ConfirmMeta {
 	meta := protocol.ConfirmMeta{Tainted: tools.Tainted(tools.Args(tc.Arguments), st.fetched)}
 	if tc.Name == "shell" {
@@ -323,14 +279,10 @@ func (st *state) confirmMeta(tc llm.ToolCall) protocol.ConfirmMeta {
 	return meta
 }
 
-// executeTool runs a single tool call inside the bridge and appends its real
-// result to the history. The `knowledge` tool resolves against the project
-// knowledge base; every other tool runs through the filesystem/shell executor
-// against the current cwd (relative paths resolved against it). The execution
-// is cancelable: a `cancel` interrupts a running shell/grep process. If the
-// turn was cancelled while the tool ran, no result is appended (the assistant
-// message was already sanitized away, so an appended tool result would be an
-// orphan).
+// executeTool runs a single tool call and appends its result. The context can
+// be cancelled, which interrupts a running shell/grep process; a result is not
+// appended for a cancelled turn, because the assistant message was already
+// sanitized away and the result would be an orphan.
 func (st *state) executeTool(tc llm.ToolCall) {
 	if tc.Name == "knowledge" {
 		st.resolveKnowledge(tc.ID, tc.Arguments)
@@ -372,20 +324,17 @@ func curlURL(rawArgs string) string {
 	return a.URL
 }
 
-// kbBaseMetadata is the subset of a knowledge base's client-reported metadata
-// (set_knowledge_bases) that we use to link a base to the current project: its
-// display name and its path. Other fields (id, type, description) are ignored.
+// kbBaseMetadata is the part of a knowledge base's client-reported metadata
+// (set_knowledge_bases) that links it to a project: name and path.
 type kbBaseMetadata struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
 }
 
-// projectKBName returns the display name of the knowledge base associated with
-// the current cwd (the project being worked on), derived from the metadata the
-// client sends via set_knowledge_bases. A base is linked to the project when its
-// path equals the cwd, is an ancestor/descendant of it, or shares the project
-// name (last path element) with the cwd. Returns "" when there is no cwd yet or
-// no matching base, so the caller can fall back to a generic label.
+// projectKBName returns the display name of the knowledge base linked to the
+// current project, or "" when nothing matches. A base is linked when its path is
+// the cwd, an ancestor or a descendant of it, or when its last path element is
+// the project name.
 func (st *state) projectKBName() string {
 	if st.cwd == "" {
 		return ""
@@ -413,9 +362,8 @@ func (st *state) projectKBName() string {
 	return ""
 }
 
-// effectiveKBScope returns the scope in effect for the current turn: the
-// per-prompt override when set, otherwise the configured -kb-scope. Unknown
-// values fall back to the global scope.
+// effectiveKBScope returns the scope of the turn: the per-prompt override when
+// set, otherwise -kb-scope. Unknown values fall back to global.
 func (st *state) effectiveKBScope() string {
 	scope := st.kbScopeOverride
 	if scope == "" {
@@ -427,10 +375,8 @@ func (st *state) effectiveKBScope() string {
 	return scope
 }
 
-// kbManager loads (or creates) the knowledge base manager stored under key in
-// kbBaseDir. A corrupt data.json is logged and replaced by an empty in-memory
-// manager for that key, so the `knowledge` tool still resolves locally instead
-// of erroring.
+// kbManager loads the manager stored under key, or returns an empty one when
+// data.json is corrupt, so the `knowledge` tool still resolves locally.
 func (st *state) kbManager(key string) *knowledge.Manager {
 	m, err := knowledge.Load(st.kbBaseDir, key, st.kbEmbed)
 	if err != nil {
@@ -440,12 +386,9 @@ func (st *state) kbManager(key string) *knowledge.Manager {
 	return m
 }
 
-// loadKB (re)builds the knowledge base surface (st.kb) from the effective
-// scope and the current cwd: only the shared `_global` KB for ScopeGlobal, only
-// the cwd project's KB for ScopeProject, and both for ScopeBoth. When the KB is
-// disabled (no embedder/base dir) st.kb is cleared so the `knowledge` tool
-// reports it disabled. It runs on `set_cwd` and when a prompt changes the
-// scope; in the global scope a cwd change leaves the KB untouched.
+// loadKB (re)builds st.kb from the effective scope and the cwd. It runs on
+// set_cwd and when a prompt changes the scope, so a cwd change in the global
+// scope leaves the shared KB untouched.
 func (st *state) loadKB() {
 	if st.kbEmbed == nil || st.kbBaseDir == "" {
 		st.kb = nil
@@ -483,9 +426,9 @@ func (st *state) loadKB() {
 	}
 }
 
-// knowledgeNotice returns the single minimal line that tells the model which
-// knowledge base(s) are available, or "" when the KB is disabled. It only
-// mentions the scopes in use (never their contents), so it stays cache-friendly.
+// knowledgeNotice returns the single line that tells the model which knowledge
+// base(s) exist, or "" when the KB is disabled. It names the scopes only, never
+// their contents, so the prefix stays cache-friendly.
 func (st *state) knowledgeNotice() string {
 	if st.kb == nil {
 		return ""
@@ -522,8 +465,8 @@ func (st *state) sanitizeHistory() {
 	history.Sanitize(&st.history)
 }
 
-// historySnapshot returns a copy of the conversation history, safe to hand to
-// a provider while the reader goroutine may concurrently sanitize it.
+// historySnapshot returns a copy of the history, safe to hand to a provider
+// while the reader goroutine sanitizes it.
 func (st *state) historySnapshot() []llm.Message {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
@@ -539,15 +482,14 @@ func (st *state) historyLen() int {
 	return len(st.history)
 }
 
-// hasPendingApproval reports whether the current turn is still waiting on the
-// client to approve the mutating tool call with the given id.
+// hasPendingApproval reports whether the turn waits on an approval for id.
 func (st *state) hasPendingApproval(id string) bool {
 	_, ok := st.pendingApprovals[id]
 	return ok
 }
 
-// recordFileChanged adds path to the current turn's files_changed list if it is
-// not already present (dedup). Only called for write/search_replace tools.
+// recordFileChanged adds path to the turn's files_changed list, without
+// duplicates. Only write and search_replace call it.
 func (st *state) recordFileChanged(path string) {
 	if path == "" {
 		return
@@ -560,11 +502,8 @@ func (st *state) recordFileChanged(path string) {
 	st.turnFilesChanged = append(st.turnFilesChanged, path)
 }
 
-// parseHook splits a hook message (starting with "#") into the hook name (the
-// first whitespace-delimited token after "#") and the remaining arguments.
-// E.g. "#git status" → name "git", args ["status"]; "#algo" → name "algo",
-// no args. An empty message ("#" alone) yields an empty name (handled by
-// hooks.Run/Lookup).
+// parseHook splits a hook message into the hook name and its arguments:
+// "#git status" gives "git" and ["status"], "#algo" gives "algo" and none.
 func parseHook(text string) (string, []string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(text, "#"))
 	fields := strings.Fields(rest)
@@ -574,8 +513,7 @@ func parseHook(text string) (string, []string) {
 	return fields[0], fields[1:]
 }
 
-// filePathFromArgs returns the "path" argument of a tool call's JSON arguments,
-// or "" when absent/unparseable.
+// filePathFromArgs returns the "path" argument of a tool call, or "".
 func filePathFromArgs(args string) string {
 	if args == "" {
 		return ""
@@ -589,11 +527,10 @@ func filePathFromArgs(args string) string {
 	return a.Path
 }
 
-// resolvePromptImages resolves the prompt's image attachments into llm.Images.
-// A path is read from disk (relative paths are resolved against cwd), data is
-// decoded/validated as inline base64, and a url is passed through to the
-// provider. It returns an error naming the offending image when it is missing,
-// unreadable or not a supported format.
+// resolvePromptImages turns the prompt's image attachments into llm.Images: a
+// path is read from disk (relative ones against cwd), data is decoded as base64
+// and a url goes through to the provider. A missing or unreadable image is an
+// error naming it.
 func resolvePromptImages(cwd string, params []protocol.ImageParam) ([]llm.Image, error) {
 	if len(params) == 0 {
 		return nil, nil
@@ -615,17 +552,10 @@ func resolvePromptImages(cwd string, params []protocol.ImageParam) ([]llm.Image,
 	return images, nil
 }
 
-// collapseTurn compresses a completed tool-calling turn into just the user
-// prompt that opened it plus the final assistant answer, dropping everything in
-// between: the intermediate assistant tool_calls messages, the tool results,
-// and their chain-of-thought. The prefix (context + prior turns) is kept
-// byte-identical, so the provider's context/prefix cache stays reusable across
-// turns while the history stays small.
-//
-// Only turns that actually exercised tools are collapsed (a turn is more than
-// prompt + one assistant answer). Conversation-only turns are left untouched.
-// Cancelled turns never reach here (collapse runs only on successful
-// completion), so their preserved partial context is not affected.
+// collapseTurn compresses a completed tool-calling turn into the user prompt
+// that opened it plus the final answer, dropping the tool calls, the results and
+// the reasoning. The prefix stays byte-identical, so the provider's prefix cache
+// survives.
 func (st *state) collapseTurn() {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
@@ -661,20 +591,13 @@ type fileEvent struct {
 	seq     int
 }
 
-// pruneTurn collapses reasoning and intermediate tool calls/results into
-// structured user snapshots (<State> and <Replace>), preserving file states
-// while dropping tool calls, tool results, and chain-of-thought from history.
-//
-// Unlike collapseTurn which completely discards intermediate tool activity,
-// pruneTurn preserves the final state of modified/read files as immutable
-// user messages (`<State>` and `<Replace>`), preventing the model from having
-// to reread files in subsequent turns while keeping history compact and free
-// of heavy reasoning blocks.
+// pruneTurn collapses reasoning and tool calls into <State> and <Replace> user
+// snapshots, so the file states survive and the rest of the turn does not. See
+// -prune in docs/source/usage.rst.
 func (st *state) pruneTurn() {
 	st.historyMut.Lock()
 	defer st.historyMut.Unlock()
 
-	// Ensure turn boundaries are valid.
 	start := st.historyLenBeforeTurn
 	if start < 0 || start >= len(st.history) {
 		return
@@ -837,9 +760,8 @@ func (st *state) pruneTurn() {
 	st.history = newHistory
 }
 
-// write serializes a write to w (the bridge's stdout). All event output goes
-// through here so that a `cancelled` event written by the reader goroutine
-// cannot interleave with streaming chunk/thinking events.
+// write serializes a write to w, so a `cancelled` event from the reader
+// goroutine cannot interleave with streaming chunks.
 func (st *state) write(w io.Writer, s string) error {
 	st.writeMut.Lock()
 	defer st.writeMut.Unlock()
@@ -864,9 +786,8 @@ func (st *state) cancelActive() {
 	st.cancelMut.Unlock()
 }
 
-// setCancelled records whether the current turn was cancelled. Guarded by
-// cancelMut because the reader goroutine (cancel handler) writes it while the
-// main loop (tool_result handler) may read it.
+// setCancelled records whether the turn was cancelled. Guarded by cancelMut:
+// the reader goroutine writes it while the main loop may read it.
 func (st *state) setCancelled(v bool) {
 	st.cancelMut.Lock()
 	st.cancelled = v
@@ -881,29 +802,16 @@ func (st *state) isCancelled() bool {
 }
 
 // cancelTurn interrupts the in-flight turn and resets its state, without
-// emitting any event. It is the shared core of both the `cancel` command
-// handler and the reader goroutine's immediate-cancel path.
-//
-// Unlike a rollback, cancellation deliberately KEEPS the turn's history: the
-// user's prompt (appended when the turn started) and any partial thinking /
-// content the model already produced (persisted to the history by
-// runToolCycle once the streaming Chat returns with context.Canceled) stay in
-// the conversation so the user keeps the context of what was asked and what
-// was in progress.
+// emitting any event. It keeps the turn's history: the prompt and any partial
+// content stay in the conversation.
 func (st *state) cancelTurn() {
 	st.cancelActive()
 	st.setCancelled(true)
 	st.inToolCycle = false
 	st.pendingApprovals = nil
-	// Drop any orphaned assistant message with tool_calls that never received
-	// a tool result. Cancelling mid-tool-cycle leaves such a message in the
-	// history (runToolCycle appended it before waiting for the results); if it
-	// were kept, the next prompt would send it to the API without the required
-	// corresponding "tool" messages (an assistant tool_calls message must be
-	// followed by tool responses for each tool_call_id), which the provider
-	// rejects with HTTP 400. Sanitize strips those orphans while preserving the
-	// user prompt and any partial assistant content, keeping the cancelled
-	// turn's context.
+	// Drop the assistant tool_calls messages that never got their tool results:
+	// an assistant tool_calls message must be followed by one tool response per
+	// call, and the provider rejects the request with HTTP 400 otherwise.
 	st.sanitizeHistory()
 }
 
@@ -940,21 +848,13 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			return string(protocol.NewError("invalid prompt params: " + err.Error())), false
 		}
 
-		// Hooks: a message starting with "#" runs a local script instead of
-		// invoking the LLM. The first token after "#" is the hook name
-		// (.llm-bridge/hooks/<name>.sh, project dir first, then general); the
-		// rest of the message is passed as arguments to the script. The script
-		// runs in the project's cwd and its combined output is returned to the
-		// client as a single hook_action event. Hooks do not touch the
-		// conversation history nor the LLM.
+		// A message starting with "#" runs a local hook script instead of the
+		// LLM: the rest of the message goes to the script as arguments, in the
+		// project's cwd, and the output comes back as one hook_action event.
 		if text := strings.TrimSpace(p.Text); strings.HasPrefix(text, "#") {
-			// Hooks run asynchronously in their own goroutine so a slow script
-			// (e.g. a build) does not block the main server loop: other commands
-			// (prompts, tool results, cancel) keep being processed while the hook
-			// executes. The hook_action event is written through st.write, which
-			// serializes on writeMut, so it cannot interleave with streaming
-			// events from the main loop. Hooks are not cancelable: a script once
-			// launched runs to completion (its output is simply written when done).
+			// In its own goroutine, so a slow script does not block the command
+			// loop. Hooks are not cancelable: once launched, a script runs to
+			// completion.
 			hookName, hookArgs := parseHook(text)
 			go func() {
 				out, err := hooks.RunContext(context.Background(), st.cwd, hookName, hookArgs, st.sandboxes.Tools)
@@ -1061,30 +961,25 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		return "", false
 
 	case string(protocol.MethodToolResult):
-		// The bridge now executes every tool itself, so a tool_result from the
-		// client is no longer meaningful. It is accepted and ignored for
-		// backwards compatibility with clients built before the migration
-		// (they would send it for a tool the bridge already ran).
+		// Ignored for backwards compatibility: the bridge runs every tool
+		// itself now, and an older client still sends this.
 		return "", false
 
 	case string(protocol.MethodToolConfirm):
-		// The client approved a mutating tool call the bridge offered via a
-		// `tool_confirm` event. Execute that tool right away (one at a time,
-		// mirroring the client's per-call confirmation), append its real result
-		// and, when no approval is left pending, resume the turn.
+		// The client approved a mutating call: run it, append the result and
+		// resume the turn when nothing is left pending.
 		var p toolConfirmParams
 		if err := json.Unmarshal(cmd.Params, &p); err != nil {
 			return string(protocol.NewError("invalid tool_confirm params: " + err.Error())), false
 		}
 		if !st.inToolCycle || len(st.pendingApprovals) == 0 {
-			// An approval for a turn that was cancelled meanwhile (the reader
-			// goroutine may have processed the cancel first): ignore it, like a
-			// late tool_result.
+			// A late approval for a cancelled turn, ignored like a late
+			// tool_result.
 			return "", false
 		}
 		tc, ok := st.pendingApprovals[p.ID]
-		// Only accept an approval for a tool call this turn is actually waiting
-		// on: a stale/late approval racing into a newer turn must be ignored.
+		// Only an id this turn is waiting on counts: a stale approval racing
+		// into a newer turn must be ignored.
 		if !ok {
 			return "", false
 		}
@@ -1111,19 +1006,17 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 	for {
 		ctx, cancel := context.WithCancel(context.Background())
 		// Publish the cancel func so the reader goroutine can interrupt this
-		// Chat immediately when a `cancel` command arrives mid-stream.
+		// Chat when a `cancel` arrives mid-stream.
 		st.setCancel(cancel)
 		emittedChunk := false
 		emittedReasoning := false
-		// Accumulate the streamed thinking/content locally so that, if the
-		// turn is cancelled mid-stream, the partial output is still preserved
-		// in the history below instead of being lost.
+		// Keep the streamed text here too: a turn cancelled mid-stream still
+		// gets its partial output persisted below.
 		var partialContent strings.Builder
 		var partialReasoning strings.Builder
-		// Never send an orphaned assistant tool_calls  message to the provider.
-		// A cancelled turn can leave one in the history without its tool
-		// results, and the provider rejects that with HTTP 400. Sanitizing
-		// right before the snapshot guarantees the request is always valid.
+		// An assistant tool_calls message without its tool responses makes the
+		// provider reject the request with HTTP 400. Sanitize right before the
+		// snapshot, so what is sent is always valid.
 		st.sanitizeHistory()
 		resp, err := st.activeProvider().Chat(ctx, llm.ChatRequest{
 			Messages:        st.historySnapshot(),
@@ -1132,8 +1025,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			Model:           st.modelOverride,
 			Thinking:        st.thinkingOverride,
 			ReasoningEffort: st.reasoningEffortOverride,
-			// The chain-of-thought streams before the content; surface it to the
-			// client as thinking events so it can display the reasoning.
+			// The reasoning streams before the content.
 			OnReasoning: func(s string) {
 				partialReasoning.WriteString(s)
 				emittedReasoning = true
@@ -1148,10 +1040,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
-				// The turn was cancelled. The user's prompt is already in the
-				// history (cancelTurn no longer rolls it back); persist whatever
-				// thinking/content the model produced before being interrupted so
-				// the cancelled turn's context is kept for the next prompt.
+				// Cancelled: cancelTurn keeps the prompt, so persist whatever the
+				// model produced before the interrupt and keep the context.
 				if partialContent.Len() > 0 || partialReasoning.Len() > 0 {
 					st.appendAssistant(&llm.ChatResponse{
 						Content:   partialContent.String(),
@@ -1163,11 +1053,9 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			logger.Errorf("provider error: %v", err)
 			return string(protocol.NewError(err.Error())), false
 		}
-		// The turn may have been cancelled while Chat was finishing (the reader
-		// goroutine handles `cancel` concurrently and may have already reset the
-		// turn state and sanitized the history). If so, do NOT commit the
-		// response as-is: an assistant message with tool_calls that will never
-		// receive its tool results is exactly the orphan the provider rejects.
+		// Cancelled while Chat was finishing: committing the response as-is
+		// would leave an assistant tool_calls message that never gets its
+		// results.
 		// Persist only the produced content (never the tool_calls) and
 		// re-sanitize so nothing half-finished lingers in the history.
 		if st.isCancelled() {
@@ -1208,10 +1096,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		st.totalPromptTokens += inputTokens
 		st.totalCompletionTokens += outputTokens
 
-		// Per-request cache accounting, parsed from the provider's usage
-		// (DeepSeek prompt_cache_hit/miss_tokens, Google cachedContentTokenCount).
-		// Emitted as a single parseable line; only visible with -logfile/-debug
-		// (trace level), so it never pollutes the protocol stream.
+		// Cache accounting from the provider's usage, as one trace line that
+		// only reaches -logfile/-debug.
 		if resp.Usage != nil {
 			hit := resp.Usage.CacheHitTokens
 			miss := resp.Usage.CacheMissTokens
@@ -1238,17 +1124,10 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 		st.appendAssistant(resp)
 
-		// Surface each tool call to the client and run the read-only ones right
-		// away, in the same turn. Tools that only read (read/grep/glob, and the
-		// knowledge tool's show/search) run internally and are emitted as a
-		// `tool_call` display event; anything that mutates (shell/write/
-		// search_replace/curl, and a knowledge add/delete/reset) is emitted as
-		// `tool_confirm` and only runs once the client approves it (handled by
-		// the MethodToolConfirm case).
-		//
-		// The classification is per call, not per tool: `knowledge` writes to a
-		// *persistent* store every later session reads, so a write must never
-		// run without a human, while a lookup must never wait for one.
+		// Read-only calls run here and now and go out as a `tool_call` display
+		// event; mutating ones go out as `tool_confirm` and only run on
+		// approval. The split is per call, because a knowledge write must never
+		// run without a human and a lookup must never wait for one.
 		st.pendingApprovals = make(map[string]llm.ToolCall)
 		for _, tc := range resp.ToolCalls {
 			if st.isCancelled() {
@@ -1268,11 +1147,9 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 				st.executeTool(tc)
 				continue
 			}
-			// A one-liner is approved with one keystroke, so it is the natural
-			// hiding place for extra work: refuse to offer an approval that
-			// would run dozens of commands at once and tell the model to split
-			// it. The refusal is a tool result, not an error, so the turn (and
-			// the model's chance to correct itself) survives.
+			// One keystroke approves a whole one-liner, so past the segment
+			// limit there is no approval to offer. The refusal is a tool result,
+			// not an error, so the model can split the command and retry.
 			if tc.Name == "shell" {
 				command := tools.CommandOf(tc.Arguments)
 				if segments := tools.Segments(command); len(segments) > tools.MaxShellSegments {
@@ -1287,9 +1164,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			if err == nil {
 				_ = st.write(w, string(evt)+"\n")
 			}
-			// Track files the tool is about to modify (write/search_replace) so
-			// the client is notified via a files_changed event when the turn
-			// ends.
+			// Track the files the tool is about to modify, for files_changed.
 			switch tc.Name {
 			case "write", "search_replace":
 				st.recordFileChanged(filePathFromArgs(tc.Arguments))
@@ -1307,10 +1182,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			if model == "" {
 				model = st.activeProvider().Model()
 			}
-			// Context usage: the size of the last prompt sent in the turn (the
-			// full context: system prompt, history, tool results and images)
-			// over the model's static context window. Unknown models report a
-			// null context_pct instead of guessing a window.
+			// Context usage: the last prompt of the turn over the model's static
+			// window. An unknown model reports a null context_pct.
 			contextTokens := st.lastPromptTokens
 			contextWindow := 0
 			var contextPct *float64
@@ -1326,8 +1199,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 				st.turnCacheHitTokens, st.turnCacheMissTokens,
 				contextTokens, contextWindow)
 			_ = st.write(w, string(newEnd)+"\n")
-			// Report the files modified during this turn (write/search_replace)
-			// so the client can refresh them. Sorted for deterministic output.
+			// Report the modified files, sorted for deterministic output.
 			if len(st.turnFilesChanged) > 0 {
 				files := make([]string, len(st.turnFilesChanged))
 				copy(files, st.turnFilesChanged)
@@ -1337,10 +1209,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 
 			newUsage := protocol.NewUsageDelta(st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens)
 			_ = st.write(w, string(newUsage)+"\n")
-			// Aggressive prune: collapse a tool-calling turn into just its user
-			// prompt + final answer, keeping the history small and its prefix
-			// byte-stable for provider caching. Runs before historyLenBeforeTurn
-			// is reset, since it needs the turn's start marker.
+			// Before historyLenBeforeTurn is reset, because both need the turn's
+			// start marker.
 			if st.aggressivePrune {
 				st.collapseTurn()
 			}
@@ -1358,8 +1228,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			st.inToolCycle = true
 			return "", false
 		}
-		// Every tool call was read-only (executed above) or knowledge: loop
-		// back and call Chat again with the results already in the history.
+		// Every call was read-only or knowledge, already executed: call Chat
+		// again with the results in the history.
 		continue
 	}
 }
@@ -1380,10 +1250,8 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 	return names
 }
 
-// run starts the server loop. It accepts either a single fixed provider (via
-// runWithProvider) or a named provider registry that can be switched per request
-// (via RunWithProviders). When providers is non-empty it takes precedence over
-// the single provider.
+// run starts the server loop with either a single fixed provider or a named
+// registry. When providers is non-empty it wins over the single provider.
 func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sbs Sandboxes) error {
 
 	if len(providers) > 0 {
@@ -1420,28 +1288,22 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 		aggressivePrune: aggressivePrune, prune: prune,
 		kbBaseDir: kbBaseDir, kbScope: kbScope, kbEmbed: kbEmbed, sandboxes: sbs}
 
-	// Load the knowledge base up front so it is available even when the client
-	// never sends set_cwd (always the case for the global scope, whose KB does
-	// not depend on the cwd).
+	// Load the KB up front: with the global scope it does not depend on the
+	// cwd, and the client may never send set_cwd.
 	st.loadKB()
 
 	_ = st.write(w, string(protocol.NewReady())+"\n")
 	logger.Debugf("ready sent")
 
-	// A reader goroutine keeps consuming stdin while the main loop is blocked
-	// inside a streaming Chat. A `cancel` command is handled right here, so it
-	// interrupts the in-flight request immediately instead of waiting for the
-	// model to stop talking (the previous synchronous loop could not even read
-	// the cancel until Chat returned). All other commands are forwarded to the
-	// main loop, which processes them serially.
+	// The reader goroutine keeps consuming stdin while the main loop is blocked
+	// inside a streaming Chat. `cancel` is handled here, so it interrupts the
+	// request at once; everything else goes to the main loop.
 	cmdCh := make(chan inboundLine, 16)
 	go func() {
 		scanner := bufio.NewScanner(r)
-		// Tool results can be large (the client sends a whole file read, a grep
-		// with many matches or a shell with lots of output) as a single JSON
-		// line. The default bufio.Scanner limit is 64KB per line; beyond that it
-		// returns ErrTooLong and the whole bridge exits with status 1. Raise the
-		// limit so a large tool result no longer kills the process.
+		// Tool results can be large (a whole file read, a grep with many
+		// matches) and arrive as one JSON line. Past the scanner's 64KB default
+		// it returns ErrTooLong and the bridge exits, so raise the limit.
 		scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // up to 8MB per line
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -1523,14 +1385,10 @@ func RunWithOptions(r io.Reader, w io.Writer, providers map[string]llm.LLMProvid
 	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, "", "", nil, Sandboxes{})
 }
 
-// RunWithKnowledgeBase starts the server loop like RunWithOptions, but also
-// wires the knowledge base: kbBaseDir is where the KBs live
-// (kbBaseDir/<key>/data.json), kbScope selects which one(s) are used
-// ("global", "project" or "both"; empty means "global") and kbEmbed is the
-// embedder used to load them. The managers are (re)built on `set_cwd` and when
-// a prompt changes the scope via kb_scope, so `knowledge` tool calls resolve
-// locally (fire-and-forget). kbEmbed nil (or empty base dir) keeps the
-// knowledge base disabled. This is the entry point used by cmd/llm-bridge.
+// RunWithKnowledgeBase starts the server loop with the knowledge base wired:
+// kbBaseDir holds the bases (kbBaseDir/<key>/data.json), kbScope selects which
+// ones are used and kbEmbed loads them. A nil kbEmbed or an empty kbBaseDir
+// keeps the KB disabled. This is the entry point used by cmd/llm-bridge.
 func RunWithKnowledgeBase(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sbs Sandboxes) error {
 	// notest
 	return run(r, w, providers, defaultName, systemPrompt, aggressivePrune, prune, kbBaseDir, kbScope, kbEmbed, sbs)

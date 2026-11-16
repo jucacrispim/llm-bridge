@@ -33,17 +33,12 @@ type Message struct {
 	Content    string
 	ToolCalls  []ToolCall
 	ToolCallID string
-	// Images are optional image attachments for this message. They are only
-	// meaningful on user messages (both DeepSeek and Gemini reject images in
-	// system or assistant messages); providers that do not support images
-	// ignore them.
+	// Images are optional attachments on a user message. deepseek and Gemini
+	// both reject images on a system or assistant message.
 	Images []Image
-	// Reasoning is the model's chain-of-thought (deepseek's reasoning_content)
-	// that accompanied this message, produced only when thinking mode is on.
-	// It is kept in the history and sent back to the API for assistant messages
-	// that performed tool calls (DeepSeek's thinking mode returns a 400 error
-	// otherwise). For final answers without tool calls it is omitted from
-	// requests to save tokens.
+	// Reasoning is the chain-of-thought that came with this message. It goes
+	// back to the API on assistant messages that made tool calls, where
+	// deepseek answers 400 without it, and is dropped from plain answers.
 	Reasoning string
 }
 
@@ -51,36 +46,29 @@ type Tool struct {
 	Name        string
 	Description string
 	Parameters  json.RawMessage
-	// ReadOnly marks a tool that does not modify any state and therefore runs
-	// without confirmation. The bridge executes read-only tools internally, in
-	// the same turn, without a client round-trip. Mutating tools are first sent
-	// to the client for approval (a `tool_confirm` event) and only executed by
-	// the bridge once the client approves. This field is a classification only;
-	// it is not sent to the LLM (providers build their own tool payloads).
+	// ReadOnly marks a tool the bridge runs without confirmation. A mutating one
+	// goes to the client first. This is a classification only: providers build
+	// their own payload and never see it.
 	ReadOnly bool
 }
 
 type ChatRequest struct {
 	Messages []Message
 	Tools    []Tool
-	// System is an optional system prompt sent to the model (as a system
-	// message for OpenAI-compatible providers, as system_instruction for
-	// Gemini). It is not persisted in the conversation history, so it is sent
-	// fresh on every request.
+	// System is the system prompt: a system message for OpenAI-compatible
+	// providers, system_instruction for Gemini. It is not in the history, so it
+	// goes out on every request.
 	System string
 	Model  string
-	// Thinking optionally overrides the provider's thinking mode for this
-	// request. nil means "use the provider's configured mode"; true/false
-	// switches between deepseek-flash and deepseek-chat unless Model is set.
+	// Thinking overrides the provider's thinking mode for this request. nil
+	// keeps the configured mode; true/false switches between deepseek-flash and
+	// deepseek-chat unless Model is set.
 	Thinking *bool
-	// ReasoningEffort optionally overrides the provider's reasoning_effort
-	// when thinking is on. nil means "use the provider's configured value";
-	// non-nil wins over the provider (an empty string disables sending the
-	// parameter). Ignored when thinking is off.
+	// ReasoningEffort overrides the provider's reasoning_effort when thinking is
+	// on. nil keeps the configured value, "" stops sending the parameter.
 	ReasoningEffort *string
-	// OnReasoning, when set, is invoked with each streaming chunk of the model's
-	// chain-of-thought (deepseek's reasoning_content), which arrives before the
-	// content chunks. Used to surface the thinking to the client.
+	// OnReasoning receives each chunk of the chain-of-thought, which streams
+	// before the content.
 	OnReasoning func(string)
 }
 
@@ -88,10 +76,8 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
-	// CacheHitTokens/CacheMissTokens expose the provider's prompt cache
-	// accounting so the bridge can measure cache hit/miss per request.
-	// DeepSeek fills them from prompt_cache_hit_tokens/prompt_cache_miss_tokens;
-	// Google derives them from cachedContentTokenCount (see llm/google.go).
+	// CacheHitTokens/CacheMissTokens are the provider's prompt cache accounting:
+	// DeepSeek's prompt_cache_hit/miss_tokens, Google's cachedContentTokenCount.
 	CacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
 	CacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
 }
@@ -100,11 +86,9 @@ type ToolCall struct {
 	ID        string
 	Name      string
 	Arguments string // raw JSON arguments
-	// ThoughtSignature is Gemini's base64 thought_signature that must be echoed
-	// back on the functionCall part when thinking mode is enabled. It is
-	// preserved through the history so a tool call made in an earlier turn can
-	// be re-sent with the same signature. Empty for providers that do not use it
-	// (DeepSeek/OpenAI).
+	// ThoughtSignature is Gemini's base64 thought_signature, echoed back on the
+	// functionCall part when thinking is on, so a call from an earlier turn can
+	// be re-sent. Empty for deepseek.
 	ThoughtSignature string
 }
 
@@ -115,8 +99,7 @@ type ChatResponse struct {
 	ToolCalls  []ToolCall
 	// Model is the model actually used for this response.
 	Model string
-	// Reasoning is the model's full chain-of-thought (deepseek's
-	// reasoning_content) for this response, populated when thinking mode is on.
+	// Reasoning is the full chain-of-thought, set when thinking is on.
 	Reasoning string
 }
 

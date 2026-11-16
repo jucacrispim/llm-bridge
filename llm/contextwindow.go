@@ -19,13 +19,10 @@ package llm
 
 import "strings"
 
-// contextWindows maps a model id (or a leading prefix of one) to its token
-// context window. Providers do not expose this over the API, so the values are
-// static. Model ids often carry suffixes (e.g. gemini-2.5-flash-001) or alias
-// names, so lookup is exact first and then by longest matching prefix.
-//
-// Keep the values in sync with the docs (docs/source/hacking/providers.rst) and with
-// the actual provider catalog; when in doubt prefer the smaller window.
+// contextWindows maps a model id, or a prefix of one, to its token window. The
+// providers do not expose it over the API, so the values are static. Keep them
+// in sync with docs/source/hacking/providers.rst; when in doubt prefer the
+// smaller window.
 var contextWindows = map[string]int{
 	// DeepSeek: both current API models have a 1M window. deepseek-chat and
 	// deepseek-reasoner are aliases redirected to deepseek-flash.
@@ -49,11 +46,9 @@ var contextWindows = map[string]int{
 	"gemma-4": 128_000,
 }
 
-// ContextWindow returns the token context window for the given model id, and
-// whether the model is known. Lookup is exact first, then by the longest
-// matching known prefix (models commonly carry version suffixes like -001).
-// Unknown models return (0, false) so callers can report a null context
-// percentage instead of guessing a wrong window.
+// ContextWindow returns the token window of a model and whether it is known:
+// exact match first, then the longest matching prefix. An unknown model gives
+// (0, false), so a caller reports a null context_pct instead of a wrong window.
 func ContextWindow(model string) (int, bool) {
 	if model == "" {
 		return 0, false

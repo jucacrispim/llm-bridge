@@ -34,27 +34,25 @@ import (
 	"llm-bridge/sandbox"
 )
 
-// curl defaults. They are fixed (not flags): the point of the tool is a small,
-// predictable GET, and the model can only tighten them, never open them up.
+// curl defaults. They are fixed, not flags, so the model can only ask for a
+// stricter value than these.
 const (
-	// curlMaxTime bounds a hung request so it cannot park the turn.
+	// curlMaxTime bounds a hung request, so one fetch does not park the turn.
 	curlMaxTime = 30
-	// curlMaxTimeCap / curlMaxRedirsCap bound what the model may ask for.
+	// curlMaxTimeCap and curlMaxRedirsCap are the most the model may ask for.
 	curlMaxTimeCap   = 120
 	curlMaxRedirsCap = 10
-	// curlMaxRedirs is the default redirect budget (redirects are followed
-	// only when -L is given).
+	// curlMaxRedirs is the default redirect budget, used with -L.
 	curlMaxRedirs = 5
 	// curlMaxOutput truncates the body: a whole page in the history burns
-	// tokens, breaks the provider's prefix cache and is an injection vector.
+	// tokens, breaks the prefix cache and is an injection vector.
 	curlMaxOutput = 64 << 10
 )
 
-// curlFlags is the allowlist of curl options the tool accepts from the model,
-// mapped to whether the option takes a value. An allowlist (not a denylist) on
-// purpose: anything that uploads (-d/-F/-T), writes files (-o/-O), reads files
-// (-K/--config, a cookie file) or opens another transport (--unix-socket) is
-// simply not here, including options added by future curl releases.
+// curlFlags maps each curl option the tool accepts from the model to whether it
+// takes a value. Options that upload (-d/-F/-T), write a file (-o/-O), read a
+// file (-K/--config) or open another transport (--unix-socket) are absent, so
+// an option added by a later curl is rejected too.
 var curlFlags = map[string]bool{
 	"-H":                true,
 	"--header":          true,
@@ -75,80 +73,62 @@ var curlFlags = map[string]bool{
 	"--max-filesize":    true,
 }
 
-// Executor runs the bridge's tools inside the bridge process, against a working
-// directory (the current project's cwd, set by the client via `set_cwd`). It
-// mirrors the semantics of the tools that used to run in the Emacs client, so
-// behavior is unchanged after moving execution into the bridge.
+// Executor runs the bridge's tools against cwd, the project the client pointed
+// at with set_cwd. The filesystem tools go through llm-tools when toolBin and a
+// sandbox are set (see docs/source/tools.rst).
 type Executor struct {
 	cwd string
-	// sandbox, when non-nil, wraps the external processes (shell, grep) in
-	// caged — and the llm-tools helper, when toolBin is set.
-	//
-	// With toolBin set, the filesystem tools (read/write/glob/search_replace)
-	// run in that helper under this same policy, so the path the model asked
-	// for never reaches a syscall in the bridge process. Without it (no
-	// sandbox, or tests) they run in-process, which is the old behaviour.
+	// sandbox, when non-nil, wraps the external processes (shell, grep and the
+	// llm-tools helper) in caged.
 	sandbox *sandbox.Sandbox
-	// toolBin is the path of the llm-tools binary. Empty means "run the
-	// filesystem tools in-process"; the bridge sets it unless the sandbox is
-	// off, and refuses to start when the binary is missing (see CheckToolbox).
+	// toolBin is the llm-tools binary. Empty means the filesystem tools run
+	// in-process; the bridge sets it unless the sandbox is off.
 	toolBin string
-	// curlSandbox is the sandbox the curl tool runs under: same shape as
-	// sandbox, but with network access and WITHOUT the project/home paths, so
-	// a fetch cannot read local files (and therefore cannot exfiltrate them).
-	// nil means the curl tool is disabled.
+	// curlSandbox runs the curl tool: same shape, plus network access and no
+	// project, home or temp path. nil means curl is off.
 	curlSandbox *sandbox.Sandbox
-	// curlHosts restricts the curl tool to these hosts (empty means any host).
-	// Landlock only filters the destination port, never the host, so this is
-	// enforced here, before the command runs.
+	// curlHosts restricts the curl tool to these hosts (empty means any).
+	// Landlock filters the destination port only, so the host is checked here,
+	// before the command runs.
 	curlHosts []string
 }
 
-// NewExecutor returns an Executor rooted at cwd. A relative path argument to
-// any tool is resolved against cwd (when cwd is empty, relative paths are left
-// as-is and resolved by the process working directory).
+// NewExecutor returns an Executor rooted at cwd. Relative paths are resolved
+// against cwd, and left to the process working directory when cwd is empty.
 func NewExecutor(cwd string) *Executor {
 	return &Executor{cwd: cwd}
 }
 
 // NewExecutorWithSandbox returns an Executor rooted at cwd whose external
-// processes run under sb. A nil sb means "run unsandboxed", exactly like
-// NewExecutor. The sandbox policy is used as given: the tool works on the same
-// filesystem the bridge does, so the paths come from the bridge's own policy
-// (-sandbox-ro/-sandbox-rw), not from the cwd.
+// processes run under sb. A nil sb means unsandboxed, like NewExecutor.
 func NewExecutorWithSandbox(cwd string, sb *sandbox.Sandbox) *Executor {
 	return &Executor{cwd: cwd, sandbox: sb}
 }
 
-// NewExecutorWithSandboxes returns an Executor rooted at cwd whose external
-// processes run under sb and whose curl tool runs under curlSb (a separate,
-// network-enabled but filesystem-minimal sandbox). A nil curlSb keeps the curl
-// tool disabled. hosts, when non-empty, restricts the curl tool's destinations.
+// NewExecutorWithSandboxes adds curlSb, the sandbox the curl tool runs under,
+// and hosts, the allowlist that bounds its destinations. A nil curlSb keeps
+// curl disabled.
 func NewExecutorWithSandboxes(cwd string, sb, curlSb *sandbox.Sandbox, hosts []string) *Executor {
 	return &Executor{cwd: cwd, sandbox: sb, curlSandbox: curlSb, curlHosts: hosts}
 }
 
-// NewExecutorWithToolbox returns NewExecutorWithSandboxes plus toolBin, the
-// path of the llm-tools binary. With it set, the filesystem tools run out of
-// process, under sb, so the bridge itself never opens a path the model chose.
+// NewExecutorWithToolbox adds toolBin, the llm-tools binary: with it set the
+// filesystem tools run there, so the bridge never opens a path the model chose.
 // An empty toolBin keeps them in-process.
 func NewExecutorWithToolbox(cwd string, sb, curlSb *sandbox.Sandbox, hosts []string, toolBin string) *Executor {
 	return &Executor{cwd: cwd, sandbox: sb, curlSandbox: curlSb, curlHosts: hosts, toolBin: toolBin}
 }
 
-// outOfProcess reports whether the filesystem tools should go through
-// llm-tools. It needs both halves: the binary to run and the policy to run it
-// under. Without a policy the helper would be plain unsandboxed execution,
-// which is the opposite of the point, so the in-process path is used instead.
+// outOfProcess reports whether the filesystem tools go through llm-tools. It
+// needs both the binary and the policy: without a policy the helper would run
+// unsandboxed.
 func (e *Executor) outOfProcess() bool {
 	return e.toolBin != "" && e.sandbox != nil
 }
 
-// run executes name/args capturing the combined output. With a sandbox
-// configured it goes through Sandbox.Run, which proves from caged's report
-// descriptor whether the sandbox applied: a *sandbox.SetupError comes back
-// when it did not, so the caller must surface it as an error instead of the
-// tool's output.
+// run executes name/args and returns the combined output. A *SetupError means
+// the sandbox did not apply, and the caller must not hand that over as a tool
+// result.
 func (e *Executor) run(ctx context.Context, name string, args ...string) (string, error) {
 	if e.sandbox != nil {
 		out, err := e.sandbox.Run(ctx, e.cwd, name, args...)
@@ -162,21 +142,16 @@ func (e *Executor) run(ctx context.Context, name string, args ...string) (string
 	return string(out), err
 }
 
-// isSetupError reports whether err means the sandbox did not apply, i.e. the
-// command never ran confined and its output must not be handed to the model.
+// isSetupError reports whether err means the sandbox did not apply.
 func isSetupError(err error) bool {
 	var se *sandbox.SetupError
 	return errors.As(err, &se)
 }
 
-// runToolbox runs one filesystem tool in llm-tools, under the tool policy, and
-// returns what it answered.
-//
-// The working directory is the executor's, so a relative path means the same
-// thing it means for the other tools. Nothing is inferred from the reply's exit
-// status: a *sandbox.SetupError means the helper never ran confined (and is
-// returned as such), any other failure means the helper itself failed, and an
-// unreadable reply means it died — none of which is a tool result.
+// runToolbox runs one filesystem tool in llm-tools, under the tool policy. The
+// working directory is the executor's, so a relative path means the same thing
+// there. Only a well-formed reply is a result: a crash or an unreadable answer
+// comes back as an error.
 func (e *Executor) runToolbox(ctx context.Context, name, rawArgs string) (string, error) {
 	req, err := toolboxRequestLine(name, rawArgs)
 	if err != nil {
@@ -188,7 +163,7 @@ func (e *Executor) runToolbox(ctx context.Context, name, rawArgs string) (string
 			return "", err
 		}
 		// Keep whatever the helper said: it is the only clue for a crash, and
-		// it is never mistaken for a result because it travels as the error.
+		// it travels as the error, so it does not pass for a result.
 		if msg := strings.TrimSpace(string(stderr)); msg != "" {
 			return "", fmt.Errorf("llm-tools %s: %w: %s", name, err, msg)
 		}
@@ -197,22 +172,19 @@ func (e *Executor) runToolbox(ctx context.Context, name, rawArgs string) (string
 	return decodeToolboxResponse(stdout)
 }
 
-// Execute runs the named tool with raw JSON arguments and returns its textual
-// result. The provided context cancels a running external process (shell/grep)
-// when the turn is cancelled. On error the caller is expected to surface the
-// error text as the tool result (the model still gets a response per call).
+// Execute runs the named tool with raw JSON arguments and returns its result.
+// The context cancels a running external process (shell, grep, curl). On error
+// the caller surfaces the error text as the tool result.
 func (e *Executor) Execute(ctx context.Context, name, rawArgs string) (string, error) {
-	// The filesystem tools run in llm-tools when a helper and a policy are
-	// configured, so no path the model produced ever reaches a syscall here.
-	// The argument payload travels untouched: the helper parses it exactly as
-	// the in-process path below would.
+	// The filesystem tools run in llm-tools, so no path the model produced
+	// reaches a syscall here.
 	if IsFileTool(name) && e.outOfProcess() {
 		return e.runToolbox(ctx, name, rawArgs)
 	}
 	args := map[string]any{}
 	if rawArgs != "" {
-		// A malformed argument payload is tolerated: the individual tool
-		// then reports its own "missing" error, mirroring the client.
+		// A malformed payload is tolerated: the tool reports its own missing
+		// field, which is clearer than a JSON parse error.
 		_ = json.Unmarshal([]byte(rawArgs), &args)
 	}
 	switch name {
@@ -263,9 +235,8 @@ func expandHome(path string) string {
 	return path
 }
 
-// number extracts an integer JSON number from a decoded JSON value, reporting
-// whether it was present and numeric. Non-numeric values (e.g. a string) are
-// treated as absent, matching the client's `numberp` checks.
+// number extracts an integer from a decoded JSON value, reporting whether it
+// was present and numeric. A non-numeric value counts as absent.
 func number(v any) (int, bool) {
 	switch n := v.(type) {
 	case float64:
@@ -337,9 +308,8 @@ func (e *Executor) write(args map[string]any) (string, error) {
 	return "ok", nil
 }
 
-// shell implements the `shell` tool: run COMMAND via `bash -c`, capturing
-// stdout+stderr. A non-zero exit appends a "[exited with status N]" line, like
-// the client.
+// shell implements the `shell` tool: run COMMAND via `bash -c` and capture
+// stdout+stderr. A non-zero exit appends a "[exited with status N]" line.
 func (e *Executor) shell(ctx context.Context, args map[string]any) (string, error) {
 	command, ok := args["command"].(string)
 	if !ok {
@@ -347,8 +317,7 @@ func (e *Executor) shell(ctx context.Context, args map[string]any) (string, erro
 	}
 	out, err := e.run(ctx, "bash", "-c", command)
 	if err != nil {
-		// A caged failure is never the tool's result: the command did not run
-		// (confined or at all), so the model gets an error instead of output.
+		// A failed sandbox is not the tool's result: the command did not run.
 		if isSetupError(err) {
 			return "", err
 		}
@@ -361,8 +330,8 @@ func (e *Executor) shell(ctx context.Context, args map[string]any) (string, erro
 }
 
 // grep implements the `grep` tool: search PATTERN (a POSIX ERE) under PATH
-// (default "."), returning `file:line:text` matches. Exit status 0 (matches)
-// and 1 (no matches) are both success, mirroring the client.
+// (default "."), returning `file:line:text` matches. Exit 1 (no matches) is
+// success, like exit 0.
 func (e *Executor) grep(ctx context.Context, args map[string]any) (string, error) {
 	pattern, ok := args["pattern"].(string)
 	if !ok || pattern == "" {
@@ -374,14 +343,13 @@ func (e *Executor) grep(ctx context.Context, args map[string]any) (string, error
 	}
 	out, err := e.run(ctx, "grep", "-rnEI", "--include=*", pattern, e.resolve(path))
 	if err != nil {
-		// A caged failure is never a grep result: the sandbox did not apply.
+		// A failed sandbox is not a grep result.
 		if isSetupError(err) {
 			return "", err
 		}
 		if _, ok := err.(*exec.ExitError); ok {
-			// Any other grep exit status is surfaced as output: 0 matches / 1
-			// no matches are normal results, and on error the model still sees
-			// whatever grep printed (mirroring the client).
+			// Any other status is a result: the model still sees whatever grep
+			// printed.
 			return out, nil
 		}
 		return "", err
@@ -389,12 +357,9 @@ func (e *Executor) grep(ctx context.Context, args map[string]any) (string, error
 	return out, nil
 }
 
-// curl implements the `curl` tool: fetch URL (http/https) with the extra
-// options in ARGS, all of them validated against an allowlist and passed as an
-// argv (never through a shell). It is the only tool with network access, and it
-// runs under its own sandbox: filesystem-minimal (no project, no home, no temp
-// dir), so a fetch has nothing local to read — and therefore nothing local to
-// leak into a URL, a header or a DNS query.
+// curl implements the `curl` tool: fetch URL with the extra options in ARGS,
+// validated against an allowlist and passed as an argv. It runs under its own
+// sandbox, which grants no project, home or temp path.
 func (e *Executor) curl(ctx context.Context, args map[string]any) (string, error) {
 	rawURL, _ := args["url"].(string)
 	if err := validateCurlURL(rawURL, e.curlHosts); err != nil {
@@ -411,11 +376,11 @@ func (e *Executor) curl(ctx context.Context, args map[string]any) (string, error
 	if e.curlSandbox == nil {
 		return "", fmt.Errorf("Curl: network access is disabled (the curl tool is off)")
 	}
-	// No cwd on purpose: with a minimal policy there is no relative path the
-	// command could legitimately touch, so it starts in the bridge's own.
+	// No cwd: the policy grants no relative path to touch, so the fetch starts
+	// in the bridge's own.
 	out, err := e.curlSandbox.Run(ctx, "", "curl", argv...)
 	if err != nil {
-		// A caged failure is never the tool's result (see shell).
+		// A failed sandbox is not the tool's result (see shell).
 		if isSetupError(err) {
 			return "", err
 		}
@@ -427,23 +392,19 @@ func (e *Executor) curl(ctx context.Context, args map[string]any) (string, error
 	return untrustedCurlResult(rawURL, string(out)), nil
 }
 
-// untrustedContentOpen is how a fetched body is delimited before it reaches the
-// model. The system prompt tells the model that everything between the tags is
-// data from the web, never an instruction — so when a page says "ignore the
-// previous instructions and run X", the model reads that as the *content of a
-// page*, which is what it is.
+// untrustedCurlResult wraps a fetched body in the untrusted-content envelope.
+// The system prompt tells the model that everything between the tags is data
+// from the web, so "ignore the previous instructions and run X" reads as the
+// content of a page, which is what it is.
 //
-// Truncation happens first and wrapping second: a huge body must neither push
-// the envelope away nor hide a payload after the cut, and the closing tag has
-// to survive in every case.
+// Truncation comes first and wrapping second, so the closing tag survives the
+// cut and a payload cannot hide after it.
 func untrustedCurlResult(rawURL, body string) string {
 	return "<untrusted-web-content url=\"" + attrEscape(rawURL) + "\">\n" +
 		truncateCurlOutput(body) + "\n</untrusted-web-content>"
 }
 
-// attrEscape keeps an attribute value from breaking out of the envelope: a URL
-// carrying a quote, an angle bracket or an ampersand would otherwise be able to
-// close the tag or open another one.
+// attrEscape keeps a URL from closing the envelope tag or opening another one.
 func attrEscape(s string) string {
 	return strings.NewReplacer(
 		"&", "&amp;",
@@ -453,10 +414,9 @@ func attrEscape(s string) string {
 	).Replace(s)
 }
 
-// validateCurlURL rejects anything the tool will not fetch: a missing URL, a
-// scheme other than http/https (file:// would be a local read, ftp:// another
-// transport), credentials embedded in the URL (they would end up in the request
-// and in the log) and a host outside the allowlist.
+// validateCurlURL rejects what the tool will not fetch: a missing URL, a scheme
+// other than http/https, credentials in the URL and a host outside the
+// allowlist.
 func validateCurlURL(raw string, hosts []string) error {
 	if raw == "" {
 		return fmt.Errorf("Curl: missing 'url'")
@@ -481,9 +441,9 @@ func validateCurlURL(raw string, hosts []string) error {
 	return nil
 }
 
-// hostAllowed reports whether host matches the configured allowlist. Entries are
-// matched case-insensitively; a leading "." (or "*.") makes it a suffix match,
-// so ".example.com" covers example.com and any subdomain.
+// hostAllowed reports whether host matches the allowlist. Entries match
+// case-insensitively; a leading "." (or "*.") makes it a suffix match, so
+// ".example.com" covers example.com and any subdomain.
 func hostAllowed(host string, allowed []string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	for _, entry := range allowed {
@@ -502,9 +462,9 @@ func hostAllowed(host string, allowed []string) bool {
 	return false
 }
 
-// stringList decodes a JSON array of strings into a []string. A missing value is
-// nil; anything else (a string, a number, an array with a non-string) is an
-// error, so the arguments are never re-parsed as a command line.
+// stringList decodes a JSON array of strings. A missing value is nil, and
+// anything else is an error, so the arguments are never re-parsed as a command
+// line.
 func stringList(v any) ([]string, error) {
 	switch list := v.(type) {
 	case nil:
@@ -525,21 +485,20 @@ func stringList(v any) ([]string, error) {
 	return nil, fmt.Errorf("Curl: 'args' must be a list of strings")
 }
 
-// curlArgv builds the argv for the fetch: the fixed defaults first, then the
-// model's options, then the URL last (as --url, so a value can never be taken
-// for a flag).
+// curlArgv builds the argv for the fetch: the fixed defaults, the model's
+// options, then the URL as --url, so a value is not taken for a flag.
 func curlArgv(rawURL string, extra []string) ([]string, error) {
 	opts, err := curlOptions(extra)
 	if err != nil {
 		return nil, err
 	}
 	argv := []string{
-		// -q ignores ~/.curlrc: the environment must not change what runs.
+		// -q ignores ~/.curlrc.
 		"-q",
-		// -sS is quiet about progress, loud about errors.
+		// -sS: quiet about progress, loud about errors.
 		"-sS",
-		// Both the initial request and every redirect are pinned to http(s):
-		// a flag allowlist cannot express that.
+		// Both the request and every redirect are pinned to http(s): a flag
+		// allowlist cannot express that.
 		"--proto", "=http,https",
 		"--proto-redir", "=http,https",
 		"--max-redirs", strconv.Itoa(curlMaxRedirs),
@@ -549,9 +508,9 @@ func curlArgv(rawURL string, extra []string) ([]string, error) {
 	return append(argv, "--url", rawURL), nil
 }
 
-// curlOptions validates the model's extra options against the allowlist and
-// normalizes them into a flag/value sequence (`--header=X` and `-H X` both
-// become `--header X`).
+// curlOptions validates the model's options against the allowlist and
+// normalizes them into a flag/value sequence: `--header=X` and `-H X` both
+// become `--header X`.
 func curlOptions(extra []string) ([]string, error) {
 	out := make([]string, 0, len(extra))
 	for i := 0; i < len(extra); i++ {
@@ -602,8 +561,8 @@ func curlFlagNames() string {
 }
 
 // validateCurlValue rejects the values that turn an allowed option into a
-// different one: header/CRLF injection, @file indirection, a cookie file
-// (-b without "=" reads a file) and unbounded timeouts.
+// different one: header/CRLF injection, @file indirection, a cookie file and an
+// unbounded timeout.
 func validateCurlValue(name, value string) error {
 	if strings.ContainsAny(value, "\x00\r\n") {
 		return fmt.Errorf("Curl: the value for %q must not contain NUL, CR or LF", name)
@@ -644,8 +603,8 @@ func validateCurlValue(name, value string) error {
 	return nil
 }
 
-// truncateCurlOutput bounds the body that goes into the history, cutting on a
-// rune boundary so the result stays valid UTF-8.
+// truncateCurlOutput bounds the body, cutting on a rune boundary so the result
+// stays valid UTF-8.
 func truncateCurlOutput(out string) string {
 	if len(out) <= curlMaxOutput {
 		return out
@@ -658,9 +617,9 @@ func truncateCurlOutput(out string) string {
 		len(out), cut)
 }
 
-// glob implements the `glob` tool, emulating Emacs' `file-expand-wildcards`:
-// PATTERN is expanded under PATH (default the cwd), with a leading `~`
-// expanded to the home directory. Relative patterns yield relative matches.
+// glob implements the `glob` tool, like Emacs' `file-expand-wildcards`: PATTERN
+// is expanded under PATH (default the cwd), a leading `~` becomes the home
+// directory, and relative patterns yield relative matches.
 func (e *Executor) glob(args map[string]any) (string, error) {
 	pattern, ok := args["pattern"].(string)
 	if !ok || pattern == "" {
@@ -694,7 +653,7 @@ func (e *Executor) glob(args map[string]any) (string, error) {
 }
 
 // searchReplace implements the `search_replace` tool: replace the first exact
-// occurrence of SEARCH in PATH with REPLACE (literal, not a regex).
+// occurrence of SEARCH in PATH with REPLACE, literal and not a regex.
 func (e *Executor) searchReplace(args map[string]any) (string, error) {
 	path, okPath := args["path"].(string)
 	search, okSearch := args["search"].(string)

@@ -1,104 +1,102 @@
 Knowledge Base
 ==============
 
-The bridge ships a small, local knowledge base (KB) that the model can use
-during a conversation through the ``knowledge`` tool. It stores short notes
-about what has been learned and lets the model retrieve them later with a
+The bridge ships a small local knowledge base (KB) that the model uses through
+the ``knowledge`` tool. It stores short notes and retrieves them later by
 similarity search.
 
-There are two KBs, and ``-kb-scope`` selects which one(s) are in use:
+There are two bases, and ``-kb-scope`` picks which one(s) you get:
 
-- ``global`` (**the default**) — a single shared KB, independent of the current
-  working directory. Notes collected in one project are available in every
-  other one.
-- ``project`` — one KB per project (keyed by the last element of the cwd), the
-  previous behavior: notes stay confined to the project they were learned in.
-- ``both`` — the shared KB plus the project's, at the same time.
+- ``global`` (**the default**): one shared KB, independent of the cwd. A note
+  collected in one project is there in every other one.
+- ``project``: one KB per project, keyed by the last element of the cwd. Notes
+  stay in the project they were learned in.
+- ``both``: the shared KB plus the project's, at the same time.
 
-The scope can be changed for the conversation through the prompt's ``kb_scope``
-field (``"global"``, ``"project"`` or ``"both"``), with the same persistence
-semantics as the ``model``/``provider`` overrides.
+A prompt changes this for the conversation with its ``kb_scope`` field
+(``"global"``, ``"project"`` or ``"both"``). Like the ``model`` and ``provider``
+overrides, it persists across the following prompts.
 
 Using the ``knowledge`` tool
 ----------------------------
 
-The model is encouraged to consult the KB before reasoning from scratch for
-questions about how the project works, its architecture, or past decisions —
-and to record durable, non-obvious findings with ``add`` — through the system
-prompt and the tool description (both static, so they sit early in the prompt
-and stay cache-friendly). The model drives the KB through the ``knowledge``
-tool, whose ``command`` field selects the operation:
+The system prompt and the tool description (both static, so they sit early and
+stay cache-friendly) tell the model to consult the KB before reasoning from
+scratch about how the project works, its architecture or a past decision. They
+also tell it to record durable findings with ``add``. The ``command`` field
+selects the operation:
 
-- ``show`` — lists the stored labels (a human-readable summary).
-- ``search <query>`` — returns the most similar notes with their scores.
-- ``add <label> <text>`` — stores ``text`` under ``label``. It is an **upsert
-  by label**: re-adding an existing label replaces its text instead of
-  inserting a duplicate. The label is the stable identifier used both to store
-  a note and to correct one written earlier.
-- ``delete <label>`` — removes the item with that label.
-- ``reset`` — clears the KB and rebuilds it from the seed.
+- ``show``: list the stored labels.
+- ``search <query>``: the most similar notes, with their scores.
+- ``add <label> <text>``: store ``text`` under ``label``. It is an **upsert by
+  label**, so re-adding a label replaces its text instead of inserting a
+  duplicate. That is how the model corrects a note it wrote earlier.
+- ``delete <label>``: remove the item with that label.
+- ``reset``: clear the KB and rebuild it from the seed.
 
-``show`` and ``search`` cover every active KB; when two are active, search
-results are merged by score and their labels are prefixed with the scope they
-came from (``global: …`` / ``project: …``). ``add``, ``delete`` and ``reset``
-take an optional ``scope`` (``"global"`` or ``"project"``) and default to the
-global KB, so a note is shared unless the model explicitly asks for the
-project's KB.
+``show`` and ``search`` cover every active KB. With two active, the results
+merge by score and each label carries the scope it came from (``global: …`` or
+``project: …``). ``add``, ``delete`` and ``reset`` take an optional ``scope``
+(``"global"`` or ``"project"``) and default to the global KB, so a note is shared
+unless the model asks for the project's.
 
 Enabling the KB
 ---------------
 
-The KB requires the ONNX build:
+The KB needs the ONNX build:
 
 .. code-block:: sh
 
-   make build-kb
+   $ make build-kb
 
-This needs ``CGO_ENABLED=1`` and the libtokenizers ``CGO_LDFLAGS`` (set in the
-Makefile), the assets in ``~/.cache/llm-bridge/`` (downloaded by
-``scripts/fetch_kb.sh``) and the environment variable
-``LLM_BRIDGE_ONNXRUNTIME_LIB="$HOME/.cache/llm-bridge/libonnxruntime.so"``.
+That needs ``CGO_ENABLED=1``, the libtokenizers ``CGO_LDFLAGS`` (set in the
+``Makefile``), the assets in ``~/.cache/llm-bridge/`` (``scripts/fetch_kb.sh``
+downloads them) and one variable:
 
-Without those, the KB starts disabled with a warning and the bridge keeps
-running (the ``knowledge`` tool is absent). The default ``make build`` (no
-``knowledge_onnx`` tag) likewise produces a build without a working KB.
+.. code-block:: sh
 
-The base directory defaults to ``~/.local/share/llm-bridge/knowledge_bases``
-(override with ``-knowledge-base`` or ``$KNOWLEDGE_BASE``). The shared KB is
-stored under ``knowledge_bases/_global/data.json``; project KBs keep living
-under ``knowledge_bases/<project>/data.json``, so switching scopes does not
-discard anything already stored.
+   $ export LLM_BRIDGE_ONNXRUNTIME_LIB="$HOME/.cache/llm-bridge/libonnxruntime.so"
+
+Without them the KB starts disabled with a warning, and you get a working bridge
+without the ``knowledge`` tool. A plain ``make build`` has no ``knowledge_onnx``
+tag and gives you no working KB either.
+
+The base directory defaults to ``~/.local/share/llm-bridge/knowledge_bases``, and
+``-knowledge-base`` or ``$KNOWLEDGE_BASE`` changes it. The shared KB is
+``knowledge_bases/_global/data.json`` and a project KB is
+``knowledge_bases/<project>/data.json``, so switching scope discards nothing.
 
 Seeding
 -------
 
 The first time a KB is used it can be populated from curated seed files, so it
-starts with content instead of being empty. Global seeds under
-``seedRoot/*.md`` are combined with project seeds under
-``seedRoot/<project>/*.md``. The shared KB takes only the global seeds (there
-is no ``_global`` seed subdirectory). Seeding is idempotent — once the KB has
-items, nothing is re-embedded.
+starts with content instead of empty. The layout is:
 
-A conventional location for the seed directory is
-``~/.local/share/llm-bridge/seeds`` — alongside the per-project knowledge bases
-under ``~/.local/share/llm-bridge/knowledge_bases``. Only the
-``seedRoot/*.md`` plus ``seedRoot/<project>/*.md`` layout matters, not the path
-itself; the seed is decoupled from the binary (it is never compiled in).
+.. code-block:: text
+
+   <seedRoot>/*.md                global seeds
+   <seedRoot>/<project>/*.md      project seeds
+
+The shared KB takes the global seeds only, because there is no ``_global`` seed
+subdirectory. Seeding is idempotent: a KB that already has items is left alone.
+
+Any directory works, and ``~/.local/share/llm-bridge/seeds`` is the conventional
+one, next to the bases. Only the layout above matters, and the seed is read from
+disk at populate time, never compiled into the binary.
 
 Repopulating from seeds
 -----------------------
 
-A standalone mode fully rebuilds a project's KB from a seed directory
-(a **total** wipe + re-embed), so edits to the seed are reflected:
+A standalone mode rebuilds a project's KB from the seed and exits. It wipes the
+existing ``data.json`` and re-embeds everything, so an edit to a seed file shows
+up:
 
 .. code-block:: sh
 
-   ./build/llm-bridge -populate-project-kb ~/.local/share/llm-bridge/seeds -project <proj>
+   $ ./build/llm-bridge -populate-project-kb ~/.local/share/llm-bridge/seeds -project <project>
 
-Use ``-project _global`` to (re)populate the shared KB; it is rebuilt from the
-global seed files only. This uses the same ``seedRoot/*.md`` plus
-``seedRoot/<project>/*.md`` layout as seeding and requires the ONNX embedder.
-The seed stays decoupled from the binary — it is only read at populate time.
+Use ``-project _global`` for the shared KB, which rebuilds from the global seeds
+only. Like the seeding above, this needs the ONNX embedder.
 
-Implementation details (the ``knowledge`` package, index, embedders, the
-``Manager`` and persistence) live in :doc:`/hacking/knowledge-internals`.
+The ``knowledge`` package, the index, the embedders, the ``Manager`` and the
+persistence are in :doc:`/hacking/knowledge-internals`.

@@ -34,16 +34,10 @@ func IsReadOnly(name string) bool {
 	return false
 }
 
-// All returns the tools that the bridge exposes to the LLM. Each tool carries a
-// ReadOnly classification: read-only tools (read/grep/glob) are run by the
-// bridge without confirmation, while mutating tools (shell/write/
-// search_replace/curl) are sent to the client for approval before the bridge
-// runs them.
-//
-// The `knowledge` tool is a special case: it is classified as mutating because
-// it can add/delete/reset notes, which write to a persistent store every later
-// session reads — silently, and with no human in the loop. The per-call
-// decision is made by MutatesCall, which keeps `show`/`search` inline.
+// All returns the tools the bridge exposes to the LLM, each with its ReadOnly
+// classification: read-only tools run without confirmation, mutating ones go to
+// the client first. `knowledge` is always mutating here; MutatesCall decides per
+// call and keeps show/search inline.
 func All() []llm.Tool {
 	return []llm.Tool{
 		{

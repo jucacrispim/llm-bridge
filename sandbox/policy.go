@@ -15,21 +15,12 @@
 // You should have received a copy of the GNU General Public License
 // along with llm-bridge. If not, see <http://www.gnu.org/licenses/>.
 
-// Package sandbox wraps the external `caged` binary. It has two jobs:
+// Package sandbox wraps the external caged binary. It turns a Policy into
+// caged's argv and builds the exec.Cmd values that run a command under it. A
+// sandbox that did not apply comes back as a *SetupError, not as the command's
+// output.
 //
-//   - describe a sandbox policy and turn it into caged's argv (Policy);
-//   - build exec.Cmd values that run a command under that policy, and classify
-//     the caged exit codes that mean "the sandbox did not apply" as hard
-//     errors instead of command output (Sandbox, SetupError).
-//
-// Landlock stacks by intersection, so a process can be wrapped twice: the
-// bridge itself runs under a loose ceiling and every tool it executes runs
-// under a stricter policy. Nothing here needs to know about the ceiling: the
-// kernel does the intersection.
-//
-// This package is a thin argv builder on purpose. caged is a separate binary
-// with its own CLI contract; keeping the binding here (instead of a separate
-// module) means a caged flag rename is a single commit, not a version matrix.
+// Design notes are in docs/source/sandbox.rst.
 package sandbox
 
 import (
@@ -39,36 +30,28 @@ import (
 	"strings"
 )
 
-// Policy is the sandbox caged should build for a command. The zero value is
-// "deny everything": no readable path, no writable path, no network.
+// Policy is the sandbox caged should build for a command. The zero value
+// denies everything: no readable or writable path, no network.
 //
-// The readonly/readwrite lists accept directories or single regular files
-// (caged grants only that file when given a file). Keep in mind that the paths
-// must exist when caged runs: caged opens each of them with O_PATH before
-// restricting itself, so a missing path makes caged fail with exit 125.
+// ReadOnly and ReadWrite take directories or single regular files. The paths
+// have to exist when caged runs, which opens each one before restricting
+// itself: a missing path is exit 125.
 type Policy struct {
 	// ReadOnly holds paths granted read (and execute/traverse) access.
 	ReadOnly []string
-	// ReadWrite holds paths granted read+write access. A single file is
-	// enough, e.g. the bridge log file; a directory is never needed for it.
+	// ReadWrite holds paths granted read+write access. A single file works
+	// too.
 	ReadWrite []string
 
 	// LoopbackOnly gives the command its own network namespace, with loopback
-	// brought up and no route to anywhere else. It is topology, not a filter:
-	// an address outside 127.0.0.0/8 does not exist in there, so an outbound
-	// connection fails with ENETUNREACH instead of EACCES.
-	//
-	// On its own it changes nothing: it does not release the socket families,
-	// so seccomp still denies socket(AF_INET). It is meant to be combined with
-	// AllowNetworkSockets (and ConnectTCP/BindTCP), which is what makes
-	// "network access, but only to this sandbox's own loopback" expressible:
-	// caged's port rules and seccomp cannot say "localhost only" — Landlock has
-	// no address field and seccomp cannot read the sockaddr.
+	// up and no route out, so an off-host connect fails with ENETUNREACH.
+	// Alone it changes nothing: seccomp still denies socket(AF_INET). Set it
+	// with AllowNetworkSockets, ConnectTCP and BindTCP together. See
+	// docs/source/sandbox.rst.
 	LoopbackOnly bool
 
-	// AllowNetworkSockets releases the socket families AF_INET, AF_INET6 and
-	// AF_NETLINK (denied by seccomp otherwise). Without it a process cannot
-	// create a TCP socket at all, no matter what the Landlock rules say.
+	// AllowNetworkSockets releases AF_INET, AF_INET6 and AF_NETLINK, which
+	// seccomp denies by default. Without it no TCP socket can be created.
 	AllowNetworkSockets bool
 	// AllowUnixSockets releases AF_UNIX sockets (denied by seccomp by
 	// default). The bridge talks over stdio pipes, so it does not need it.
@@ -86,10 +69,8 @@ type Policy struct {
 	// BindPorts allows binding the given TCP ports only.
 	BindPorts []int
 
-	// KeepEnv inherits the whole environment. Without it caged replaces the
-	// environment with its small base set (PATH, HOME, LANG, LANGUAGE,
-	// LC_*), which is what every policy here wants: the bridge's environment
-	// carries the API keys, and no tool has an use for them.
+	// KeepEnv passes the whole environment through. Without it caged replaces
+	// the environment with its base set (PATH, HOME, LANG, LANGUAGE, LC_*).
 	KeepEnv bool
 	// Env holds extra NAME=VALUE entries to set in the command environment.
 	Env []string
@@ -103,9 +84,9 @@ type Policy struct {
 	RequireABI int
 }
 
-// Validate reports problems that caged would reject with a usage error (exit
-// 2). Catching them here turns an opaque "exit 2" into a clear message, and
-// keeps a broken policy from being indistinguishable from a sandbox failure.
+// Validate reports the conflicts and out-of-range values caged would reject
+// with a usage error (exit 2), so a broken policy fails at startup with a
+// clear message.
 func (p Policy) Validate() error {
 	if p.ConnectTCP && len(p.ConnectPorts) > 0 {
 		return errors.New("sandbox: connect-tcp conflicts with connect ports")
@@ -137,9 +118,9 @@ func (p Policy) Validate() error {
 	return nil
 }
 
-// Args returns the caged arguments that describe this policy, without the "--"
-// separator and the command (Command appends both). Flags whose value means
-// "unset" are omitted.
+// Args returns the caged arguments for this policy, without the "--" separator
+// and the command, which Command appends. Flags whose value means "unset" are
+// omitted.
 func (p Policy) Args() []string {
 	// nil when nothing is set (not an empty slice): "no flags" reads better
 	// and keeps the zero policy comparable.

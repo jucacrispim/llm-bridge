@@ -21,6 +21,10 @@
       "levels": ["low", "medium", "high", "xhigh", "max"],
       "budget": true,
       "models": [
+        {"id": "gemini-4-argon", "window": 1000000,
+         "price": {"input": 2.0, "cached": 0.10, "output": 10.0}},
+        {"id": "gemini-4-hydrogen", "window": 1000000,
+         "price": {"input": 1.5, "cached": 0.075, "output": 7.5}},
         {"id": "gemini-3.8-flash", "window": 1000000,
          "price": {"input": 0.75, "cached": 0.075, "output": 3.75}},
         {"id": "gemini-3.1-pro", "window": 1000000,

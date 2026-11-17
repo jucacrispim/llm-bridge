@@ -96,9 +96,7 @@ func TestContextWindowUnknown(t *testing.T) {
 	}{
 		{"empty", ""},
 		{"unrelated", "gpt-4o"},
-		// "gemini-3" is not itself a key and does not prefix any known id
-		// (the known ids are gemini-3.8-flash / gemini-3.1-pro / gemini-3-flash,
-		// none of which starts with "gemini-3" followed by nothing useful).
+		// no key is a prefix of gemini-2.0-flash
 		{"partial", "gemini-2.0-flash"},
 	}
 	for _, tc := range cases {

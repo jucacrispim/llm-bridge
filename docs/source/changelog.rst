@@ -22,6 +22,9 @@ Added
   ``~/.config/llm-bridge/models.json`` to replace it without a rebuild. The
   file replaces the embedded data as a whole, and an invalid one is logged and
   ignored. The format is in :ref:`providers-context-window`.
+- **Gemini 4 Argon and Hydrogen are in the catalog.** Both take a 1M token
+  prompt. Gemini 4 Argon doubles its price on 2026-12-01, so the rates in
+  ``llm/models.json`` need an edit then (see :ref:`providers-price`).
 - **``turn_end`` reports the cost.** ``cost_usd`` is the cost of the turn and
   ``session_cost_usd`` the total since the bridge started. The prices are in
   ``llm/models.json`` next to the window. Each provider works out the cost of a

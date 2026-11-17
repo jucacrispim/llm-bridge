@@ -355,7 +355,8 @@ DeepSeek peak hours are Monday to Friday, 01:00-04:00 and 06:00-10:00 UTC. The
 bridge checks the clock when the call ends. Chinese public holidays are
 off-peak at DeepSeek, but the bridge has no calendar, so it bills them as peak.
 
-Prices change. Gemini 3.8 Flash doubles on 2027-01-01, so edit the file then.
+Prices change. Gemini 4 Argon doubles on 2026-12-01 and Gemini 3.8 Flash
+doubles on 2027-01-01, so edit the file then.
 
 To change the data without a rebuild, save a file as
 ``~/.config/llm-bridge/models.json`` (``$XDG_CONFIG_HOME`` is honored). It

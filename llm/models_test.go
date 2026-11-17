@@ -43,7 +43,7 @@ func TestCatalogKnown(t *testing.T) {
 		budget bool
 	}{
 		"deepseek":  {models: 3, levels: 3, budget: false},
-		"google":    {models: 8, levels: 5, budget: true},
+		"google":    {models: 10, levels: 5, budget: true},
 		"anthropic": {models: 18, levels: 5, budget: true},
 	}
 	for name, tc := range cases {

@@ -155,11 +155,32 @@ Events (bridge → client)
 
 ``ready``
     Emitted once at startup, before the loop starts, to signal the bridge is
-    ready to receive commands.
+    ready to receive commands. It also announces what the bridge can be asked
+    for, so the client offers the real names instead of keeping its own copy.
 
     .. code-block:: json
 
-       {"event": "ready"}
+       {"event": "ready", "default_provider": "deepseek", "providers": [
+          {"name": "anthropic", "model": "claude-haiku-5-5",
+           "models": [{"id": "claude-sonnet-5-5", "window": 1000000},
+                      {"id": "claude-opus-4-5", "window": 200000}],
+           "reasoning": {"levels": ["low", "medium", "high", "xhigh", "max"],
+                         "budget": true}},
+          {"name": "deepseek", "model": "deepseek-chat",
+           "models": [{"id": "deepseek-flash", "window": 1000000}],
+           "reasoning": {"levels": ["low", "medium", "high"], "budget": false}}]}
+
+    ``default_provider`` is the provider a prompt without a ``provider`` uses.
+    In each entry, ``model`` is the model in use now, ``models`` are the ids
+    known for that provider, ``window`` is the same number ``turn_end`` reports
+    in ``context_window``, and ``reasoning`` says which ``reasoning_effort``
+    values the provider takes: the ``levels`` in ascending order, and
+    ``budget`` for a numeric token budget.
+
+    ``models`` is what to offer, not an allow list. A prompt may name any model,
+    and a provider the bridge does not know still gets announced with ``name``
+    and ``model`` alone. A bridge started without a provider registry sends the
+    bare ``{"event": "ready"}``, which is all an older client reads.
 
 ``chunk``
     A streaming fragment of the model's content. The client concatenates the

@@ -7,6 +7,16 @@ Unreleased
 Added
 ~~~~~
 
+- **The ``ready`` event announces the providers and their models.** It carries
+  ``default_provider`` and a ``providers`` list, each entry with the model in
+  use now, the ids the provider answers for with their context window, and how
+  it takes the reasoning effort (the levels it accepts and whether a token
+  budget works instead). A client offers the real names instead of keeping its
+  own copy of them, and a model added to the bridge shows up without a client
+  release. The list comes from the context window table in
+  ``llm/contextwindow.go``, and the deepseek aliases (``deepseek-chat``,
+  ``deepseek-reasoner``) are left out. A bridge with no provider registry still
+  sends the bare ``{"event":"ready"}``.
 - **Anthropic requests ask for prompt caching.** Three ``cache_control``
   breakpoints go out on every request: the last tool of the list, the system
   prompt and the last block of the last message. The tool breakpoint caches the

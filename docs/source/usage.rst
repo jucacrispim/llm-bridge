@@ -21,9 +21,11 @@ directory.
 .. code-block:: sh
 
    $ ./build/llm-bridge -sandbox-rw "$HOME/mysrc" -logfile /tmp/llm-bridge.log
-   {"event":"ready"}
+   {"event":"ready","default_provider":"deepseek","providers":[{"name":"anthropic", ...}]}
 
-Wait for that line before you send the first command.
+Wait for that line before you send the first command. It announces the
+providers, their models and their reasoning levels, which is what a client
+offers when you pick a model (see ``ready`` in :doc:`protocol`).
 
 Stdout carries the protocol, so send the logs to a file or drop them. Anything
 else on stdout corrupts your client's stream.

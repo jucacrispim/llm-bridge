@@ -1291,6 +1291,38 @@ func providerNames(providers map[string]llm.LLMProvider) []string {
 	return names
 }
 
+// readyProviders describes the provider registry for the ready event: the model
+// each provider uses right now, the ids it answers for and the reasoning
+// controls it takes. An empty registry gives nil, so the event stays bare.
+func readyProviders(providers map[string]llm.LLMProvider) []protocol.ProviderInfo {
+	if len(providers) == 0 {
+		return nil
+	}
+	names := providerNames(providers)
+	infos := make([]protocol.ProviderInfo, 0, len(names))
+	for _, name := range names {
+		info := protocol.ProviderInfo{Name: name, Model: providers[name].Model()}
+		catalog, ok := llm.Catalog(name)
+		if !ok {
+			// A provider the bridge only knows by name still gets announced:
+			// the client can talk to it, it just has no model list to offer.
+			infos = append(infos, info)
+			continue
+		}
+		for _, id := range catalog.Models {
+			window, _ := llm.ContextWindow(id)
+			info.Models = append(info.Models, protocol.ModelInfo{ID: id, Window: window})
+		}
+		reasoning := &protocol.ReasoningInfo{Budget: catalog.Budget}
+		for _, level := range catalog.Levels {
+			reasoning.Levels = append(reasoning.Levels, string(level))
+		}
+		info.Reasoning = reasoning
+		infos = append(infos, info)
+	}
+	return infos
+}
+
 // run starts the server loop with either a single fixed provider or a named
 // registry. When providers is non-empty it wins over the single provider.
 func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, defaultName string, systemPrompt string, aggressivePrune bool, prune bool, kbBaseDir string, kbScope string, kbEmbed knowledge.Embedder, sbs Sandboxes) error {
@@ -1333,7 +1365,7 @@ func run(r io.Reader, w io.Writer, providers map[string]llm.LLMProvider, default
 	// cwd, and the client may never send set_cwd.
 	st.loadKB()
 
-	_ = st.write(w, string(protocol.NewReady())+"\n")
+	_ = st.write(w, string(protocol.NewReady(defaultName, readyProviders(providers)))+"\n")
 	logger.Debugf("ready sent")
 
 	// The reader goroutine keeps consuming stdin while the main loop is blocked

@@ -646,6 +646,8 @@ func TestRunWithProviderNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runWithProvider(nil): %v", err)
 	}
+	// no provider at all: the bridge still announces itself, without a
+	// provider list to offer.
 	want := `{"event":"ready"}` + "\n"
 	if out.String() != want {
 		t.Errorf("runWithProvider(nil) output:\n got: %q\nwant: %q", out.String(), want)
@@ -717,7 +719,7 @@ func TestRunWithProviderBasic(t *testing.T) {
 	}
 
 	got := out.String()
-	expected := `{"event":"ready"}` + "\n" +
+	expected := `{"event":"ready","default_provider":"fake","providers":[{"name":"fake","model":"fake"}]}` + "\n" +
 		`{"event":"chunk","text":"Hi"}` + "\n" +
 		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0}` + "\n" +
 		`{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
@@ -773,15 +775,61 @@ func TestHandleLinePromptToolCallThenResult(t *testing.T) {
 
 func TestRunWithProviderEOF(t *testing.T) {
 	var out bytes.Buffer
-	provider := &fakeProvider{}
+	provider := &fakeProvider{name: "fake"}
 	err := runWithProvider(strings.NewReader(""), &out, provider)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	got := out.String()
-	want := `{"event":"ready"}` + "\n"
+	want := `{"event":"ready","default_provider":"fake","providers":[{"name":"fake","model":"fake"}]}` + "\n"
 	if got != want {
 		t.Errorf("runWithProvider EOF output:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestReadyProviders covers the announcement: sorted by name, each provider
+// with its current model, and a provider the bridge does not know announced by
+// name alone.
+func TestReadyProviders(t *testing.T) {
+	providers := map[string]llm.LLMProvider{
+		"deepseek":  &fakeProvider{name: "deepseek", model: "deepseek-flash"},
+		"anthropic": &fakeProvider{name: "anthropic", model: "claude-sonnet-5-5"},
+		"other":     &fakeProvider{name: "other"},
+	}
+	got := readyProviders(providers)
+	if len(got) != 3 {
+		t.Fatalf("readyProviders() has %d entries, want 3", len(got))
+	}
+	// sorted by name, so the event is stable between runs
+	for i, want := range []string{"anthropic", "deepseek", "other"} {
+		if got[i].Name != want {
+			t.Fatalf("readyProviders()[%d].Name = %q, want %q", i, got[i].Name, want)
+		}
+	}
+	if got[0].Model != "claude-sonnet-5-5" {
+		t.Errorf("anthropic model = %q, want claude-sonnet-5-5", got[0].Model)
+	}
+	if len(got[0].Models) == 0 || got[0].Models[0].Window == 0 {
+		t.Errorf("anthropic models = %v, want ids with a window", got[0].Models)
+	}
+	if got[0].Reasoning == nil || !got[0].Reasoning.Budget || len(got[0].Reasoning.Levels) != 5 {
+		t.Errorf("anthropic reasoning = %+v, want 5 levels and a budget", got[0].Reasoning)
+	}
+	if got[1].Reasoning == nil || got[1].Reasoning.Budget || len(got[1].Reasoning.Levels) != 3 {
+		t.Errorf("deepseek reasoning = %+v, want 3 levels and no budget", got[1].Reasoning)
+	}
+	// a provider the bridge only knows by name: no model list, no controls
+	if got[2].Model != "fake" {
+		t.Errorf("other model = %q, want fake", got[2].Model)
+	}
+	if got[2].Models != nil || got[2].Reasoning != nil {
+		t.Errorf("other = %+v, want no models and no reasoning", got[2])
+	}
+}
+
+func TestReadyProvidersEmpty(t *testing.T) {
+	if got := readyProviders(nil); got != nil {
+		t.Errorf("readyProviders(nil) = %v, want nil", got)
 	}
 }
 

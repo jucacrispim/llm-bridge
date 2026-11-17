@@ -42,10 +42,34 @@ func TestParseInboundInvalid(t *testing.T) {
 }
 
 func TestNewReady(t *testing.T) {
-	got := string(NewReady())
+	got := string(NewReady("", nil))
 	want := `{"event":"ready"}`
 	if got != want {
 		t.Errorf("NewReady() = %s, want %s", got, want)
+	}
+}
+
+// TestNewReadyProviders covers the announced shape: the default provider, each
+// provider's current model, the ids it answers for with their windows, and how
+// it takes the reasoning effort.
+func TestNewReadyProviders(t *testing.T) {
+	providers := []ProviderInfo{{
+		Name:  "anthropic",
+		Model: "claude-sonnet-5-5",
+		Models: []ModelInfo{
+			{ID: "claude-sonnet-5-5", Window: 1_000_000},
+			{ID: "claude-sonnet-4-5", Window: 200_000},
+		},
+		Reasoning: &ReasoningInfo{Levels: []string{"low", "high"}, Budget: true},
+	}}
+	got := string(NewReady("anthropic", providers))
+	want := `{"event":"ready","default_provider":"anthropic","providers":[` +
+		`{"name":"anthropic","model":"claude-sonnet-5-5",` +
+		`"models":[{"id":"claude-sonnet-5-5","window":1000000},` +
+		`{"id":"claude-sonnet-4-5","window":200000}],` +
+		`"reasoning":{"levels":["low","high"],"budget":true}}]}`
+	if got != want {
+		t.Errorf("NewReady() =\n %s\nwant:\n %s", got, want)
 	}
 }
 

@@ -288,6 +288,13 @@ first, then by the **longest matching prefix**, so versioned ids such as
 table reports ``context_pct: null`` and ``context_window: 0`` instead of a
 guessed window.
 
+The ``ready`` event announces this table split by provider: each provider
+carries the ids it answers for, with the window above. ``llm/models.go`` holds
+the split and the reasoning controls, and ``deepseek-chat`` and
+``deepseek-reasoner`` stay out of it, because they are redirected to
+``deepseek-flash``. A test fails when an id in the table is neither announced
+nor listed as an alias.
+
 .. list-table::
    :header-rows: 1
    :widths: 60 40

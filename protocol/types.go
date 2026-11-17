@@ -32,8 +32,44 @@ func ParseInbound(data []byte) (*InboundCommand, error) {
 	return &cmd, nil
 }
 
+// Ready is the first event of a session.
 type Ready struct {
 	Event Event `json:"event"`
+	// DefaultProvider is the provider a prompt without a provider override
+	// uses.
+	DefaultProvider string `json:"default_provider,omitempty"`
+	// Providers is what the bridge can be asked for, sorted by name. A client
+	// uses it to offer the real provider and model names instead of keeping its
+	// own copy of them.
+	Providers []ProviderInfo `json:"providers,omitempty"`
+}
+
+// ProviderInfo is one provider the bridge knows how to reach.
+type ProviderInfo struct {
+	Name string `json:"name"`
+	// Model is the model in use now, before any per-prompt override.
+	Model string `json:"model"`
+	// Models are the ids known for this provider. A prompt may still name any
+	// model: the list is what to offer, not an allow list.
+	Models []ModelInfo `json:"models,omitempty"`
+	// Reasoning is how the provider takes the reasoning effort, absent for a
+	// provider the bridge does not know.
+	Reasoning *ReasoningInfo `json:"reasoning,omitempty"`
+}
+
+// ModelInfo is a model the bridge knows, with the window it reports in
+// `turn_end`.
+type ModelInfo struct {
+	ID     string `json:"id"`
+	Window int    `json:"window"`
+}
+
+// ReasoningInfo is how a provider takes the reasoning effort.
+type ReasoningInfo struct {
+	// Levels are the effort levels the provider accepts, ascending.
+	Levels []string `json:"levels,omitempty"`
+	// Budget reports whether a token budget works instead of a level.
+	Budget bool `json:"budget"`
 }
 
 type Chunk struct {
@@ -107,8 +143,10 @@ type FilesChanged struct {
 	Files []string `json:"files"`
 }
 
-func NewReady() []byte {
-	evt := Ready{Event: EventReady}
+// NewReady serializes the `ready` event. An empty defaultProvider and provider
+// list give the bare `{"event":"ready"}` an older client expects.
+func NewReady(defaultProvider string, providers []ProviderInfo) []byte {
+	evt := Ready{Event: EventReady, DefaultProvider: defaultProvider, Providers: providers}
 	b, _ := json.Marshal(evt)
 	return b
 }

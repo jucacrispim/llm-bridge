@@ -241,10 +241,24 @@ type anthropicImageSource struct {
 	URL       string `json:"url,omitempty"`
 }
 
+// anthropicCacheControl marks a prompt cache breakpoint. The API caches
+// everything before the mark and reads it back on the next request.
+type anthropicCacheControl struct {
+	Type string `json:"type"`
+}
+
+// cacheBreakpoint returns an ephemeral breakpoint. The entry expires on its own
+// after a few minutes of inactivity.
+func cacheBreakpoint() *anthropicCacheControl {
+	return &anthropicCacheControl{Type: "ephemeral"}
+}
+
 // anthropicBlock is one content block, in a request or in a response. The type
 // decides which of the remaining fields mean anything.
 type anthropicBlock struct {
 	Type string `json:"type"`
+	// CacheControl is only sent on a request block, at a breakpoint.
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 	// text
 	Text string `json:"text,omitempty"`
 	// thinking
@@ -286,12 +300,17 @@ type anthropicTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema"`
+	// CacheControl is only sent on the last tool, where it caches the whole
+	// tool list.
+	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
 }
 
 type anthropicRequest struct {
-	Model        string                 `json:"model"`
-	MaxTokens    int                    `json:"max_tokens"`
-	System       string                 `json:"system,omitempty"`
+	Model     string `json:"model"`
+	MaxTokens int    `json:"max_tokens"`
+	// System is a block list rather than the bare string the API also takes,
+	// because a breakpoint has nowhere to go on a string.
+	System       []anthropicBlock       `json:"system,omitempty"`
 	Messages     []anthropicMessage     `json:"messages"`
 	Tools        []anthropicTool        `json:"tools,omitempty"`
 	Thinking     *anthropicThinking     `json:"thinking,omitempty"`
@@ -463,6 +482,24 @@ func (p *AnthropicProvider) buildAnthropicMessages(messages []Message) []anthrop
 	return out
 }
 
+// markMessageBreakpoint puts a breakpoint on the last block of the last
+// message. A thinking block ends an assistant message, and its signature is the
+// fragile part, so the breakpoint walks back to the last block carrying content.
+func markMessageBreakpoint(messages []anthropicMessage) {
+	if len(messages) == 0 {
+		return
+	}
+	content := messages[len(messages)-1].Content
+	for i := len(content) - 1; i >= 0; i-- {
+		switch content[i].Type {
+		case "thinking", "redacted_thinking":
+			continue
+		}
+		content[i].CacheControl = cacheBreakpoint()
+		return
+	}
+}
+
 // isToolResultMessage reports whether every block of msg is a tool_result.
 func isToolResultMessage(msg anthropicMessage) bool {
 	if len(msg.Content) == 0 {
@@ -491,13 +528,21 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest, onChunk f
 	model := p.resolveModel(req)
 	messages := p.buildAnthropicMessages(req.Messages)
 
-	system := req.System
 	payload := anthropicRequest{
 		Model:     model,
 		MaxTokens: p.effectiveMaxTokens(req),
-		System:    system,
 		Messages:  messages,
 		Stream:    true,
+	}
+	// Three breakpoints: the tool list, the system prompt and the last message.
+	// The cache is a prefix, so the tool list one covers everything up to it and
+	// the system prompt one covers both.
+	if req.System != "" {
+		payload.System = []anthropicBlock{{
+			Type:         "text",
+			Text:         req.System,
+			CacheControl: cacheBreakpoint(),
+		}}
 	}
 	if len(req.Tools) > 0 {
 		tools := make([]anthropicTool, 0, len(req.Tools))
@@ -508,8 +553,10 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest, onChunk f
 				InputSchema: t.Parameters,
 			})
 		}
+		tools[len(tools)-1].CacheControl = cacheBreakpoint()
 		payload.Tools = tools
 	}
+	markMessageBreakpoint(messages)
 	payload.Thinking = p.effectiveThinkingConfig(req)
 	if effort, ok := p.effectiveEffort(req); ok {
 		payload.OutputConfig = &anthropicOutputConfig{Effort: effort}

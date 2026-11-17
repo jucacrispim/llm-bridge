@@ -239,6 +239,29 @@ Thinking signatures
     back unmodified and in the original position, or the API answers 400 with
     ``invalid_request_error``.
 
+Prompt caching
+    Three ``cache_control`` breakpoints go out on every request: the last tool
+    of the tool list, the system prompt, and the last block of the last
+    message. The cache is a prefix, so the tool breakpoint covers everything up
+    to it and the system breakpoint covers both. The API accepts four.
+
+    ``system`` is a block list rather than the bare string the API also takes,
+    because a breakpoint has nowhere to go on a string. The message breakpoint
+    walks back over ``thinking`` blocks: the signature is the fragile part of a
+    replayed block, and the breakpoint reads better on the text before it.
+
+    Inside a turn the history only grows, so the message breakpoint hits across
+    the tool calls of that turn. It also hits across turns, unless you run
+    ``-prune`` or ``-aggressive-prune``: both rewrite the middle of the history,
+    so the first request after a pruned turn writes the cache again and the
+    following ones hit. The tool and system breakpoints sit at the front of the
+    prefix and are not affected.
+
+    The API caches a prefix only above a minimum length, 1024 tokens for the
+    current models. Below it the breakpoint is ignored, not rejected. Cache
+    reads come back in ``cache_read_input_tokens`` and reach ``turn_end`` as
+    ``cache_hit_tokens``.
+
 Usage
     ``input_tokens``, ``cache_read_input_tokens`` and
     ``cache_creation_input_tokens`` are all prompt tokens, so all three are

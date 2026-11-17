@@ -128,9 +128,12 @@ func TestAnthropicChatRequestPayload(t *testing.T) {
 	var got struct {
 		Model     string `json:"model"`
 		MaxTokens int    `json:"max_tokens"`
-		System    string `json:"system"`
-		Stream    bool   `json:"stream"`
-		Thinking  struct {
+		System    []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"system"`
+		Stream   bool `json:"stream"`
+		Thinking struct {
 			Type   string `json:"type"`
 			Budget int    `json:"budget_tokens"`
 		} `json:"thinking"`
@@ -153,8 +156,8 @@ func TestAnthropicChatRequestPayload(t *testing.T) {
 	if got.Model != "claude-sonnet-5-5" || !got.Stream {
 		t.Errorf("model=%q stream=%v", got.Model, got.Stream)
 	}
-	if got.System != "be brief" {
-		t.Errorf("system = %q", got.System)
+	if len(got.System) != 1 || got.System[0].Text != "be brief" {
+		t.Errorf("system = %+v", got.System)
 	}
 	if got.MaxTokens <= 4096 {
 		t.Errorf("max_tokens = %d, want more than the 4096 budget", got.MaxTokens)
@@ -169,6 +172,97 @@ func TestAnthropicChatRequestPayload(t *testing.T) {
 	if len(got.Messages) != 1 || got.Messages[0].Role != RoleUser ||
 		got.Messages[0].Content[0].Text != "hi" {
 		t.Errorf("messages = %+v", got.Messages)
+	}
+}
+
+// cacheBreakpoints counts the cache_control marks of a request body. The API
+// accepts four.
+func cacheBreakpoints(body string) int {
+	return strings.Count(body, `"cache_control"`)
+}
+
+func TestAnthropicCacheBreakpoints(t *testing.T) {
+	srv, lastBody := anthropicTestServer(t, []string{
+		`data: {"type":"message_start","message":{"model":"claude-sonnet-5-5"}}`,
+		`data: {"type":"message_stop"}`,
+	})
+	p := NewAnthropicProvider("key", srv.URL, "")
+	tools := make([]Tool, 0, 3)
+	for _, name := range []string{"read", "write", "shell"} {
+		tools = append(tools, Tool{
+			Name:       name,
+			Parameters: json.RawMessage(`{"type":"object"}`),
+		})
+	}
+	_, err := p.Chat(context.Background(), ChatRequest{
+		System:   "be brief",
+		Tools:    tools,
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	body := *lastBody
+	if n := cacheBreakpoints(body); n != 3 {
+		t.Errorf("%d breakpoints, want 3 (tools, system, last message): %s", n, body)
+	}
+	if !strings.Contains(body, `"system":[{"type":"text","cache_control":{"type":"ephemeral"},"text":"be brief"}]`) {
+		t.Errorf("system block has no breakpoint: %s", body)
+	}
+	// The breakpoint sits on the last tool, so the tool list is one prefix.
+	if strings.Contains(body, `"name":"read","input_schema":{"type":"object"},"cache_control"`) {
+		t.Errorf("first tool carries the breakpoint: %s", body)
+	}
+	if !strings.Contains(body, `"name":"shell","input_schema":{"type":"object"},"cache_control"`) {
+		t.Errorf("last tool carries no breakpoint: %s", body)
+	}
+}
+
+func TestAnthropicCacheBreakpointOnToolResult(t *testing.T) {
+	srv, lastBody := anthropicTestServer(t, []string{
+		`data: {"type":"message_start","message":{"model":"claude-sonnet-5-5"}}`,
+		`data: {"type":"message_stop"}`,
+	})
+	p := NewAnthropicProvider("key", srv.URL, "")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		System: "be brief",
+		Messages: []Message{
+			{Role: RoleUser, Content: "read the file"},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{
+				{ID: "1", Name: "read", Arguments: `{"path":"x"}`},
+				{ID: "2", Name: "read", Arguments: `{"path":"y"}`},
+			}},
+			{Role: "tool", ToolCallID: "1", Content: "a"},
+			{Role: "tool", ToolCallID: "2", Content: "b"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	// The two results share one user message, and the breakpoint goes on its
+	// last block.
+	if n := cacheBreakpoints(*lastBody); n != 2 {
+		t.Errorf("%d breakpoints, want 2 (system, last tool result): %s", n, *lastBody)
+	}
+	if !strings.Contains(*lastBody, `"tool_result","cache_control":{"type":"ephemeral"},"tool_use_id":"2"`) {
+		t.Errorf("last tool result carries no breakpoint: %s", *lastBody)
+	}
+}
+
+func TestAnthropicCacheBreakpointSkipsThinking(t *testing.T) {
+	messages := []anthropicMessage{{
+		Role: RoleAssistant,
+		Content: []anthropicBlock{
+			{Type: "thinking", Thinking: "hmm", Signature: "sig"},
+			{Type: "text", Text: "answer"},
+		},
+	}}
+	markMessageBreakpoint(messages)
+	if messages[0].Content[0].CacheControl != nil {
+		t.Error("thinking block carries the breakpoint")
+	}
+	if messages[0].Content[1].CacheControl == nil {
+		t.Error("text block has no breakpoint")
 	}
 }
 

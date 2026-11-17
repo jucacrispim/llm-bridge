@@ -1,6 +1,24 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Added
+~~~~~
+
+- **Anthropic requests ask for prompt caching.** Three ``cache_control``
+  breakpoints go out on every request: the last tool of the list, the system
+  prompt and the last block of the last message. The tool breakpoint caches the
+  tool list, the system breakpoint caches the tool list plus the prompt, and the
+  message breakpoint covers the tool calls of the running turn. ``system``
+  became a block list, because the API only takes ``cache_control`` on a block.
+
+  ``-prune`` and ``-aggressive-prune`` rewrite the middle of the history, so the
+  message breakpoint misses on the first request after a pruned turn and the
+  prefix is written again at 1.25x. The tool and system breakpoints sit at the
+  front of the prefix and keep hitting.
+
 v0.7.0
 ------
 

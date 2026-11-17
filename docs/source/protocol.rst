@@ -243,6 +243,11 @@ Events (bridge → client)
     ``cache_hit_tokens`` / ``cache_miss_tokens`` are the prompt cache accounting
     summed over every provider call of the turn, and a tool-calling turn makes
     several. A provider without cache reporting leaves them at ``0``.
+    ``duration_ms`` is the wall time from the ``prompt`` to this event.
+    ``llm_ms`` is the part spent in provider calls and ``tool_ms`` the part
+    spent running tools. The time a ``tool_confirm`` waits for you is in
+    ``duration_ms`` only, so ``duration_ms - llm_ms - tool_ms`` is the wait plus
+    the bridge's own overhead. A cancelled turn sends no ``turn_end``.
     ``stop_reason`` is one of ``end_turn``, ``tool_use`` or ``max_tokens``
     whatever the provider, plus the provider's own word for a stop the common
     three do not name (a Gemini safety block, for example).
@@ -260,7 +265,10 @@ Events (bridge → client)
          "output_tokens": 512,
          "total_tokens": 1536,
          "cache_hit_tokens": 900,
-         "cache_miss_tokens": 124
+         "cache_miss_tokens": 124,
+         "duration_ms": 8420,
+         "llm_ms": 7100,
+         "tool_ms": 1180
        }
 
 ``usage_delta``

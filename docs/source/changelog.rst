@@ -22,6 +22,11 @@ Added
   ``~/.config/llm-bridge/models.json`` to replace it without a rebuild. The
   file replaces the embedded data as a whole, and an invalid one is logged and
   ignored. The format is in :ref:`providers-context-window`.
+- **``turn_end`` reports the time of the turn.** ``duration_ms`` is the wall
+  time from the prompt to the event, ``llm_ms`` sums the provider calls and
+  ``tool_ms`` sums the tool runs. The wait for a ``tool_confirm`` is in
+  ``duration_ms`` only. A cancelled turn has no ``turn_end``, so it has no
+  timing.
 - **System prompts per model.** The embedded prompt moved from
   ``server/system_prompt.md`` to ``server/prompts/default.md``, and a file named
   after a model, a model prefix or a provider replaces it for those models. A

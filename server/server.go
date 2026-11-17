@@ -137,6 +137,11 @@ type state struct {
 	// over the turn, and go out in turn_end.
 	turnCacheHitTokens  int
 	turnCacheMissTokens int
+	// turnStart is when the prompt arrived. turnLLM and turnTool sum the time
+	// in provider calls and in tool execution, and go out in turn_end.
+	turnStart time.Time
+	turnLLM   time.Duration
+	turnTool  time.Duration
 	// turnFilesChanged holds the paths written in the turn, reported as a
 	// files_changed event at its end. Reset at the start of each prompt.
 	turnFilesChanged []string
@@ -281,11 +286,16 @@ func (st *state) confirmMeta(tc llm.ToolCall) protocol.ConfirmMeta {
 	return meta
 }
 
+// now is the clock of the turn timings. Tests replace it.
+var now = time.Now
+
 // executeTool runs a single tool call and appends its result. The context can
 // be cancelled, which interrupts a running shell/grep process; a result is not
 // appended for a cancelled turn, because the assistant message was already
 // sanitized away and the result would be an orphan.
 func (st *state) executeTool(tc llm.ToolCall) {
+	start := now()
+	defer func() { st.turnTool += now().Sub(start) }()
 	if tc.Name == "knowledge" {
 		st.resolveKnowledge(tc.ID, tc.Arguments)
 		return
@@ -961,6 +971,9 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		st.lastPromptTokens = 0
 		st.turnCacheHitTokens = 0
 		st.turnCacheMissTokens = 0
+		st.turnStart = now()
+		st.turnLLM = 0
+		st.turnTool = 0
 		st.turnFilesChanged = nil
 		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
 		images, err := resolvePromptImages(st.cwd, p.Images)
@@ -1052,6 +1065,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		// provider reject the request with HTTP 400. Sanitize right before the
 		// snapshot, so what is sent is always valid.
 		st.sanitizeHistory()
+		chatStart := now()
 		resp, err := st.activeProvider().Chat(ctx, llm.ChatRequest{
 			Messages:       st.historySnapshot(),
 			Tools:          st.availableTools(),
@@ -1072,6 +1086,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			_ = st.write(w, string(protocol.NewChunk(s))+"\n")
 		})
 		st.setCancel(nil)
+		st.turnLLM += now().Sub(chatStart)
 		if err != nil {
 			cancel()
 			if errors.Is(err, context.Canceled) {
@@ -1232,7 +1247,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			newEnd := protocol.NewTurnEnd(resp.StopReason, contextPct,
 				model, st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens,
 				st.turnCacheHitTokens, st.turnCacheMissTokens,
-				contextTokens, contextWindow)
+				contextTokens, contextWindow,
+				now().Sub(st.turnStart).Milliseconds(), st.turnLLM.Milliseconds(), st.turnTool.Milliseconds())
 			_ = st.write(w, string(newEnd)+"\n")
 			// Report the modified files, sorted for deterministic output.
 			if len(st.turnFilesChanged) > 0 {

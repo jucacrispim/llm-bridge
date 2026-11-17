@@ -118,6 +118,12 @@ type TurnEnd struct {
 	// at zero.
 	CacheHitTokens  int `json:"cache_hit_tokens"`
 	CacheMissTokens int `json:"cache_miss_tokens"`
+	// DurationMS is the wall time of the turn, from the prompt to this event.
+	// LLMMS and ToolMS are the parts spent in provider calls and in tool
+	// execution. The wait for a tool_confirm is in none of them.
+	DurationMS int64 `json:"duration_ms"`
+	LLMMS      int64 `json:"llm_ms"`
+	ToolMS     int64 `json:"tool_ms"`
 }
 
 type ErrorEvent struct {
@@ -198,12 +204,13 @@ func NewToolConfirmWithMeta(id, name string, input any, meta ConfirmMeta) ([]byt
 	return json.Marshal(evt)
 }
 
-func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens, contextTokens, contextWindow int) []byte {
+func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens, contextTokens, contextWindow int, durationMS, llmMS, toolMS int64) []byte {
 	evt := TurnEnd{Event: EventTurnEnd, StopReason: stopReason,
 		ContextPct: contextPct, ContextTokens: contextTokens, ContextWindow: contextWindow,
 		Model:       model,
 		InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens,
-		CacheHitTokens: cacheHitTokens, CacheMissTokens: cacheMissTokens}
+		CacheHitTokens: cacheHitTokens, CacheMissTokens: cacheMissTokens,
+		DurationMS: durationMS, LLMMS: llmMS, ToolMS: toolMS}
 	b, _ := json.Marshal(evt)
 	return b
 }

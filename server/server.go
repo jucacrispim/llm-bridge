@@ -142,6 +142,12 @@ type state struct {
 	turnStart time.Time
 	turnLLM   time.Duration
 	turnTool  time.Duration
+	// turnCost sums the cost of the calls of the turn. A call with no price
+	// sets turnUnpriced, and the turn then reports no cost. sessionCost is the
+	// sum of the priced calls since the bridge started.
+	turnCost     float64
+	turnUnpriced bool
+	sessionCost  float64
 	// turnFilesChanged holds the paths written in the turn, reported as a
 	// files_changed event at its end. Reset at the start of each prompt.
 	turnFilesChanged []string
@@ -284,6 +290,16 @@ func (st *state) confirmMeta(tc llm.ToolCall) protocol.ConfirmMeta {
 		meta.Risk = tools.PathRisk(st.cwd, filePathFromArgs(tc.Arguments))
 	}
 	return meta
+}
+
+// addCost sums the cost of a provider call into the turn and the session.
+func (st *state) addCost(u *llm.Usage) {
+	if u == nil || u.CostUSD == nil {
+		st.turnUnpriced = true
+		return
+	}
+	st.turnCost += *u.CostUSD
+	st.sessionCost += *u.CostUSD
 }
 
 // now is the clock of the turn timings. Tests replace it.
@@ -974,6 +990,8 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 		st.turnStart = now()
 		st.turnLLM = 0
 		st.turnTool = 0
+		st.turnCost = 0
+		st.turnUnpriced = false
 		st.turnFilesChanged = nil
 		st.historyLenBeforeTurn = st.historyLen() // context preserved on cancel
 		images, err := resolvePromptImages(st.cwd, p.Images)
@@ -1111,6 +1129,8 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		if st.isCancelled() {
 			cancel()
 			if resp != nil {
+				// The call finished, so the provider billed it.
+				st.addCost(resp.Usage)
 				content := resp.Content
 				if content == "" {
 					content = partialContent.String()
@@ -1127,6 +1147,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			return "", false
 		}
 		cancel()
+		st.addCost(resp.Usage)
 
 		inputTokens := 0
 		outputTokens := 0
@@ -1244,11 +1265,17 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			}
 			logger.Tracef("context model=%s used=%d window=%d", model, contextTokens, contextWindow)
 			turnTotalTokens := st.turnPromptTokens + st.turnCompletionTokens
+			var turnCost, sessionCost *float64
+			if !st.turnUnpriced {
+				tc, sc := st.turnCost, st.sessionCost
+				turnCost, sessionCost = &tc, &sc
+			}
 			newEnd := protocol.NewTurnEnd(resp.StopReason, contextPct,
 				model, st.turnPromptTokens, st.turnCompletionTokens, turnTotalTokens,
 				st.turnCacheHitTokens, st.turnCacheMissTokens,
 				contextTokens, contextWindow,
-				now().Sub(st.turnStart).Milliseconds(), st.turnLLM.Milliseconds(), st.turnTool.Milliseconds())
+				now().Sub(st.turnStart).Milliseconds(), st.turnLLM.Milliseconds(), st.turnTool.Milliseconds(),
+				turnCost, sessionCost)
 			_ = st.write(w, string(newEnd)+"\n")
 			// Report the modified files, sorted for deterministic output.
 			if len(st.turnFilesChanged) > 0 {

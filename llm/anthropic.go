@@ -339,6 +339,27 @@ func (u *anthropicUsage) toUsage() *Usage {
 	}
 }
 
+// anthropicCost prices a call, or returns nil for a model without a price.
+// Cache writes have their own rate, and the prompt length, cache included,
+// picks the tier.
+func anthropicCost(model string, u *anthropicUsage) *float64 {
+	p, ok := LookupPrice(model)
+	if !ok {
+		return nil
+	}
+	prompt := u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	r := p.RatesFor(prompt)
+	write := r.CacheWrite
+	if write == 0 {
+		write = r.Input
+	}
+	cost := (float64(u.InputTokens)*r.Input +
+		float64(u.CacheReadInputTokens)*r.Cached +
+		float64(u.CacheCreationInputTokens)*write +
+		float64(u.OutputTokens)*r.Output) / 1e6
+	return &cost
+}
+
 // anthropicStreamEvent is one SSE event. The type decides which field is set.
 type anthropicStreamEvent struct {
 	Type    string `json:"type"`
@@ -761,10 +782,13 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest, onChunk f
 		usage = &anthropicUsage{}
 	}
 
+	neutral := usage.toUsage()
+	neutral.CostUSD = anthropicCost(responseModel, usage)
+
 	return &ChatResponse{
 		Content:    fullContent.String(),
 		StopReason: stopReason,
-		Usage:      usage.toUsage(),
+		Usage:      neutral,
 		ToolCalls:  toolCalls,
 		Model:      responseModel,
 		Reasoning:  fullReasoning.String(),

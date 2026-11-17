@@ -48,6 +48,47 @@ type ProviderModels struct {
 	Budget bool
 }
 
+// Rates is what a model charges, in USD per million tokens. Input is the
+// uncached prompt, Cached is a prompt token read from the cache and Output
+// includes the reasoning. CacheWrite is optional: without it a cache write is
+// billed as Input. A rate left out is zero.
+type Rates struct {
+	Input      float64 `json:"input"`
+	Cached     float64 `json:"cached"`
+	CacheWrite float64 `json:"cache_write"`
+	Output     float64 `json:"output"`
+}
+
+// OverRates replace the base rates for a prompt above Above tokens.
+type OverRates struct {
+	Above int `json:"above"`
+	Rates
+}
+
+// Price is the price of a model. Each provider turns it into a cost with its
+// own rules, so the shape is just the data.
+type Price struct {
+	Rates
+	// Over is the tier for long prompts, for the models that have one.
+	Over *OverRates `json:"over,omitempty"`
+	// OffPeak is the rate outside the peak hours, for the models that have one.
+	// The base rates are then the peak ones.
+	OffPeak *Rates `json:"off_peak,omitempty"`
+}
+
+// RatesFor returns the base rates, or the long prompt tier when the prompt is
+// above its limit.
+func (p Price) RatesFor(promptTokens int) Rates {
+	if p.Over != nil && promptTokens > p.Over.Above {
+		return p.Over.Rates
+	}
+	return p.Rates
+}
+
+func (r Rates) valid() bool {
+	return r.Input >= 0 && r.Cached >= 0 && r.CacheWrite >= 0 && r.Output >= 0
+}
+
 type modelsFile struct {
 	Providers map[string]providerFile `json:"providers"`
 }
@@ -64,12 +105,15 @@ type modelFile struct {
 	// Alias names the model this id redirects to. An alias keeps its window,
 	// since a request may still name it, and is not announced.
 	Alias string `json:"alias,omitempty"`
+	// Price is optional. An alias without one takes the price of its target.
+	Price *Price `json:"price,omitempty"`
 }
 
 // modelData is the parsed form of a models file.
 type modelData struct {
 	providers map[string]ProviderModels
 	windows   map[string]int
+	prices    map[string]Price
 }
 
 var currentModels atomic.Pointer[modelData]
@@ -105,6 +149,7 @@ func parseModels(raw []byte) (*modelData, error) {
 	data := &modelData{
 		providers: map[string]ProviderModels{},
 		windows:   map[string]int{},
+		prices:    map[string]Price{},
 	}
 	owner := map[string]string{}
 	for name, p := range f.Providers {
@@ -131,6 +176,12 @@ func parseModels(raw []byte) (*modelData, error) {
 			if first, dup := owner[m.ID]; dup {
 				return nil, fmt.Errorf("model %q is in both %s and %s", m.ID, first, name)
 			}
+			if m.Price != nil {
+				if err := m.Price.validate(); err != nil {
+					return nil, fmt.Errorf("%s: model %q: %w", name, m.ID, err)
+				}
+				data.prices[m.ID] = *m.Price
+			}
 			owner[m.ID] = name
 			ids[m.ID] = m
 			data.windows[m.ID] = m.Window
@@ -145,10 +196,37 @@ func parseModels(raw []byte) (*modelData, error) {
 				return nil, fmt.Errorf("%s: alias %q points at %q, which is not a model of the provider",
 					name, m.ID, m.Alias)
 			}
+			if _, own := data.prices[m.ID]; !own {
+				if price, ok := data.prices[m.Alias]; ok {
+					data.prices[m.ID] = price
+				}
+			}
 		}
 		data.providers[name] = pm
 	}
 	return data, nil
+}
+
+func (p Price) validate() error {
+	if !p.Rates.valid() || (p.OffPeak != nil && !p.OffPeak.valid()) {
+		return fmt.Errorf("a price cannot be negative")
+	}
+	if p.Over != nil && (!p.Over.Rates.valid() || p.Over.Above <= 0) {
+		return fmt.Errorf("over needs above > 0 and no negative rate")
+	}
+	return nil
+}
+
+// LookupPrice returns the price of a model, matched like ContextWindow: exact
+// first, then the longest prefix. ok is false for a model without a price.
+func LookupPrice(model string) (Price, bool) {
+	data := currentModels.Load()
+	key, ok := matchModel(data.windows, model)
+	if !ok {
+		return Price{}, false
+	}
+	p, ok := data.prices[key]
+	return p, ok
 }
 
 // LoadModels replaces the model data with the contents of a models file. The

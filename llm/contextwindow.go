@@ -29,17 +29,27 @@ func ContextWindow(model string) (int, bool) {
 		return 0, false
 	}
 	windows := currentModels.Load().windows
-	if win, ok := windows[model]; ok {
-		return win, true
+	key, ok := matchModel(windows, model)
+	if !ok {
+		return 0, false
+	}
+	return windows[key], true
+}
+
+// matchModel returns the key of models that fits model: the exact id, or the
+// longest id that is a prefix of it.
+func matchModel(models map[string]int, model string) (string, bool) {
+	if model == "" {
+		return "", false
+	}
+	if _, ok := models[model]; ok {
+		return model, true
 	}
 	best := ""
-	for prefix := range windows {
+	for prefix := range models {
 		if strings.HasPrefix(model, prefix) && len(prefix) > len(best) {
 			best = prefix
 		}
 	}
-	if best == "" {
-		return 0, false
-	}
-	return windows[best], true
+	return best, best != ""
 }

@@ -28,6 +28,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"llm-bridge/logger"
 )
@@ -341,6 +342,39 @@ func (u *openAIUsage) toUsage() *Usage {
 	}
 }
 
+// priceClock is the clock that picks the peak or off-peak rate. Tests replace it.
+var priceClock = time.Now
+
+// deepseekPeak reports whether t is in the peak hours: Monday to Friday,
+// 01:00-04:00 and 06:00-10:00 UTC. Chinese holidays are off-peak too, but
+// there is no way to know them here, so they are billed as peak.
+func deepseekPeak(t time.Time) bool {
+	t = t.UTC()
+	if wd := t.Weekday(); wd == time.Saturday || wd == time.Sunday {
+		return false
+	}
+	h := t.Hour()
+	return (h >= 1 && h < 4) || (h >= 6 && h < 10)
+}
+
+// deepseekCost prices a call, or returns nil for a model without a price.
+// The cache hit and miss rates are Cached and Input.
+func deepseekCost(model string, u *openAIUsage, at time.Time) *float64 {
+	p, ok := LookupPrice(model)
+	if !ok {
+		return nil
+	}
+	r := p.Rates
+	if p.OffPeak != nil && !deepseekPeak(at) {
+		r = *p.OffPeak
+	}
+	miss := u.PromptTokens - u.PromptCacheHitTokens
+	cost := (float64(miss)*r.Input +
+		float64(u.PromptCacheHitTokens)*r.Cached +
+		float64(u.CompletionTokens)*r.Output) / 1e6
+	return &cost
+}
+
 // deepseekStopReason maps finish_reason onto the common vocabulary.
 func deepseekStopReason(reason string) string {
 	switch reason {
@@ -583,10 +617,13 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 		usage = &openAIUsage{}
 	}
 
+	neutral := usage.toUsage()
+	neutral.CostUSD = deepseekCost(model, usage, priceClock())
+
 	return &ChatResponse{
 		Content:    fullContent.String(),
 		StopReason: stopReason,
-		Usage:      usage.toUsage(),
+		Usage:      neutral,
 		ToolCalls:  toolCalls,
 		Model:      model,
 		Reasoning:  fullReasoning.String(),

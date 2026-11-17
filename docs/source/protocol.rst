@@ -248,6 +248,11 @@ Events (bridge → client)
     spent running tools. The time a ``tool_confirm`` waits for you is in
     ``duration_ms`` only, so ``duration_ms - llm_ms - tool_ms`` is the wait plus
     the bridge's own overhead. A cancelled turn sends no ``turn_end``.
+    ``cost_usd`` is the cost of the turn and ``session_cost_usd`` the total
+    since the bridge started, both in USD (see :ref:`providers-price`). A turn
+    with a call the bridge has no price for reports both as ``null``. The
+    session total only adds the calls that have a price, so a call cancelled
+    after the provider answered still counts.
     ``stop_reason`` is one of ``end_turn``, ``tool_use`` or ``max_tokens``
     whatever the provider, plus the provider's own word for a stop the common
     three do not name (a Gemini safety block, for example).
@@ -268,7 +273,9 @@ Events (bridge → client)
          "cache_miss_tokens": 124,
          "duration_ms": 8420,
          "llm_ms": 7100,
-         "tool_ms": 1180
+         "tool_ms": 1180,
+         "cost_usd": 0.000412,
+         "session_cost_usd": 0.0031
        }
 
 ``usage_delta``

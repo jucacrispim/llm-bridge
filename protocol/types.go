@@ -124,6 +124,10 @@ type TurnEnd struct {
 	DurationMS int64 `json:"duration_ms"`
 	LLMMS      int64 `json:"llm_ms"`
 	ToolMS     int64 `json:"tool_ms"`
+	// CostUSD is the cost of the turn and SessionCostUSD the running total of
+	// the session. A turn with a call the provider could not price reports null.
+	CostUSD        *float64 `json:"cost_usd"`
+	SessionCostUSD *float64 `json:"session_cost_usd"`
 }
 
 type ErrorEvent struct {
@@ -204,13 +208,14 @@ func NewToolConfirmWithMeta(id, name string, input any, meta ConfirmMeta) ([]byt
 	return json.Marshal(evt)
 }
 
-func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens, contextTokens, contextWindow int, durationMS, llmMS, toolMS int64) []byte {
+func NewTurnEnd(stopReason string, contextPct *float64, model string, inputTokens, outputTokens, totalTokens, cacheHitTokens, cacheMissTokens, contextTokens, contextWindow int, durationMS, llmMS, toolMS int64, costUSD, sessionCostUSD *float64) []byte {
 	evt := TurnEnd{Event: EventTurnEnd, StopReason: stopReason,
 		ContextPct: contextPct, ContextTokens: contextTokens, ContextWindow: contextWindow,
 		Model:       model,
 		InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: totalTokens,
 		CacheHitTokens: cacheHitTokens, CacheMissTokens: cacheMissTokens,
-		DurationMS: durationMS, LLMMS: llmMS, ToolMS: toolMS}
+		DurationMS: durationMS, LLMMS: llmMS, ToolMS: toolMS,
+		CostUSD: costUSD, SessionCostUSD: sessionCostUSD}
 	b, _ := json.Marshal(evt)
 	return b
 }

@@ -121,6 +121,9 @@ type Usage struct {
 	// uncached remainder is PromptTokens - CachedTokens. Providers without a
 	// prompt cache leave it at zero.
 	CachedTokens int
+	// CostUSD is the cost of the call, worked out by the provider from the
+	// prices in models.json. nil means the model has no price.
+	CostUSD *float64
 }
 
 type ToolCall struct {

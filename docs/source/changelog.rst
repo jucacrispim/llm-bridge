@@ -22,6 +22,14 @@ Added
   ``~/.config/llm-bridge/models.json`` to replace it without a rebuild. The
   file replaces the embedded data as a whole, and an invalid one is logged and
   ignored. The format is in :ref:`providers-context-window`.
+- **``turn_end`` reports the cost.** ``cost_usd`` is the cost of the turn and
+  ``session_cost_usd`` the total since the bridge started. The prices are in
+  ``llm/models.json`` next to the window. Each provider works out the cost of a
+  call with its own rules and sets ``Usage.CostUSD``: Anthropic bills cache
+  writes apart, Gemini counts the thinking tokens as output and DeepSeek has
+  peak and off-peak rates. Haiku 5.5 and Gemini 3.1 Pro have a tier for long
+  prompts. A model without a price gives ``null``. The ``deep-v4-pro`` id is
+  now ``deepseek-v4-pro``. The format is in :ref:`providers-price`.
 - **``turn_end`` reports the time of the turn.** ``duration_ms`` is the wall
   time from the prompt to the event, ``llm_ms`` sums the provider calls and
   ``tool_ms`` sums the tool runs. The wait for a ``tool_confirm`` is in

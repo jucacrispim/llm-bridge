@@ -30,7 +30,7 @@ func TestContextWindowExact(t *testing.T) {
 		{"deepseek-chat", 1_000_000},
 		{"deepseek-reasoner", 1_000_000},
 		{"deepseek-v4-flash", 1_000_000},
-		{"deep-v4-pro", 1_000_000},
+		{"deepseek-v4-pro", 1_000_000},
 		// Google Gemini.
 		{"gemini-3.8-flash", 1_000_000},
 		{"gemini-3.1-pro", 1_000_000},

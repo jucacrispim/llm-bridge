@@ -313,10 +313,49 @@ answers for, with the window, and the reasoning controls it takes.
 * ``window`` - Token window of the model. Must be above zero.
 * ``alias`` - The model this id redirects to. An alias keeps its window, since
   a request may still name it, and is not announced.
+* ``price`` - Optional. USD per million tokens. An alias without a ``price``
+  takes the one of its target.
 
 The bridge refuses a file with an unknown level, levels out of order, a
-missing id, a zero window, an id in two providers or an alias that does not
-point at a model of the same provider.
+missing id, a zero window, a negative price, an id in two providers or an alias
+that does not point at a model of the same provider.
+
+.. _providers-price:
+
+Prices
+~~~~~~
+
+The ``turn_end`` event reports the cost of the turn and of the session. Each
+provider works the cost out of the ``usage`` of the call, using the ``price``
+of the model. Lookup is the same as for the window: exact first, then the
+longest prefix. A model without a ``price`` has no cost, and the turn reports
+``null``.
+
+.. code-block:: json
+
+   {"id": "claude-haiku-5-5", "window": 1000000,
+    "price": {"input": 0.10, "cached": 0.01, "cache_write": 0.125, "output": 0.50,
+              "over": {"above": 100000, "input": 0.50, "cached": 0.05,
+                       "cache_write": 0.625, "output": 2.50}}}
+
+* ``input`` - Prompt token that did not come from the cache.
+* ``cached`` - Prompt token read from the cache.
+* ``cache_write`` - Prompt token written to the cache. Defaults to ``input``.
+  Only Anthropic bills it apart.
+* ``output`` - Generated token. The reasoning is billed as output, so it is in
+  here.
+* ``over`` - Rates for a prompt above ``above`` tokens, with the same fields.
+  Anthropic counts the cache in the prompt. Gemini counts ``promptTokenCount``.
+* ``off_peak`` - Rates outside the peak hours. The rates around it are then the
+  peak ones. Only DeepSeek uses it.
+
+A rate left out is ``0``, so a model that bills a cache read needs ``cached``.
+
+DeepSeek peak hours are Monday to Friday, 01:00-04:00 and 06:00-10:00 UTC. The
+bridge checks the clock when the call ends. Chinese public holidays are
+off-peak at DeepSeek, but the bridge has no calendar, so it bills them as peak.
+
+Prices change. Gemini 3.8 Flash doubles on 2027-01-01, so edit the file then.
 
 To change the data without a rebuild, save a file as
 ``~/.config/llm-bridge/models.json`` (``$XDG_CONFIG_HOME`` is honored). It

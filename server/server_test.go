@@ -134,7 +134,7 @@ func TestHandleLinePromptSuccess(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0,"duration_ms":0,"llm_ms":0,"tool_ms":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0,"duration_ms":0,"llm_ms":0,"tool_ms":0,"cost_usd":null,"session_cost_usd":null}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
@@ -255,7 +255,7 @@ func TestHandleLinePromptNoChunk(t *testing.T) {
 		t.Fatal("prompt should not quit")
 	}
 
-	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0,"duration_ms":0,"llm_ms":0,"tool_ms":0}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
+	want := `{"event":"chunk","text":"Hello"}` + "\n" + `{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0,"duration_ms":0,"llm_ms":0,"tool_ms":0,"cost_usd":null,"session_cost_usd":null}` + "\n" + `{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if w.String() != want {
 		t.Errorf("prompt output mismatch:\n got  %q\n want %q", w.String(), want)
 	}
@@ -721,7 +721,7 @@ func TestRunWithProviderBasic(t *testing.T) {
 	got := out.String()
 	expected := `{"event":"ready","default_provider":"fake","providers":[{"name":"fake","model":"fake"}]}` + "\n" +
 		`{"event":"chunk","text":"Hi"}` + "\n" +
-		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0,"duration_ms":0,"llm_ms":0,"tool_ms":0}` + "\n" +
+		`{"event":"turn_end","stop_reason":"END_TURN","context_pct":null,"context_tokens":0,"context_window":0,"model":"fake","input_tokens":0,"output_tokens":0,"total_tokens":0,"cache_hit_tokens":0,"cache_miss_tokens":0,"duration_ms":0,"llm_ms":0,"tool_ms":0,"cost_usd":null,"session_cost_usd":null}` + "\n" +
 		`{"event":"usage_delta","input_tokens":0,"output_tokens":0,"total_tokens":0}` + "\n"
 	if got != expected {
 		t.Errorf("runWithProvider output:\n got: %q\nwant: %q", got, expected)

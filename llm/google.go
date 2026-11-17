@@ -114,6 +114,23 @@ func (p *GoogleProvider) Name() string { return "google" }
 // Model returns the model used for requests.
 func (p *GoogleProvider) Model() string { return p.model }
 
+// googleCost prices a call, or returns nil for a model without a price.
+// Gemini bills the thinking tokens as output, and they are not in the
+// candidates count. The prompt count already holds the cached tokens.
+func googleCost(model string, u *googleUsageMetadata) *float64 {
+	p, ok := LookupPrice(model)
+	if !ok {
+		return nil
+	}
+	r := p.RatesFor(u.PromptTokenCount)
+	miss := u.PromptTokenCount - u.CachedContentTokenCount
+	out := u.CandidatesTokenCount + u.ThoughtsTokenCount
+	cost := (float64(miss)*r.Input +
+		float64(u.CachedContentTokenCount)*r.Cached +
+		float64(out)*r.Output) / 1e6
+	return &cost
+}
+
 // Thinking reports whether thinking mode is enabled for this provider.
 func (p *GoogleProvider) Thinking() bool { return p.thinking }
 
@@ -271,6 +288,7 @@ type googleUsageMetadata struct {
 	CandidatesTokenCount    int `json:"candidatesTokenCount"`
 	TotalTokenCount         int `json:"totalTokenCount"`
 	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
 }
 
 type googleResponse struct {
@@ -418,6 +436,7 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 				CompletionTokens: chunk.UsageMetadata.CandidatesTokenCount,
 				TotalTokens:      chunk.UsageMetadata.TotalTokenCount,
 				CachedTokens:     cached,
+				CostUSD:          googleCost(model, chunk.UsageMetadata),
 			}
 		}
 

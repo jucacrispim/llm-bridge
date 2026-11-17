@@ -122,6 +122,13 @@ func TestPromptNamesIgnoresNonMarkdown(t *testing.T) {
 	}
 }
 
+func TestReadPromptUnknown(t *testing.T) {
+	noUserPrompts(t)
+	if got, ok := readPrompt("no-such-prompt"); ok || got != "" {
+		t.Errorf("readPrompt(unknown) = %q, %v, want empty and false", got, ok)
+	}
+}
+
 func TestPromptsDirDefault(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/cfg")
 	want := filepath.Join("/cfg", "llm-bridge", "prompts")

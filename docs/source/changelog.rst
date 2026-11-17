@@ -1,13 +1,17 @@
 Changelog
 =========
 
-Unreleased
-----------
+v0.8.0
+------
+
+A turn now reports its cost and its time, and the model catalog with the prices
+is a JSON file you can replace without a rebuild. Each model can have its own
+system prompt too.
 
 Added
 ~~~~~
 
-- **The ``ready`` event announces the providers and their models.** It carries
+- **The ready event announces the providers and their models.** It carries
   ``default_provider`` and a ``providers`` list, each entry with the model in
   use now, the ids the provider answers for with their context window, and how
   it takes the reasoning effort (the levels it accepts and whether a token
@@ -25,15 +29,15 @@ Added
 - **Gemini 4 Argon and Hydrogen are in the catalog.** Both take a 1M token
   prompt. Gemini 4 Argon doubles its price on 2026-12-01, so the rates in
   ``llm/models.json`` need an edit then (see :ref:`providers-price`).
-- **``turn_end`` reports the cost.** ``cost_usd`` is the cost of the turn and
+- **The turn_end event reports the cost.** ``cost_usd`` is the cost of the turn and
   ``session_cost_usd`` the total since the bridge started. The prices are in
   ``llm/models.json`` next to the window. Each provider works out the cost of a
   call with its own rules and sets ``Usage.CostUSD``: Anthropic bills cache
   writes apart, Gemini counts the thinking tokens as output and DeepSeek has
   peak and off-peak rates. Haiku 5.5 and Gemini 3.1 Pro have a tier for long
-  prompts. A model without a price gives ``null``. The ``deep-v4-pro`` id is
-  now ``deepseek-v4-pro``. The format is in :ref:`providers-price`.
-- **``turn_end`` reports the time of the turn.** ``duration_ms`` is the wall
+  prompts. A model without a price gives ``null``. The format is in
+  :ref:`providers-price`.
+- **The turn_end event reports the time of the turn.** ``duration_ms`` is the wall
   time from the prompt to the event, ``llm_ms`` sums the provider calls and
   ``tool_ms`` sums the tool runs. The wait for a ``tool_confirm`` is in
   ``duration_ms`` only. A cancelled turn has no ``turn_end``, so it has no
@@ -56,6 +60,15 @@ Added
   message breakpoint misses on the first request after a pruned turn and the
   prefix is written again at 1.25x. The tool and system breakpoints sit at the
   front of the prefix and keep hitting.
+
+Changed
+~~~~~~~
+
+- **The deep-v4-pro model id is now deepseek-v4-pro.** The DeepSeek docs
+  name the model ``deepseek-v4-pro``, so the old id was a typo. A client that
+  kept ``deep-v4-pro`` from an earlier ``ready`` event gets the provider's model
+  error. The two aliases, ``deepseek-chat`` and ``deepseek-reasoner``, still
+  work.
 
 v0.7.0
 ------
@@ -86,7 +99,7 @@ Breaking changes
   no route out. ``-sandbox-loopback-only`` is gone, because the namespace is no
   longer optional: a tool that needs a local server reaches it in the same
   ``shell`` invocation, and a name outside ``127.0.0.0/8`` does not resolve.
-- **``-sandbox-tmp`` changed meaning.** It was a dedicated directory granted
+- **The -sandbox-tmp flag changed meaning.** It was a dedicated directory granted
   read-write to the tools; it is now the host directory bind mounted over the
   private ``/tmp``. The default is empty, which is a fresh tmpfs. ``TMPDIR``,
   ``GOTMPDIR``, ``TMP`` and ``TEMP`` name ``/tmp`` in either mode, so the model
@@ -132,12 +145,12 @@ Changed
   ``ThinkingBudget``: a level for DeepSeek and Anthropic, a number for Gemini.
   ``protocol`` still takes one ``reasoning_effort`` string and the server splits
   it, so no client changes.
-- **``stop_reason`` is one vocabulary.** ``end_turn``, ``tool_use`` and
+- **stop_reason is one vocabulary.** ``end_turn``, ``tool_use`` and
   ``max_tokens`` come out the same whichever provider answered, instead of
   ``stop`` / ``END_TURN`` / ``STOP`` in the same conversation. A value outside
   the three (a Gemini ``SAFETY`` block, an Anthropic ``refusal``) goes out as
   the provider wrote it.
-- **The image ``detail`` hint is gone.** It was DeepSeek's
+- **The image detail hint is gone.** It was DeepSeek's
   ``image_url.detail`` and only DeepSeek read it, so it did not belong in the
   shared ``Image``. No client set it, and the API default (``auto``) is what
   those calls already got. A client that still sends ``detail`` has it ignored.
@@ -177,13 +190,13 @@ Changed
 Fixed
 ~~~~~
 
-- **The tools can read ``/dev/zero``.** The tool policy granted ``/dev/urandom``
+- **The tools can read /dev/zero.** The tool policy granted ``/dev/urandom``
   read-only and ``/dev/null`` writable, and stopped there, so every ``dd
   if=/dev/zero``, ``head -c 1M /dev/zero`` or ``mkfs`` aimed at a file under the
   private ``/tmp`` died with ``EACCES`` on the input. The device hands out zeros,
   so there is nothing of the host in it. It is now in the read-only list next to
   ``/dev/urandom``.
-- **The ``shell`` risk label no longer fires on ordinary commands.** The
+- **The shell risk label no longer fires on ordinary commands.** The
   markers in ``tools.Risk`` were matched as plain substrings, and most of them
   are two or three letters long: ``nc `` matched inside ``func `` and ``sync ``,
   so ``go test -run TestFunc`` was reported as **high** risk, and ``| sh``
@@ -236,7 +249,7 @@ Added
 - Flags: ``-curl`` (default ``true``), ``-curl-port`` (repeatable, default 443
   and 80), ``-curl-any-port`` and ``-curl-allow-host`` (repeatable; the host
   filter is enforced by the bridge, since Landlock has no host rules).
-- **``-sandbox-loopback-only``.** The tools run in their own network namespace
+- **The -sandbox-loopback-only flag.** The tools run in their own network namespace
   with loopback up and no route anywhere else, so a tool can start a server and
   talk to it in the same command (a test suite against a local port) and nothing
   it does leaves the machine: an external address does not exist in there, so

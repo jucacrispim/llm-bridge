@@ -1,8 +1,8 @@
 Changelog
 =========
 
-Unreleased
-----------
+v0.7.0
+------
 
 The bridge no longer re-executes itself under caged. Every process it starts
 gets exactly one policy: the bridge runs unconfined, and each tool is a caged

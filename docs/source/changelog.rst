@@ -25,6 +25,16 @@ to ``llm-tools`` in the same release.
 Breaking changes
 ~~~~~~~~~~~~~~~~
 
+- **Every tool call gets private namespaces.** ``/tmp`` and ``/dev/shm`` are
+  fresh tmpfs mounts inside the call, and the network stack has loopback up and
+  no route out. ``-sandbox-loopback-only`` is gone, because the namespace is no
+  longer optional: a tool that needs a local server reaches it in the same
+  ``shell`` invocation, and a name outside ``127.0.0.0/8`` does not resolve.
+- **``-sandbox-tmp`` changed meaning.** It was a dedicated directory granted
+  read-write to the tools; it is now the host directory bind mounted over the
+  private ``/tmp``. The default is empty, which is a fresh tmpfs. ``TMPDIR``,
+  ``GOTMPDIR``, ``TMP`` and ``TEMP`` name ``/tmp`` in either mode, so the model
+  stops writing to a path the policy does not grant.
 - ``cmd/bridge`` is now ``cmd/llm-bridge``, and ``make build`` produces two
   binaries: ``llm-bridge`` and ``llm-tools``. Both go to ``build/`` and both
   must be installed together; the bridge looks for ``llm-tools`` next to itself
@@ -44,6 +54,14 @@ Breaking changes
 Changed
 ~~~~~~~
 
+- ``~/.llm-bridge`` is now granted **read-write** (it was read-only) and created
+  at startup when missing, so a tool call can maintain the context files and add
+  a hook. A ``write`` or ``search_replace`` into a ``.llm-bridge`` directory
+  carries ``risk: high`` on the ``tool_confirm``, and so does a ``shell``
+  command that names the directory: it steers every later session.
+- The startup probe runs caged once with the mount and network namespaces, so a
+  kernel or an LSM that refuses unprivileged user namespaces stops the bridge at
+  startup with a message naming the reason, instead of failing every tool call.
 - ``tools.Executor`` gained ``NewExecutorWithToolbox``; when a helper and a
   policy are both set, the four filesystem tools go through
   ``sandbox.Sandbox.RunIO`` (a new ``Run`` variant with stdin and stdout/stderr

@@ -43,6 +43,19 @@ type Policy struct {
 	// too.
 	ReadWrite []string
 
+	// PrivateTmp mounts a fresh tmpfs over /tmp in the command's mount
+	// namespace. The filesystem rules are created after the mount, so a
+	// ReadWrite grant of /tmp names the private one.
+	PrivateTmp bool
+	// PrivateTmpPath turns PrivateTmp into a bind mount of this host directory
+	// over /tmp, so the host and the command see the same files. The path has
+	// to exist; an empty value means a fresh tmpfs.
+	PrivateTmpPath string
+	// PrivateShm mounts a fresh tmpfs over /dev/shm, in the same mount
+	// namespace PrivateTmp uses. It works alone: caged builds the namespace
+	// for either flag.
+	PrivateShm bool
+
 	// LoopbackOnly gives the command its own network namespace, with loopback
 	// up and no route out, so an off-host connect fails with ENETUNREACH.
 	// Alone it changes nothing: seccomp still denies socket(AF_INET). Set it
@@ -130,6 +143,14 @@ func (p Policy) Args() []string {
 	}
 	for _, path := range p.ReadWrite {
 		args = append(args, "--rw", path)
+	}
+	if p.PrivateTmpPath != "" {
+		args = append(args, "--private-tmp", p.PrivateTmpPath)
+	} else if p.PrivateTmp {
+		args = append(args, "--private-tmp")
+	}
+	if p.PrivateShm {
+		args = append(args, "--private-shm")
 	}
 	if p.LoopbackOnly {
 		args = append(args, "--loopback-only")

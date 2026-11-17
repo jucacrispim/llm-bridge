@@ -193,8 +193,10 @@ Events (bridge → client)
     For a ``shell`` call the event carries three optional fields describing what
     the approval really does: ``segments`` (the commands the one-liner runs),
     ``risk`` (``high`` / ``medium`` / ``low``) and ``tainted`` (the arguments
-    quote content fetched earlier in the session). A client that does not know
-    them can ignore them. See :doc:`tools`.
+    quote content fetched earlier in the session). A ``write`` or
+    ``search_replace`` carries ``risk`` alone, ``high`` when the path is inside
+    a ``.llm-bridge`` directory. A client that does not know them can ignore
+    them. See :doc:`tools`.
 
     .. code-block:: json
 

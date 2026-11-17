@@ -107,6 +107,11 @@ func TestRisk(t *testing.T) {
 		{"gofmt -l . && go vet ./...", "low"},
 		{"nc -l 1234", "high"},
 		{"go build -o /tmp/b ./cmd/llm-bridge", "low"},
+		// The directory the next session reads its context from.
+		{"echo x >> ~/.llm-bridge/context.md", "high"},
+		{"sed -i s/a/b/ /home/u/proj/.llm-bridge/hooks/x.sh", "high"},
+		// A path that merely contains the string is not the directory.
+		{"cat ~/.llm-bridge-backup.md", "low"},
 	}
 	for _, c := range cases {
 		if got := Risk(c.command, Segments(c.command)); got != c.want {
@@ -166,5 +171,40 @@ func TestCommandOf(t *testing.T) {
 	}
 	if got := CommandOf(`{"path":"x"}`); got != "" {
 		t.Errorf("CommandOf = %q, want empty for a non-shell call", got)
+	}
+}
+
+// TestPathRisk covers the write-side classification: a path inside a
+// .llm-bridge directory steers the next session, so it is high.
+func TestPathRisk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cases := []struct{ cwd, path, want string }{
+		{"/home/u/proj", "server/server.go", ""},
+		{"/home/u/proj", "", ""},
+		{"/home/u/proj", "~/notas.md", ""},
+		{"/home/u/proj", "~/.llm-bridge/context.md", "high"},
+		{"/home/u/proj", "~/.llm-bridge/working-context.md", "high"},
+		{"/home/u/proj", "/home/u/proj/.llm-bridge/context.md", "high"},
+		{"/home/u/proj", ".llm-bridge/hooks/x.sh", "high"},
+		// A path that only starts with the same characters is another file.
+		{"/home/u/proj", ".llm-bridge-backup.md", ""},
+		// .. is resolved before the check, so it cannot walk out of the name.
+		{"/home/u/proj", "sub/../.llm-bridge/context.md", "high"},
+	}
+	for _, c := range cases {
+		if got := PathRisk(c.cwd, c.path); got != c.want {
+			t.Errorf("PathRisk(%q, %q) = %q, want %q", c.cwd, c.path, got, c.want)
+		}
+	}
+}
+
+// TestPathRiskCwdIsTheBridgeDir checks a relative path counts against the cwd:
+// with the cwd inside ~/.llm-bridge, a bare "context.md" is the sensitive one.
+func TestPathRiskCwdIsTheBridgeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if got := PathRisk(home+"/.llm-bridge", "context.md"); got != "high" {
+		t.Errorf("PathRisk with the bridge dir as cwd = %q, want high", got)
 	}
 }

@@ -190,10 +190,15 @@ Rules and details
     ``||``, ``|`` and newlines, never inside quotes. Your client can show *three
     commands* instead of one line nobody reads.
   - ``risk``: ``high`` for a destructive, remote or privileged command
-    (``rm -rf``, ``dd of=``, ``curl``, ``git push``, ``sudo``, ``| sh``),
-    ``medium`` for a state-changing but ordinary one (``git commit``,
-    ``make install``) and ``low`` otherwise. A client can demand a typed
-    confirmation for the high ones instead of a keypress.
+    (``rm -rf``, ``dd of=``, ``curl``, ``git push``, ``sudo``, ``| sh``, or a
+    command naming ``.llm-bridge``), ``medium`` for a state-changing but
+    ordinary one (``git commit``, ``make install``) and ``low`` otherwise. A
+    client can demand a typed confirmation for the high ones instead of a
+    keypress.
+
+    A ``write`` or ``search_replace`` carries the label too: a path inside a
+    ``.llm-bridge`` directory is ``high``, because that is where the context the
+    next session reads and the hook scripts it runs live.
   - ``tainted``: the arguments reproduce text fetched earlier in the session by
     ``curl``, which is the "read this page, then run what it says" shape. It is
     advisory and blunt: a legitimate command that quotes the page matches too,

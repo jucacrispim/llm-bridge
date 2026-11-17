@@ -3320,3 +3320,24 @@ func TestToolConfirmAfterCancelIgnored(t *testing.T) {
 		t.Fatal("the approved id should have been removed from pendingApprovals")
 	}
 }
+
+// TestConfirmMetaRisk checks the risk label of the tool_confirm: a write into
+// .llm-bridge changes the context and the hooks the next session runs, and a
+// shell command that names the directory does the same.
+func TestConfirmMetaRisk(t *testing.T) {
+	t.Setenv("HOME", "/home/u")
+	st := &state{cwd: "/home/u/proj"}
+	cases := []struct{ name, args, want string }{
+		{"write", `{"path":".llm-bridge/context.md","content":"x"}`, "high"},
+		{"search_replace", `{"path":"~/.llm-bridge/context.md","search":"a","replace":"b"}`, "high"},
+		{"write", `{"path":"server/server.go","content":"x"}`, ""},
+		{"shell", `{"command":"echo x >> ~/.llm-bridge/context.md"}`, "high"},
+		{"shell", `{"command":"go build ./..."}`, "low"},
+	}
+	for _, c := range cases {
+		meta := st.confirmMeta(llm.ToolCall{Name: c.name, Arguments: c.args})
+		if meta.Risk != c.want {
+			t.Errorf("%s %s: Risk = %q, want %q", c.name, c.args, meta.Risk, c.want)
+		}
+	}
+}

@@ -271,10 +271,16 @@ func (st *state) rememberFetched(out string) {
 // copy content fetched earlier in the session.
 func (st *state) confirmMeta(tc llm.ToolCall) protocol.ConfirmMeta {
 	meta := protocol.ConfirmMeta{Tainted: tools.Tainted(tools.Args(tc.Arguments), st.fetched)}
-	if tc.Name == "shell" {
+	switch tc.Name {
+	case "shell":
 		command := tools.CommandOf(tc.Arguments)
 		meta.Segments = tools.Segments(command)
 		meta.Risk = tools.Risk(command, meta.Segments)
+	case "write", "search_replace":
+		// A write into .llm-bridge edits the context and the hooks the next
+		// session runs, so it carries the same weight as a shell one-liner
+		// that names the directory.
+		meta.Risk = tools.PathRisk(st.cwd, filePathFromArgs(tc.Arguments))
 	}
 	return meta
 }

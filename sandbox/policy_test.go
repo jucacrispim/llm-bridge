@@ -49,6 +49,35 @@ func TestPolicyArgs(t *testing.T) {
 			},
 		},
 		{
+			name:   "private volumes",
+			policy: Policy{PrivateTmp: true, PrivateShm: true},
+			want:   []string{"--private-tmp", "--private-shm"},
+		},
+		{
+			// The bind form replaces the tmpfs, so PrivateTmp must not add a
+			// second --private-tmp.
+			name:   "private tmp bind",
+			policy: Policy{PrivateTmp: true, PrivateTmpPath: "/tmp/shared"},
+			want:   []string{"--private-tmp", "/tmp/shared"},
+		},
+		{
+			// The order the bridge emits: the grants first, then the mounts they
+			// name, then the network.
+			name: "grants before mounts before network",
+			policy: Policy{
+				ReadWrite:    []string{"/tmp"},
+				PrivateTmp:   true,
+				PrivateShm:   true,
+				LoopbackOnly: true,
+			},
+			want: []string{
+				"--rw", "/tmp",
+				"--private-tmp",
+				"--private-shm",
+				"--loopback-only",
+			},
+		},
+		{
 			name:   "loopback only",
 			policy: Policy{LoopbackOnly: true},
 			want:   []string{"--loopback-only"},

@@ -83,6 +83,15 @@ Policy fields and flags
    * - ``ReadWrite``
      - ``--rw`` (one per path)
      - Same existence rule.
+   * - ``PrivateTmp``
+     - ``--private-tmp``
+     - A fresh tmpfs over ``/tmp``.
+   * - ``PrivateTmpPath``
+     - ``--private-tmp PATH``
+     - A bind mount instead of a tmpfs. Implies the flag.
+   * - ``PrivateShm``
+     - ``--private-shm``
+     - A fresh tmpfs over ``/dev/shm``.
    * - ``LoopbackOnly``
      - ``--loopback-only``
      - Does nothing alone. See below.
@@ -129,8 +138,15 @@ Set it together with ``AllowNetworkSockets`` and the connect and bind flags:
    p.BindTCP = true
 
 A destination outside ``127.0.0.0/8`` does not exist in that network
-namespace, so the connection fails with ``ENETUNREACH``. The flag
-``-sandbox-loopback-only`` in :doc:`usage` builds exactly this group.
+namespace, so the connection fails with ``ENETUNREACH``. The bridge builds this
+group for every tool call: the namespace is the bound, and the released socket
+families and ports are what let a tool reach its own loopback at all.
+
+The private volumes are mounts, and caged applies them before it creates the
+Landlock rules. A ``ReadWrite`` entry of ``/tmp`` therefore names the private
+``/tmp``, not the host's. Both mounts need the user namespace, so the bridge
+probes them at startup together with the network namespace (see
+``probeNamespaces``).
 
 Run and RunIO
 -------------

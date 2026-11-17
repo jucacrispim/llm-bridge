@@ -24,6 +24,7 @@ package tools
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -196,6 +197,10 @@ var riskPatterns = []struct {
 		regexp.MustCompile(`\bbase64\s+-d\b`),
 		regexp.MustCompile(`\bsh\s+-c\b`),
 		regexp.MustCompile(`\bbash\s+-c\b`),
+		// The directory the next session reads its context from and execs the
+		// hooks of, so a command that names it changes every later prompt. The
+		// trailing group keeps `.llm-bridge-backup` out.
+		regexp.MustCompile(`\.llm-bridge(/|["'\s]|$)`),
 	}},
 	{"medium", []*regexp.Regexp{
 		regexp.MustCompile(`\bgit\s+commit\b`),
@@ -235,6 +240,31 @@ func Risk(command string, segments []string) string {
 		}
 	}
 	return level
+}
+
+// sensitiveDir is the directory the bridge reads the conversation context and
+// the hook scripts from. A write into it changes every later session.
+const sensitiveDir = ".llm-bridge"
+
+// PathRisk returns "high" when path lands inside a .llm-bridge directory, and
+// "" otherwise. cwd resolves a relative path, the same way the tool will.
+//
+// This is the write counterpart of the shell marker: the path is a structured
+// field, so the check is exact rather than a guess over a command line.
+func PathRisk(cwd, path string) string {
+	path = expandHome(strings.TrimSpace(path))
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) && cwd != "" {
+		path = filepath.Join(cwd, path)
+	}
+	for _, elem := range strings.Split(filepath.Clean(path), string(filepath.Separator)) {
+		if elem == sensitiveDir {
+			return "high"
+		}
+	}
+	return ""
 }
 
 // Tainted reports whether any argument reproduces a run of TaintWindow bytes of

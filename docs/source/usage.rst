@@ -174,18 +174,29 @@ Here is what the bridge spawns and the policy each one gets.
 - **tools** - every external process the bridge runs (the ``shell`` and ``grep``
   tools and the hooks) runs under caged with the system trees, the
   knowledge-base locations (``~/.cache/llm-bridge`` read-only,
-  ``~/.local/share/llm-bridge`` writable) and whatever ``-sandbox-ro`` and
-  ``-sandbox-rw`` added.
+  ``~/.local/share/llm-bridge`` and ``~/.llm-bridge`` writable) and whatever
+  ``-sandbox-ro`` and ``-sandbox-rw`` added.
+
+  ``~/.llm-bridge`` is created on startup if it does not exist. The tools get it
+  writable so a hook can be added and the context files edited from a tool call,
+  and a write there is labelled ``risk: high`` on the ``tool_confirm`` (see
+  :doc:`tools`).
 
   The projects are **not** granted by default: where they live is your business,
   so you pass the directories the bridge will work on with ``-sandbox-rw``. The
   policy is frozen at startup while the project changes at runtime via
   ``set_cwd``.
 
+  Each tool call gets private namespaces. ``/tmp`` and ``/dev/shm`` are fresh
+  tmpfs mounts, so the host's are invisible and nothing written there survives
+  the call. The network stack has loopback up and no route out: a tool can start
+  a server and reach it in the same command, and an external address does not
+  exist, so the connection fails with ``ENETUNREACH`` and DNS does not resolve.
+  caged mounts first and resolves the Landlock rules after, which is why
+  ``/tmp`` and ``/dev/shm`` can be granted: the grant names the private ones.
+
   A tool is denied the environment (no API keys: only caged's small base set is
-  inherited), the IPC (unix sockets and SysV IPC) and the network. The exception
-  is ``-sandbox-loopback-only``, which puts the tool in a private network
-  namespace whose only interface is loopback (see below).
+  inherited) and the IPC (unix sockets and SysV IPC).
 
   The filesystem tools (``read``, ``write``, ``glob``, ``search_replace``) run
   in the **llm-tools** helper under this same policy, not inside the bridge, so
@@ -214,6 +225,12 @@ The sandbox is on by default, so ``caged`` has to be installed. Its
 `documentation <https://docs.poraodojuca.dev/caged>`_ covers building and
 installing it. A missing binary is a **startup error**, never a silent fallback
 to unsandboxed execution.
+
+At startup the bridge runs caged once with the namespaces, so a kernel or an LSM
+that refuses unprivileged user namespaces (``AppArmor`` on Ubuntu 23.10+,
+``unprivileged_userns_clone=0``), a ``caged`` too old for the flags and a bridge
+that is itself running inside another cage all stop there, with an error naming
+the reason. A tool call never has to discover it.
 
 ``--disable-sandbox``
     Turn the sandbox off, so no tool runs under caged.
@@ -253,48 +270,21 @@ to unsandboxed execution.
     any subdomain. Default: any host. Landlock cannot filter hosts, so the bridge
     compares ``url.Hostname()`` before it runs curl.
 
-``--sandbox-loopback-only``
-    Run the tools in their own network namespace, with loopback up and no route
-    anywhere else. A tool can then start a server and talk to it **in the same
-    command** (a test suite against a local port), and nothing it does reaches
-    the outside world: an external address does not exist in that namespace, so
-    the connection fails with ``ENETUNREACH`` and DNS does not resolve.
-
-    The bound is the namespace, not an address list. That is why the socket
-    families and any-port connect/bind are released together with the flag:
-    without them seccomp and Landlock would deny the socket before the namespace
-    could matter. Landlock has no address field and seccomp cannot dereference
-    the ``sockaddr``, so a namespace is the only way to say "localhost only".
-
-    Each tool call gets its own namespace, so a server started by one call is not
-    reachable from the next. Start the server and the client in the same
-    ``shell`` invocation. The ``curl`` tool is unaffected, since a curl limited
-    to loopback would fetch nothing.
-
-    The flag is checked at **startup**, by running caged once with it. A kernel
-    or an LSM that refuses unprivileged user namespaces (``AppArmor`` on Ubuntu
-    23.10+, ``unprivileged_userns_clone=0``), a ``caged`` too old to know the
-    flag, and a bridge that is itself running inside another cage all stop the
-    bridge there. You get a startup error, never a sandbox failure on every tool
-    call.
-
 ``--sandbox-tmp <dir>``
-    Temporary directory granted read-write to the bridge **and** the tools, and
-    exported to them as ``TMPDIR``, ``GOTMPDIR``, ``TMP`` and ``TEMP`` (default
-    ``/tmp/llm-bridge``). It is created on startup with mode ``0700``, before the
-    sandbox is built. caged opens every granted path, so it has to exist.
+    Bind ``dir`` over the tools' private ``/tmp``, so you and the sandbox see the
+    same files. The directory is created on startup with mode ``0700`` when it is
+    missing.
 
-    ``/tmp`` itself is **not** granted: a shared scratch directory lets any
-    process read or replace another one's files. A private directory is what
-    programs that need scratch space get, and with it ``mkstemp``, ``gcc``,
-    ``git`` and the Go toolchain work under the sandbox. The Go toolchain uses
-    ``GOTMPDIR`` for its work directory and ``TMPDIR`` for the rest. Without them
-    it fails with ``mkdir /tmp/go-build…: permission denied``.
+    The default is empty, which is a fresh tmpfs: nothing of the host's ``/tmp``
+    is visible, and nothing written there survives the call. ``TMPDIR``,
+    ``GOTMPDIR``, ``TMP`` and ``TEMP`` all point at ``/tmp`` inside the sandbox
+    in either mode, so ``mkstemp``, ``gcc``, ``git`` and the Go toolchain find
+    their scratch space. The Go toolchain uses ``GOTMPDIR`` for its work
+    directory and ``TMPDIR`` for the rest.
 
-    A non-empty value always wins over the inherited variables, so an exported
-    ``TMPDIR=/tmp`` is replaced, since ``/tmp`` is not reachable. Pass
-    ``-sandbox-tmp ""`` to leave the inherited variables alone and grant no temp
-    directory. Note that ``-sandbox-tmp /tmp`` grants the whole ``/tmp``.
+    A fresh tmpfs is capped at 1 GiB and mounted ``nosuid``, ``nodev``, mode
+    ``1777``. ``/dev/shm`` gets the same treatment, without a bind form: use
+    ``-sandbox-tmp`` when the host has to share a directory.
 
 A caged failure means the sandbox did not apply, not that the command failed.
 The bridge tells the two apart from caged's ``--report-fd`` descriptor, never

@@ -25,6 +25,10 @@ package main
 // policy. The bridge itself runs unconfined, so no tool that takes a path from
 // the model may run inside it (see llm-tools).
 //
+// Every tool also runs with private namespaces: its own /tmp and /dev/shm, and
+// a network stack whose only interface is loopback. caged mounts first and
+// resolves the Landlock rules after, so the grant of /tmp names the private one.
+//
 // -disable-sandbox turns it off. A missing caged binary is a startup error,
 // never a fallback to unsandboxed execution.
 //
@@ -50,9 +54,9 @@ import (
 // which answers one request and exits.
 const toolboxHandshakeTimeout = 5 * time.Second
 
-// defaultTempDir is the temporary directory the tools use. /tmp itself is not
-// granted: any process of the user could read another one's scratch files.
-const defaultTempDir = "/tmp/llm-bridge"
+// privateTmp is the temporary directory the tools see. It is never the host's
+// /tmp: --private-tmp mounts a fresh tmpfs there, or binds -sandbox-tmp over it.
+const privateTmp = "/tmp"
 
 // tempEnvNames are the variables that point at the temporary directory: TMPDIR
 // is what os.TempDir reads, GOTMPDIR is the go command's own work directory,
@@ -92,13 +96,10 @@ type sandboxConfig struct {
 	// toolBin is toolsBin as resolved by validate(): absolute, verified and
 	// handshake-checked. Empty when the sandbox is off.
 	toolBin string
-	// tmpDir is the temporary directory granted read-write to the tools and
-	// exported as TMPDIR/GOTMPDIR/TMP/TEMP (default defaultTempDir).
+	// tmpDir is the host directory bind mounted over the tools' /tmp
+	// (-sandbox-tmp). Empty means a fresh tmpfs: nothing of the host's is
+	// visible and nothing written there survives.
 	tmpDir string
-	// loopback gives the tools their own network namespace with only loopback
-	// up: they can talk to a server they start themselves, and to nothing
-	// else (-sandbox-loopback-only).
-	loopback bool
 }
 
 // binary resolves the caged binary: the -caged-bin flag, then $CAGED_BIN, then
@@ -173,35 +174,44 @@ func (c *sandboxConfig) toolPaths() (ro, rw []string) {
 	if home != "" {
 		// KB assets (ONNX model, tokenizer, libonnxruntime).
 		ro = append(ro, filepath.Join(home, ".cache", "llm-bridge"))
-		// Global context and hooks. The tools exec the hook scripts, and read
-		// access grants that; without the grant both stop being visible once
-		// the sandbox is on.
-		ro = append(ro, filepath.Join(home, ".llm-bridge"))
 	}
 	ro = append(ro, c.ro...)
 
 	// A child with no stdin gets /dev/null opened for writing, so read access
-	// is not enough.
-	rw = []string{"/dev/null"}
+	// is not enough. /tmp and /dev/shm are the private ones: the policy is
+	// built after the mounts.
+	rw = []string{"/dev/null", privateTmp, "/dev/shm"}
 	if home != "" {
 		// Per-project knowledge bases (data.json) and the bridge's config.
 		rw = append(rw, filepath.Join(home, ".local", "share", "llm-bridge"))
-	}
-	// Created at startup by ensureTempDir, so caged finds it when it builds
-	// the policy.
-	if c.tmpDir != "" {
-		rw = append(rw, c.tmpDir)
+		// Global context and hooks. The next session reads this directory back
+		// into the prompt and execs the scripts in it, so a write here is a
+		// high-risk approval (tools.PathRisk).
+		rw = append(rw, filepath.Join(home, ".llm-bridge"))
 	}
 	rw = append(rw, c.rw...)
 	return ro, rw
 }
 
-// ensureTempDir creates the temporary directory before any policy grants it:
-// caged opens every granted path when it builds a policy, and a missing one is
-// exit 125.
+// ensureBridgeDir creates ~/.llm-bridge before any policy grants it: caged
+// opens every granted path at setup, and a missing one is exit 125.
+func (c *sandboxConfig) ensureBridgeDir() error {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	dir := filepath.Join(home, ".llm-bridge")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	return nil
+}
+
+// ensureTempDir creates the bind source of -sandbox-tmp before caged mounts it.
+// An empty -sandbox-tmp means a fresh tmpfs, with nothing to create.
 //
-// 0700: a world-writable directory in /tmp would let another user plant files
-// or symlinks there.
+// 0700: a world-writable directory under /tmp would let another user plant
+// files or symlinks there.
 func (c *sandboxConfig) ensureTempDir() error {
 	if c.tmpDir == "" {
 		return nil
@@ -212,16 +222,13 @@ func (c *sandboxConfig) ensureTempDir() error {
 	return nil
 }
 
-// tempEnv returns the entries that point every temporary-directory convention
-// at dir. The tools get caged's base env, which has no TMPDIR, so without them
-// a tool falls back to /tmp and is denied.
-func tempEnv(dir string) []string {
-	if dir == "" {
-		return nil
-	}
+// tempEnv points every temporary-directory convention at the private /tmp. The
+// tools get caged's base env, which has no TMPDIR, so without this a program
+// would look somewhere the policy does not grant.
+func tempEnv() []string {
 	env := make([]string, 0, len(tempEnvNames))
 	for _, name := range tempEnvNames {
-		env = append(env, name+"="+dir)
+		env = append(env, name+"="+privateTmp)
 	}
 	return env
 }
@@ -230,9 +237,8 @@ func tempEnv(dir string) []string {
 // (shell, grep, hooks), or nil when the sandbox is off.
 //
 // A tool gets no KeepEnv, so caged's base environment only and the API keys
-// stay out. -sandbox-loopback-only releases the socket families inside a
-// namespace whose only interface is loopback; real outbound access belongs to
-// curl alone (see curlSandbox).
+// stay out. Real outbound access belongs to curl alone (see curlSandbox): the
+// tools get a loopback-only namespace, where there is nowhere to go.
 func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 	if c.disabled {
 		return nil, nil
@@ -250,16 +256,19 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 	p := sandbox.Policy{
 		ReadOnly:  existing(ro),
 		ReadWrite: existing(rw),
-		Env:       tempEnv(c.tmpDir),
-	}
-	if c.loopback {
+		Env:       tempEnv(),
+		// A fresh tmpfs for /tmp and /dev/shm, or the -sandbox-tmp bind. The
+		// grants above name the private ones.
+		PrivateTmp:     true,
+		PrivateTmpPath: c.tmpDir,
+		PrivateShm:     true,
 		// The namespace is the bound: there is nowhere to connect to, and each
 		// call gets a fresh one, so a server started by one call is not
 		// reachable from the next.
-		p.LoopbackOnly = true
-		p.AllowNetworkSockets = true
-		p.ConnectTCP = true
-		p.BindTCP = true
+		LoopbackOnly:        true,
+		AllowNetworkSockets: true,
+		ConnectTCP:          true,
+		BindTCP:             true,
 	}
 	return sandbox.New(caged, p)
 }
@@ -314,35 +323,37 @@ func requireReportFD(bin string) error {
 	return nil
 }
 
-// loopbackProbeTimeout bounds the startup probe of -sandbox-loopback-only.
-// caged's namespace setup is a handful of syscalls; anything slower than this
-// means it is not going to work at all.
-const loopbackProbeTimeout = 10 * time.Second
+// namespaceProbeTimeout bounds the startup probe. caged's namespace setup is a
+// handful of syscalls, so anything slower is not going to work at all.
+const namespaceProbeTimeout = 10 * time.Second
 
-// probeLoopback runs one throwaway command under --loopback-only, so the
-// namespace is built before the first tool call.
+// probeNamespaces runs one throwaway command with the namespaces every tool
+// gets, so a kernel or an LSM that refuses them stops the bridge at startup.
 //
-// --help cannot answer this: listing the flag says nothing about whether this
+// --help cannot answer this: listing a flag says nothing about whether this
 // process can create a namespace. unshare(CLONE_NEWUSER) fails for
 // environmental reasons (unprivileged_userns_clone=0, an AppArmor profile, a
 // bridge already inside another cage) and the setup has to write
-// /proc/self/uid_map. Failing here stops the bridge at startup instead of
-// failing every tool call. The exit status catches an old caged (exit 2), the
-// report descriptor catches a setup that did not apply (exit 125).
-func probeLoopback(bin string) error {
+// /proc/self/uid_map. The exit status catches an old caged (exit 2), the report
+// descriptor catches a setup that did not apply (exit 125).
+func probeNamespaces(bin string) error {
 	sb, err := sandbox.New(bin, sandbox.Policy{
-		ReadOnly: existing(systemReadOnly),
-		// LoopbackOnly alone: the probe is about the namespace, and granting
-		// nothing else keeps it from failing for another reason.
+		ReadOnly:  existing(systemReadOnly),
+		ReadWrite: existing([]string{privateTmp, "/dev/shm"}),
+		// The probe exercises the same mounts the tools get, including a
+		// grant that names the private /tmp: a Landlock rule applied before
+		// the mount would fail here instead of on every tool call.
+		PrivateTmp:   true,
+		PrivateShm:   true,
 		LoopbackOnly: true,
 	})
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), loopbackProbeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), namespaceProbeTimeout)
 	defer cancel()
 	if _, err := sb.Run(ctx, "", "/bin/true"); err != nil {
-		return fmt.Errorf("-sandbox-loopback-only: caged %s could not build a private network namespace (it needs unshare(CLONE_NEWUSER), a writable /proc/self/uid_map and unshare(CLONE_NEWNET); a bridge that is itself running inside a cage cannot): %w", bin, err)
+		return fmt.Errorf("caged %s could not build the private namespaces (user, mount and network), which every tool call needs: it takes unshare(CLONE_NEWUSER), a writable /proc/self/uid_map and unshare(CLONE_NEWNS), so a bridge that is itself running inside another cage cannot: %w", bin, err)
 	}
 	return nil
 }
@@ -365,11 +376,17 @@ func (c *sandboxConfig) validate() error {
 	if err := requireReportFD(bin); err != nil {
 		return err
 	}
-	// Checked by running it, not by reading --help: see probeLoopback.
-	if c.loopback {
-		if err := probeLoopback(bin); err != nil {
-			return err
-		}
+	// Created before any policy names them, because caged exits 125 on a path
+	// it cannot open.
+	if err := c.ensureBridgeDir(); err != nil {
+		return err
+	}
+	if err := c.ensureTempDir(); err != nil {
+		return err
+	}
+	// Checked by running it, not by reading --help: see probeNamespaces.
+	if err := probeNamespaces(bin); err != nil {
+		return err
 	}
 	// Resolved and checked here, at startup, for the same reason as the caged
 	// binary: a missing or mismatched helper must stop the bridge at startup,
@@ -389,9 +406,6 @@ func (c *sandboxConfig) validate() error {
 			return fmt.Errorf("-curl-port %d out of range 1..65535", port)
 		}
 	}
-	if err := c.ensureTempDir(); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -405,10 +419,8 @@ func registerSandboxFlags() *sandboxConfig {
 		"path of the caged binary (default: $CAGED_BIN, then $PATH)")
 	flag.StringVar(&c.toolsBin, "tools-bin", "",
 		"path of the llm-tools binary, which runs the filesystem tools (read/write/glob/search_replace) under the tool sandbox (default: next to this binary, then $PATH)")
-	flag.StringVar(&c.tmpDir, "sandbox-tmp", defaultTempDir,
-		"temporary directory granted read-write to the bridge and the tools, exported as TMPDIR/GOTMPDIR/TMP/TEMP (created if missing; /tmp itself is not granted)")
-	flag.BoolVar(&c.loopback, "sandbox-loopback-only", false,
-		"give the tools their own network namespace with only loopback up: a tool can reach a server it starts itself (test servers, local ports) and nothing outside, so DNS does not resolve and no data leaves; the curl tool is unaffected")
+	flag.StringVar(&c.tmpDir, "sandbox-tmp", "",
+		"host directory bind mounted over the tools' private /tmp, to exchange files with them (default: a fresh tmpfs, where nothing written survives and nothing of the host's /tmp is visible)")
 	flag.Func("sandbox-ro", "extra read-only path for the sandbox (bridge and tools; repeatable)", func(v string) error {
 		c.ro = append(c.ro, v)
 		return nil

@@ -65,8 +65,8 @@ func TestEnsureTempDirRejectsFile(t *testing.T) {
 	}
 }
 
-// TestEnsureTempDirEmpty checks an empty -sandbox-tmp is a no-op (nothing is
-// granted and nothing is created).
+// TestEnsureTempDirEmpty checks an empty -sandbox-tmp is a no-op: the private
+// /tmp is a fresh tmpfs, so there is no bind source to create.
 func TestEnsureTempDirEmpty(t *testing.T) {
 	c := &sandboxConfig{}
 	if err := c.ensureTempDir(); err != nil {
@@ -74,58 +74,66 @@ func TestEnsureTempDirEmpty(t *testing.T) {
 	}
 }
 
-// TestToolPathsGrantsTempDir checks the temp directory is in the read-write
-// list of the tool policy.
-func TestToolPathsGrantsTempDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "llm-bridge")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
+// TestEnsureBridgeDir checks ~/.llm-bridge is created at startup: caged exits
+// 125 on a granted path it cannot open, and the directory is granted so the
+// tools can write the context and the hooks.
+func TestEnsureBridgeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := (&sandboxConfig{}).ensureBridgeDir(); err != nil {
+		t.Fatalf("ensureBridgeDir: %v", err)
 	}
-	c := &sandboxConfig{tmpDir: dir}
-	ro, rw := c.toolPaths()
-
-	if !contains(rw, dir) {
-		t.Errorf("temp dir %q not granted read-write: %v", dir, rw)
+	info, err := os.Stat(filepath.Join(home, ".llm-bridge"))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
 	}
-	if contains(ro, dir) {
-		t.Errorf("temp dir %q granted read-only too: %v", dir, ro)
-	}
-	if !contains(rw, "/dev/null") {
-		t.Errorf("/dev/null missing from rw: %v", rw)
+	if !info.IsDir() {
+		t.Errorf("%s is not a directory", info.Name())
 	}
 }
 
-// TestToolPathsMissingTempDirFiltered documents the ordering assumption:
-// toolPaths lists the temp directory unconditionally and existing() drops it
-// when it is absent (caged exits 125 on a path it cannot open). validate()
-// creates it before anything else, so in the real flow it is always there.
-func TestToolPathsMissingTempDirFiltered(t *testing.T) {
-	c := &sandboxConfig{tmpDir: filepath.Join(t.TempDir(), "missing")}
-	_, rw := c.toolPaths()
-	if !contains(rw, c.tmpDir) {
-		t.Errorf("toolPaths should list the temp dir unconditionally: %v", rw)
+// TestToolPathsGrantsPrivateVolumes checks /tmp and /dev/shm are granted
+// read-write. With --private-tmp and --private-shm the rules are resolved after
+// the mounts, so the grant names the private ones.
+func TestToolPathsGrantsPrivateVolumes(t *testing.T) {
+	ro, rw := (&sandboxConfig{}).toolPaths()
+	for _, path := range []string{privateTmp, "/dev/shm"} {
+		if !contains(rw, path) {
+			t.Errorf("%q not granted read-write: %v", path, rw)
+		}
+		if contains(ro, path) {
+			t.Errorf("%q granted read-only too: %v", path, ro)
+		}
 	}
-	if contains(existing(rw), c.tmpDir) {
-		t.Errorf("a missing temp dir should be filtered out: %v", existing(rw))
+}
+
+// TestToolPathsGrantsBridgeDir checks ~/.llm-bridge moved from read-only to
+// read-write: the tools write the context and the hook scripts there.
+func TestToolPathsGrantsBridgeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ro, rw := (&sandboxConfig{}).toolPaths()
+	dir := filepath.Join(home, ".llm-bridge")
+	if !contains(rw, dir) {
+		t.Errorf("%q not granted read-write: %v", dir, rw)
+	}
+	if contains(ro, dir) {
+		t.Errorf("%q still granted read-only: %v", dir, ro)
 	}
 }
 
 // TestToolSandboxTempEnv checks the tools get the temporary-directory block on
-// top of caged's base environment (they run without KeepEnv, so without this
-// they would fall back to a denied /tmp).
+// top of caged's base environment, pointing at the private /tmp: without it a
+// program would fall back to a path the policy does not grant.
 func TestToolSandboxTempEnv(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "llm-bridge")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: dir}
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t)}
 
 	sb, err := c.toolSandbox()
 	if err != nil {
 		t.Fatalf("toolSandbox: %v", err)
 	}
 	for _, name := range tempEnvNames {
-		want := name + "=" + dir
+		want := name + "=" + privateTmp
 		if !contains(sb.Policy.Env, want) {
 			t.Errorf("missing %q in policy env: %v", want, sb.Policy.Env)
 		}
@@ -134,16 +142,22 @@ func TestToolSandboxTempEnv(t *testing.T) {
 			t.Errorf("missing %q in caged args: %v", want, sb.Policy.Args())
 		}
 	}
-	if !contains(sb.Policy.ReadWrite, dir) {
-		t.Errorf("temp dir not granted to the tools: %v", sb.Policy.ReadWrite)
+	if !contains(sb.Policy.ReadWrite, privateTmp) {
+		t.Errorf("private /tmp not granted to the tools: %v", sb.Policy.ReadWrite)
 	}
 }
 
-// TestTempEnvEmpty checks an empty temp dir produces no entries at all (not
-// "TMPDIR=", which would point the tools at the process's own cwd).
-func TestTempEnvEmpty(t *testing.T) {
-	if env := tempEnv(""); env != nil {
-		t.Errorf("expected nil, got %v", env)
+// TestTempEnvPointsAtPrivateTmp checks every convention points at /tmp, the
+// path the private mount names.
+func TestTempEnvPointsAtPrivateTmp(t *testing.T) {
+	env := tempEnv()
+	if len(env) != len(tempEnvNames) {
+		t.Fatalf("env = %v, want one entry per name", env)
+	}
+	for _, kv := range env {
+		if !strings.HasSuffix(kv, "="+privateTmp) {
+			t.Errorf("entry %q does not point at %s", kv, privateTmp)
+		}
 	}
 }
 
@@ -168,37 +182,23 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// TestToolSandboxHasNoNetwork checks the default shell/grep/hooks sandbox has no
-// network at all: that is the curl tool's privilege, not a general one.
-// -sandbox-loopback-only is the opt-in exception (TestToolSandboxLoopbackOnly),
-// and it still has no way out. It would show up both in the policy (flags) and,
-// if it leaked, in caged's argv.
-func TestToolSandboxHasNoNetwork(t *testing.T) {
-	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: t.TempDir()}
-	sb, err := c.toolSandbox()
-	if err != nil {
-		t.Fatalf("toolSandbox: %v", err)
-	}
-	if sb.Policy.AllowNetworkSockets || sb.Policy.ConnectTCP || len(sb.Policy.ConnectPorts) > 0 {
-		t.Fatalf("tools must have no network: %+v", sb.Policy)
-	}
-	args := strings.Join(sb.Policy.Args(), " ")
-	if strings.Contains(args, "--allow-network-sockets") || strings.Contains(args, "--allow-connect") {
-		t.Errorf("tools argv grants network: %s", args)
-	}
-}
-
-// TestToolSandboxLoopbackOnly checks -sandbox-loopback-only is the one exception
-// to "the tools have no network", and that it is the whole package: the
-// namespace (the bound) plus the families and any-port connect/bind (without
-// which the namespace would have nothing to allow).
-func TestToolSandboxLoopbackOnly(t *testing.T) {
-	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: t.TempDir(), loopback: true}
+// TestToolSandboxPrivateNamespaces checks what every tool gets: a fresh tmpfs
+// for /tmp and /dev/shm, and a loopback-only network. The socket families and
+// any-port connect/bind come with it, because the namespace is what bounds
+// where a connection can go.
+func TestToolSandboxPrivateNamespaces(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t)}
 	sb, err := c.toolSandbox()
 	if err != nil {
 		t.Fatalf("toolSandbox: %v", err)
 	}
 	p := sb.Policy
+	if !p.PrivateTmp || p.PrivateTmpPath != "" {
+		t.Errorf("expected a fresh tmpfs for /tmp: %+v", p)
+	}
+	if !p.PrivateShm {
+		t.Error("expected a private /dev/shm")
+	}
 	if !p.LoopbackOnly || !p.AllowNetworkSockets || !p.ConnectTCP || !p.BindTCP {
 		t.Fatalf("loopback policy is incomplete: %+v", p)
 	}
@@ -206,12 +206,14 @@ func TestToolSandboxLoopbackOnly(t *testing.T) {
 		t.Errorf("port lists are meaningless with any-port on: %+v", p)
 	}
 	want := []string{
+		"--private-tmp",
+		"--private-shm",
 		"--loopback-only",
 		"--allow-network-sockets",
 		"--allow-connect-tcp",
 		"--allow-bind-tcp",
 	}
-	args := sb.Policy.Args()
+	args := p.Args()
 	for _, flag := range want {
 		if !contains(args, flag) {
 			t.Errorf("%s missing from caged args: %v", flag, args)
@@ -219,20 +221,46 @@ func TestToolSandboxLoopbackOnly(t *testing.T) {
 	}
 }
 
-// TestCurlSandboxIgnoresLoopback checks the curl tool does not inherit
-// -sandbox-loopback-only: a curl that can only reach its own loopback fetches
-// nothing, and the tool is bounded by its port rule instead.
-func TestCurlSandboxIgnoresLoopback(t *testing.T) {
-	c := &sandboxConfig{cagedBin: fakeCagedPath(t), curl: true, loopback: true}
+// TestToolSandboxTmpBind checks -sandbox-tmp turns the private /tmp into a bind
+// mount of that directory, so the host can exchange files with the tools.
+func TestToolSandboxTmpBind(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), tmpDir: dir}
+	sb, err := c.toolSandbox()
+	if err != nil {
+		t.Fatalf("toolSandbox: %v", err)
+	}
+	if sb.Policy.PrivateTmpPath != dir {
+		t.Fatalf("PrivateTmpPath = %q, want %q", sb.Policy.PrivateTmpPath, dir)
+	}
+	args := sb.Policy.Args()
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--private-tmp" && args[i+1] == dir {
+			return
+		}
+	}
+	t.Errorf("--private-tmp %s missing from caged args: %v", dir, args)
+}
+
+// TestCurlSandboxKeepsRealNetwork checks the curl tool gets neither the
+// loopback namespace (a curl bounded by loopback fetches nothing) nor the
+// private volumes. Its own minimal filesystem policy is the bound.
+func TestCurlSandboxKeepsRealNetwork(t *testing.T) {
+	c := &sandboxConfig{cagedBin: fakeCagedPath(t), curl: true}
 	sb, err := c.curlSandbox()
 	if err != nil {
 		t.Fatalf("curlSandbox: %v", err)
 	}
-	if sb.Policy.LoopbackOnly {
-		t.Error("curl must keep its real network access")
+	if sb.Policy.LoopbackOnly || sb.Policy.PrivateTmp || sb.Policy.PrivateShm {
+		t.Fatalf("curl must keep real network access and the host's /tmp: %+v", sb.Policy)
 	}
-	if contains(sb.Policy.Args(), "--loopback-only") {
-		t.Errorf("curl args carry --loopback-only: %v", sb.Policy.Args())
+	for _, flag := range []string{"--loopback-only", "--private-tmp", "--private-shm"} {
+		if contains(sb.Policy.Args(), flag) {
+			t.Errorf("curl args carry %s: %v", flag, sb.Policy.Args())
+		}
 	}
 }
 
@@ -382,6 +410,7 @@ func fakeToolsBin(t *testing.T) string {
 // error like a missing caged, never a silent fallback to running the filesystem
 // tools inside the bridge.
 func TestValidateRequiresToolbox(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	c := &sandboxConfig{
 		cagedBin: fakeCagedWithReportFD(t),
 		toolsBin: filepath.Join(t.TempDir(), "missing", "llm-tools"),
@@ -395,6 +424,7 @@ func TestValidateRequiresToolbox(t *testing.T) {
 // TestValidateRejectsForeignToolbox: a binary that does not answer the
 // handshake is not llm-tools, whatever its name.
 func TestValidateRejectsForeignToolbox(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "llm-tools")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\necho 'not me'\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -420,6 +450,7 @@ func TestValidateLeavesToolboxUnsetWhenDisabled(t *testing.T) {
 // TestValidateAcceptsCurlConfig covers the happy path of validate: caged with
 // --report-fd, curl ports in range.
 func TestValidateAcceptsCurlConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), curlPorts: []int{443, 8443}}
 	if err := c.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
@@ -428,6 +459,7 @@ func TestValidateAcceptsCurlConfig(t *testing.T) {
 
 // TestValidateRejectsBadCurlPort covers the range check of -curl-port.
 func TestValidateRejectsBadCurlPort(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	for _, port := range []int{0, -1, 70000} {
 		c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), curlPorts: []int{port}}
 		if err := c.validate(); err == nil {
@@ -460,9 +492,9 @@ func fakeCagedFailing(t *testing.T, code int) string {
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in --help) echo 'usage: caged [--ro DIR] [--report-fd N] -- CMD'; exit 0;; esac\n"
 	if code == 125 {
-		script += "echo 'caged: error setting up the loopback network namespace' >&3\nexit 125\n"
+		script += "echo 'caged: error setting up the mount namespace' >&3\nexit 125\n"
 	} else {
-		script += "echo \"caged: unrecognized option '--loopback-only'\" >&2\nexit 2\n"
+		script += "echo \"caged: unrecognized option '--private-tmp'\" >&2\nexit 2\n"
 	}
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -470,50 +502,35 @@ func fakeCagedFailing(t *testing.T, code int) string {
 	return path
 }
 
-// TestValidateProbesLoopback covers the happy path: -sandbox-loopback-only runs
-// the throwaway caged probe and passes when the namespace can be built.
-func TestValidateProbesLoopback(t *testing.T) {
-	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t), loopback: true}
+// TestValidateProbesNamespaces covers the happy path: validate runs the
+// throwaway caged probe with the namespaces every tool gets.
+func TestValidateProbesNamespaces(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	c := &sandboxConfig{cagedBin: fakeCagedWithReportFD(t), toolsBin: fakeToolsBin(t)}
 	if err := c.validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 }
 
-// TestValidateRejectsBrokenLoopback pins the probe's reason to exist: a caged
-// that cannot build the namespace (AppArmor, unprivileged_userns_clone=0, the
-// bridge itself inside a cage) or that does not know the flag must stop the
+// TestValidateRejectsBrokenNamespaces pins the probe's reason to exist: a caged
+// that cannot build the namespaces (AppArmor, unprivileged_userns_clone=0, the
+// bridge itself inside a cage) or that does not know a flag must stop the
 // bridge at startup, not turn every tool call into a *SetupError.
-func TestValidateRejectsBrokenLoopback(t *testing.T) {
+func TestValidateRejectsBrokenNamespaces(t *testing.T) {
 	for name, code := range map[string]int{
 		"setup failed (exit 125)":   sandbox.ExitSetupFailed,
 		"old caged (usage, exit 2)": sandbox.ExitUsage,
 	} {
-		c := &sandboxConfig{
-			cagedBin: fakeCagedFailing(t, code),
-			toolsBin: fakeToolsBin(t),
-			loopback: true,
-		}
+		t.Setenv("HOME", t.TempDir())
+		c := &sandboxConfig{cagedBin: fakeCagedFailing(t, code), toolsBin: fakeToolsBin(t)}
 		err := c.validate()
 		if err == nil {
 			t.Errorf("%s: expected an error", name)
 			continue
 		}
-		if !strings.Contains(err.Error(), "network namespace") {
+		if !strings.Contains(err.Error(), "private namespaces") {
 			t.Errorf("%s: error should say what failed: %v", name, err)
 		}
-	}
-}
-
-// TestValidateSkipsProbeWithoutLoopback checks the probe only runs when the flag
-// is on: a caged that fails it must still be accepted otherwise.
-func TestValidateSkipsProbeWithoutLoopback(t *testing.T) {
-	c := &sandboxConfig{cagedBin: fakeCagedFailing(t, sandbox.ExitSetupFailed), toolsBin: fakeToolsBin(t)}
-	if err := c.validate(); err != nil {
-		t.Fatalf("validate without the flag must not probe: %v", err)
-	}
-	c.loopback = true
-	if err := c.validate(); err == nil {
-		t.Fatal("validate with the flag must run the probe")
 	}
 }
 

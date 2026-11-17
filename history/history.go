@@ -75,14 +75,17 @@ func AppendAssistant(hist *[]llm.Message, resp *llm.ChatResponse) {
 	// calls, where deepseek answers 400 without it. For a plain answer it is
 	// dead weight in the history.
 	reasoning := resp.Reasoning
+	signature := resp.Signature
 	if len(resp.ToolCalls) == 0 {
 		reasoning = ""
+		signature = ""
 	}
 	*hist = append(*hist, llm.Message{
 		Role:      llm.RoleAssistant,
 		Content:   resp.Content,
 		ToolCalls: resp.ToolCalls,
 		Reasoning: reasoning,
+		Signature: signature,
 	})
 }
 

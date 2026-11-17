@@ -27,6 +27,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -106,11 +107,12 @@ type state struct {
 	inToolCycle      bool
 	firstTurn        bool
 
-	modelOverride           string
-	thinkingOverride        *bool
-	reasoningEffortOverride *string
-	systemOverride          string
-	systemPrompt            string
+	modelOverride          string
+	thinkingOverride       *bool
+	reasoningLevelOverride *llm.ReasoningLevel
+	thinkingBudgetOverride int
+	systemOverride         string
+	systemPrompt           string
 
 	// aggressivePrune collapses each completed tool-calling turn into the user
 	// prompt plus the final answer (-aggressive-prune).
@@ -547,15 +549,45 @@ func resolvePromptImages(cwd string, params []protocol.ImageParam) ([]llm.Image,
 		if path != "" && !filepath.IsAbs(path) && cwd != "" {
 			path = filepath.Join(cwd, path)
 		}
-		im, err := llm.ResolveImage(path, p.URL, p.Data, p.MIME, p.Detail)
+		im, err := llm.ResolveImage(path, p.URL, p.Data, p.MIME)
 		if err != nil {
 			return nil, fmt.Errorf("image: %w", err)
 		}
-		logger.Tracef("image path=%q url=%q mime=%s b64_len=%d detail=%q",
-			path, p.URL, im.MIME, len(im.Data), im.Detail)
+		logger.Tracef("image path=%q url=%q mime=%s b64_len=%d",
+			path, p.URL, im.MIME, len(im.Data))
 		images = append(images, im)
 	}
 	return images, nil
+}
+
+// cacheCounts splits the prompt tokens of one call into the cached part and the
+// rest. A provider that reports no cache leaves cached at zero.
+func cacheCounts(u *llm.Usage) (cached, uncached int) {
+	cached = u.CachedTokens
+	uncached = u.PromptTokens - cached
+	if uncached < 0 {
+		uncached = 0
+	}
+	return cached, uncached
+}
+
+// parseReasoningEffort turns a prompt's reasoning_effort into the two hints the
+// providers understand: a level on the common scale, or a token budget. An
+// empty or unrecognized value clears both, so the provider keeps its own
+// default.
+func parseReasoningEffort(raw string) (*llm.ReasoningLevel, int) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, 0
+	}
+	if llm.ValidReasoningLevel(s) {
+		level := llm.ReasoningLevel(s)
+		return &level, 0
+	}
+	if n, err := strconv.Atoi(s); err == nil && n > 0 {
+		return nil, n
+	}
+	return nil, 0
 }
 
 // collapseTurn compresses a completed tool-calling turn into the user prompt
@@ -908,7 +940,9 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			st.thinkingOverride = p.Thinking
 		}
 		if p.ReasoningEffort != nil {
-			st.reasoningEffortOverride = p.ReasoningEffort
+			level, budget := parseReasoningEffort(*p.ReasoningEffort)
+			st.reasoningLevelOverride = level
+			st.thinkingBudgetOverride = budget
 		}
 		if p.KBScope != "" {
 			if !knowledge.IsScope(p.KBScope) {
@@ -1025,12 +1059,13 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		// snapshot, so what is sent is always valid.
 		st.sanitizeHistory()
 		resp, err := st.activeProvider().Chat(ctx, llm.ChatRequest{
-			Messages:        st.historySnapshot(),
-			Tools:           st.availableTools(),
-			System:          st.effectiveSystem(),
-			Model:           st.modelOverride,
-			Thinking:        st.thinkingOverride,
-			ReasoningEffort: st.reasoningEffortOverride,
+			Messages:       st.historySnapshot(),
+			Tools:          st.availableTools(),
+			System:         st.effectiveSystem(),
+			Model:          st.modelOverride,
+			Thinking:       st.thinkingOverride,
+			ReasoningLevel: st.reasoningLevelOverride,
+			ThinkingBudget: st.thinkingBudgetOverride,
 			// The reasoning streams before the content.
 			OnReasoning: func(s string) {
 				partialReasoning.WriteString(s)
@@ -1093,8 +1128,9 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		st.turnPromptTokens += inputTokens
 		st.turnCompletionTokens += outputTokens
 		if resp.Usage != nil {
-			st.turnCacheHitTokens += resp.Usage.CacheHitTokens
-			st.turnCacheMissTokens += resp.Usage.CacheMissTokens
+			hit, miss := cacheCounts(resp.Usage)
+			st.turnCacheHitTokens += hit
+			st.turnCacheMissTokens += miss
 			st.lastPromptTokens = resp.Usage.PromptTokens
 		}
 		totalTokensThisCall := inputTokens + outputTokens
@@ -1105,8 +1141,7 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 		// Cache accounting from the provider's usage, as one trace line that
 		// only reaches -logfile/-debug.
 		if resp.Usage != nil {
-			hit := resp.Usage.CacheHitTokens
-			miss := resp.Usage.CacheMissTokens
+			hit, miss := cacheCounts(resp.Usage)
 			hitPct := 0.0
 			if hit+miss > 0 {
 				hitPct = float64(hit) * 100 / float64(hit+miss)

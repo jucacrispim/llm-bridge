@@ -106,6 +106,26 @@ func TestAppendAssistantDropsReasoningWithoutToolCalls(t *testing.T) {
 	}
 }
 
+// TestAppendAssistantCarriesSignature checks the provider's proof for the
+// reasoning travels with it, and only when there are tool calls to replay.
+func TestAppendAssistantCarriesSignature(t *testing.T) {
+	var h []llm.Message
+	AppendAssistant(&h, &llm.ChatResponse{
+		Content:   "answer",
+		Reasoning: "think",
+		Signature: "sig",
+		ToolCalls: []llm.ToolCall{{ID: "call_1", Name: "read"}},
+	})
+	if h[0].Signature != "sig" {
+		t.Fatalf("Signature = %q, want sig", h[0].Signature)
+	}
+	var plain []llm.Message
+	AppendAssistant(&plain, &llm.ChatResponse{Content: "answer", Reasoning: "think", Signature: "sig"})
+	if plain[0].Signature != "" {
+		t.Fatalf("Signature = %q, want empty on a plain answer", plain[0].Signature)
+	}
+}
+
 func TestAppendToolResult(t *testing.T) {
 	var h []llm.Message
 	AppendToolResult(&h, "call_1", `{"ok":true}`)

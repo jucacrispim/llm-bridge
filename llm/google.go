@@ -152,16 +152,30 @@ func ParseBudget(s string, def int) int {
 	return def
 }
 
+// googleLevelBudgets maps a reasoning level onto a thinkingBudget. Gemini takes
+// a number, so a level has to become one; the values are the ones the Gemini
+// docs pair with each effort.
+var googleLevelBudgets = map[ReasoningLevel]int{
+	ReasoningLow:    1024,
+	ReasoningMedium: 4096,
+	ReasoningHigh:   8192,
+	ReasoningXHigh:  16384,
+	ReasoningMax:    32768,
+}
+
 // effectiveThinkingBudget returns the thinkingBudget for a request: the
-// per-request reasoning effort when it parses as a number, otherwise the
-// configured budget. Thinking off always gives 0.
+// per-request numeric budget, then the per-request level, then the configured
+// budget. Thinking off always gives 0.
 func (p *GoogleProvider) effectiveThinkingBudget(req ChatRequest) int {
 	if !p.effectiveThinking(req) {
 		return 0
 	}
-	if req.ReasoningEffort != nil {
-		if n, err := strconv.Atoi(*req.ReasoningEffort); err == nil {
-			return n
+	if req.ThinkingBudget > 0 {
+		return req.ThinkingBudget
+	}
+	if req.ReasoningLevel != nil {
+		if budget, ok := googleLevelBudgets[*req.ReasoningLevel]; ok {
+			return budget
 		}
 	}
 	return p.thinkingBudget
@@ -268,6 +282,19 @@ type googleResponse struct {
 	} `json:"error,omitempty"`
 }
 
+// googleStopReason maps finishReason onto the common vocabulary. The remaining
+// values (SAFETY, RECITATION and friends) are passed through, because a client
+// wants to know which one it was.
+func googleStopReason(reason string) string {
+	switch reason {
+	case "STOP":
+		return StopEndTurn
+	case "MAX_TOKENS":
+		return StopMaxTokens
+	}
+	return reason
+}
+
 func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func(string)) (*ChatResponse, error) {
 	model := p.resolveModel(req)
 
@@ -357,7 +384,7 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 	var fullContent strings.Builder
 	var fullReasoning strings.Builder
 	var usage *Usage
-	stopReason := "STOP"
+	stopReason := StopEndTurn
 	var toolCalls []ToolCall
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -386,22 +413,17 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 
 		if chunk.UsageMetadata != nil {
 			cached := chunk.UsageMetadata.CachedContentTokenCount
-			miss := chunk.UsageMetadata.PromptTokenCount - cached
-			if miss < 0 {
-				miss = 0
-			}
 			usage = &Usage{
 				PromptTokens:     chunk.UsageMetadata.PromptTokenCount,
 				CompletionTokens: chunk.UsageMetadata.CandidatesTokenCount,
 				TotalTokens:      chunk.UsageMetadata.TotalTokenCount,
-				CacheHitTokens:   cached,
-				CacheMissTokens:  miss,
+				CachedTokens:     cached,
 			}
 		}
 
 		for _, cand := range chunk.Candidates {
 			if cand.FinishReason != "" {
-				stopReason = cand.FinishReason
+				stopReason = googleStopReason(cand.FinishReason)
 			}
 			for _, part := range cand.Content.Parts {
 				switch {
@@ -414,7 +436,7 @@ func (p *GoogleProvider) Chat(ctx context.Context, req ChatRequest, onChunk func
 						Name:      part.FunctionCall.Name,
 						Arguments: string(part.FunctionCall.Args),
 						// A sibling field of the part, not inside functionCall.
-						ThoughtSignature: part.ThoughtSignature,
+						Signature: part.ThoughtSignature,
 					})
 				case part.Thought:
 					if part.Text != "" {
@@ -513,7 +535,7 @@ func (p *GoogleProvider) buildGoogleRequest(req ChatRequest) googleRequest {
 						Args: args,
 					},
 					// Sibling of the functionCall, where Gemini emitted it.
-					ThoughtSignature: tc.ThoughtSignature,
+					ThoughtSignature: tc.Signature,
 				})
 			}
 			if len(parts) > 0 {
@@ -632,9 +654,8 @@ func inlineImageURLs(messages []Message) ([]Message, bool) {
 				mime = imgs[j].MIME
 			}
 			imgs[j] = Image{
-				MIME:   mime,
-				Data:   base64.StdEncoding.EncodeToString(raw),
-				Detail: imgs[j].Detail,
+				MIME: mime,
+				Data: base64.StdEncoding.EncodeToString(raw),
 			}
 		}
 		out[i].Images = imgs

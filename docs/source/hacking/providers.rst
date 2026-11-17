@@ -20,15 +20,54 @@ in :doc:`/protocol`. An override persists across subsequent prompts.
 
 The shared request/response types (``llm/interface.go``) are:
 
-- ``ChatRequest`` - messages, tools, optional ``System``/``Model``, and the
-  ``Thinking`` / ``ReasoningEffort`` overrides plus an ``OnReasoning`` callback
-  invoked with each streamed chain-of-thought fragment.
+- ``ChatRequest`` - messages, tools, optional ``System``/``Model``, the
+  ``Thinking`` / ``ReasoningLevel`` / ``ThinkingBudget`` overrides and an
+  ``OnReasoning`` callback invoked with each streamed chain-of-thought
+  fragment.
 - ``ChatResponse`` - ``Content``, ``StopReason``, ``Usage``, ``ToolCalls``,
-  the actual ``Model`` used and the full ``Reasoning``.
+  the actual ``Model`` used, the full ``Reasoning`` and its ``Signature``.
 - ``Message`` - a history entry: role, content, optional tool calls and tool
-  call id, plus the ``Reasoning`` that accompanied it.
+  call id, the ``Reasoning`` that accompanied it and its ``Signature``.
 - ``ToolCall`` - id, name, raw JSON arguments and, for Gemini, the
-  ``ThoughtSignature`` that must be echoed back.
+  ``Signature`` that must be echoed back.
+
+Nothing in those types is the wire shape of one provider. Each provider keeps
+its own private structs (``openAIRequest``, ``googleRequest``, and so on) and
+converts at the edge.
+
+Effort, signatures and usage
+----------------------------
+
+Three things differ enough between providers that the interface states them
+once, in provider-neutral words:
+
+``ReasoningLevel`` / ``ThinkingBudget``
+    The effort is asked for either as a level (``low``, ``medium``, ``high``,
+    ``xhigh``, ``max``) or as a token budget. A provider maps whichever it
+    understands and ignores the other: DeepSeek sends the level as
+    ``reasoning_effort`` and Gemini turns it into a ``thinkingBudget``. ``protocol`` still takes one string and the
+    server splits it (``parseReasoningEffort``): a word becomes a level and a
+    number becomes a budget.
+
+``Signature``
+    Some providers prove the chain-of-thought came from them and refuse a
+    replayed history without the proof. Gemini signs the function call, so the
+    proof lives in ``ToolCall.Signature``; a provider that signs the thinking
+    block instead puts it in ``Message.Signature``. DeepSeek signs nothing. The
+    bridge stores it next to the reasoning it belongs to and echoes it back
+    unchanged.
+
+``Usage.CachedTokens``
+    The one cache counter: prompt tokens a provider served from its cache, with
+    the uncached remainder being ``PromptTokens - CachedTokens``. DeepSeek
+    reports hit and miss separately and Gemini reports one cached total; each
+    conversion happens in its own file. The server derives the two numbers
+    ``turn_end`` carries.
+
+``StopReason``
+    ``end_turn``, ``tool_use`` and ``max_tokens`` are the common three, and a
+    value outside them goes out as the provider wrote it (``SAFETY``, for
+    instance), because the client would rather know which one it was.
 
 Common provider selection logic
 -------------------------------
@@ -70,10 +109,12 @@ Thinking (``ThinkingOptions``)
       Omitting ``reasoning_effort`` alone does not stop them.
 
 Reasoning effort (``effectiveReasoningEffort``)
-    Sent as ``reasoning_effort`` when thinking is on (e.g. ``low`` /
-    ``medium`` / ``high``, default ``high``). An empty value stops sending
-    the parameter. A per-request override wins over the provider's configured
-    value.
+    Sent as ``reasoning_effort`` when thinking is on (default ``high``). A level
+    above what DeepSeek knows (``xhigh``, ``max``) goes out as ``high``, because
+    the API lists three values and would reject the other two. A token budget is
+    ignored here: DeepSeek takes an effort name, not a number. An empty level
+    stops sending the parameter, and a per-request override wins over the
+    provider's configured value.
 
 Reasoning content
     DeepSeek streams the chain-of-thought in ``reasoning_content``, which the
@@ -124,15 +165,17 @@ Thinking budget (``effectiveThinkingBudget``)
     Thinking maps onto Gemini's ``generationConfig.thinkingConfig.thinkingBudget``:
 
     - **off** → budget ``0`` (disables the model's reasoning stage).
-    - **on**  → a positive budget (default ``1024``) allocating that many
-      tokens to the reasoning stage. A per-request ``reasoning_effort`` that
-      parses as a number wins over the provider's configured budget.
+    - **on**  → a positive budget allocating that many tokens to the reasoning
+      stage. A per-request token budget wins over the provider's configured
+      budget; a per-request level is turned into one by ``googleLevelBudgets``
+      (``low`` 1024, ``medium`` 4096, ``high`` 8192, ``xhigh`` 16384, ``max``
+      32768).
 
 Function calls and ``thought_signature``
     Gemini emits a function call as a part carrying ``functionCall``
     (``name`` + ``args`` object, unlike OpenAI's JSON-string ``arguments``),
     plus, when thinking is on, a **sibling** ``thoughtSignature`` field. The
-    provider preserves it in ``ToolCall.ThoughtSignature`` so it can be echoed
+    provider preserves it in ``ToolCall.Signature`` so it can be echoed
     back on the same part when re-sending history. Tool results are matched by
     **name**, so the call id *is* the function name.
 

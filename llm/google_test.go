@@ -154,8 +154,8 @@ func TestGoogleChatRequestPayload(t *testing.T) {
 	if resp.Content != "hi there" {
 		t.Errorf("Content = %q, want hi there", resp.Content)
 	}
-	if resp.StopReason != "STOP" {
-		t.Errorf("StopReason = %q, want STOP", resp.StopReason)
+	if resp.StopReason != StopEndTurn {
+		t.Errorf("StopReason = %q, want end_turn", resp.StopReason)
 	}
 	if resp.Usage == nil || resp.Usage.PromptTokens != 10 || resp.Usage.CompletionTokens != 3 || resp.Usage.TotalTokens != 13 {
 		t.Errorf("Usage = %+v, want prompt=10 completion=3 total=13", resp.Usage)
@@ -200,8 +200,6 @@ func TestGoogleChatUsageCacheAccounting(t *testing.T) {
 		{"partial", 100, 80, 80, 20},
 		{"full", 100, 100, 100, 0},
 		{"none", 100, 0, 0, 100},
-		// Defensive: a cached count larger than the prompt is clamped.
-		{"clamped", 100, 120, 120, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -217,8 +215,8 @@ func TestGoogleChatUsageCacheAccounting(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Chat: %v", err)
 			}
-			if resp.Usage == nil || resp.Usage.CacheHitTokens != tc.wantHit || resp.Usage.CacheMissTokens != tc.wantMiss {
-				t.Fatalf("Usage = %+v, want hit=%d miss=%d", resp.Usage, tc.wantHit, tc.wantMiss)
+			if resp.Usage == nil || resp.Usage.CachedTokens != tc.wantHit || resp.Usage.PromptTokens != tc.prompt {
+				t.Fatalf("Usage = %+v, want cached=%d prompt=%d", resp.Usage, tc.wantHit, tc.prompt)
 			}
 		})
 	}
@@ -262,10 +260,9 @@ func TestGoogleChatThinkingOffBudgetZero(t *testing.T) {
 func TestGoogleChatReasoningEffortOverrideBudget(t *testing.T) {
 	srv, lastBody := googleTestServer(t, []string{`data: [DONE]`})
 	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
-	effort := "4096"
 	_, err := p.Chat(context.Background(), ChatRequest{
-		Messages:        []Message{{Role: RoleUser, Content: "x"}},
-		ReasoningEffort: &effort,
+		Messages:       []Message{{Role: RoleUser, Content: "x"}},
+		ThinkingBudget: 4096,
 	}, nil)
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -273,7 +270,26 @@ func TestGoogleChatReasoningEffortOverrideBudget(t *testing.T) {
 	var gReq googleRequest
 	_ = json.Unmarshal([]byte(*lastBody), &gReq)
 	if gReq.GenerationConfig.ThinkingConfig.ThinkingBudget != 4096 {
-		t.Errorf("thinking budget = %d, want 4096 (reasoning effort override)", gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
+		t.Errorf("thinking budget = %d, want 4096 (budget override)", gReq.GenerationConfig.ThinkingConfig.ThinkingBudget)
+	}
+}
+
+func TestGoogleChatReasoningLevelBudget(t *testing.T) {
+	srv, lastBody := googleTestServer(t, []string{`data: [DONE]`})
+	p := NewGoogleProvider("key", srv.URL+"/v1beta", "gemini-2.5-flash")
+	level := ReasoningLow
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages:       []Message{{Role: RoleUser, Content: "x"}},
+		ReasoningLevel: &level,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var gReq googleRequest
+	_ = json.Unmarshal([]byte(*lastBody), &gReq)
+	if gReq.GenerationConfig.ThinkingConfig.ThinkingBudget != googleLevelBudgets[ReasoningLow] {
+		t.Errorf("thinking budget = %d, want %d (reasoning level)",
+			gReq.GenerationConfig.ThinkingConfig.ThinkingBudget, googleLevelBudgets[ReasoningLow])
 	}
 }
 
@@ -367,8 +383,8 @@ func TestGoogleChatThoughtSignatureRoundTrip(t *testing.T) {
 	if len(resp.ToolCalls) != 1 {
 		t.Fatalf("ToolCalls = %d, want 1", len(resp.ToolCalls))
 	}
-	if got := resp.ToolCalls[0].ThoughtSignature; got != ts {
-		t.Errorf("captured ThoughtSignature = %q, want %q", got, ts)
+	if got := resp.ToolCalls[0].Signature; got != ts {
+		t.Errorf("captured Signature = %q, want %q", got, ts)
 	}
 
 	// Now echo the history back (assistant tool call + tool result), as the
@@ -376,7 +392,7 @@ func TestGoogleChatThoughtSignatureRoundTrip(t *testing.T) {
 	// as a sibling field of the part.
 	_, err = p.Chat(context.Background(), ChatRequest{
 		Messages: []Message{
-			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "read", Name: "read", Arguments: `{"path":"a.txt"}`, ThoughtSignature: ts}}},
+			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "read", Name: "read", Arguments: `{"path":"a.txt"}`, Signature: ts}}},
 			{Role: "tool", Content: `{"content":"file contents"}`, ToolCallID: "read"},
 			{Role: RoleUser, Content: "continue"},
 		},

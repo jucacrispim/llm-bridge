@@ -151,13 +151,13 @@ func TestHandleLineTurnEndReportsCacheUsage(t *testing.T) {
 		responses: []*llm.ChatResponse{
 			{
 				StopReason: "tool_calls",
-				Usage:      &llm.Usage{PromptTokens: 100, CompletionTokens: 2, CacheHitTokens: 80, CacheMissTokens: 20},
+				Usage:      &llm.Usage{PromptTokens: 100, CompletionTokens: 2, CachedTokens: 80},
 				ToolCalls:  []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`}},
 			},
 			{
 				Content:    "done",
 				StopReason: "END_TURN",
-				Usage:      &llm.Usage{PromptTokens: 50, CompletionTokens: 3, CacheHitTokens: 40, CacheMissTokens: 10},
+				Usage:      &llm.Usage{PromptTokens: 50, CompletionTokens: 3, CachedTokens: 40},
 			},
 		},
 	}
@@ -1312,6 +1312,31 @@ func TestHandleLinePromptModelOverride(t *testing.T) {
 	}
 }
 
+func TestParseReasoningEffort(t *testing.T) {
+	level, budget := parseReasoningEffort("high")
+	if level == nil || *level != llm.ReasoningHigh || budget != 0 {
+		t.Fatalf("parseReasoningEffort(high) = %v, %d", level, budget)
+	}
+	if _, budget = parseReasoningEffort("8192"); budget != 8192 {
+		t.Fatalf("parseReasoningEffort(8192) budget = %d, want 8192", budget)
+	}
+	// An empty or unknown value clears both, so the provider keeps its default.
+	for _, raw := range []string{"", "   ", "turbo", "0", "-3"} {
+		if level, budget = parseReasoningEffort(raw); level != nil || budget != 0 {
+			t.Fatalf("parseReasoningEffort(%q) = %v, %d, want nil and 0", raw, level, budget)
+		}
+	}
+}
+
+// TestCacheCountsClamps checks a cached count larger than the prompt does not
+// produce a negative uncached count.
+func TestCacheCountsClamps(t *testing.T) {
+	cached, uncached := cacheCounts(&llm.Usage{PromptTokens: 100, CachedTokens: 120})
+	if cached != 120 || uncached != 0 {
+		t.Fatalf("cacheCounts = %d, %d, want 120, 0", cached, uncached)
+	}
+}
+
 func TestHandleLinePromptReasoningEffortOverride(t *testing.T) {
 	fp := &fakeProvider{
 		name: "fake",
@@ -1324,11 +1349,11 @@ func TestHandleLinePromptReasoningEffortOverride(t *testing.T) {
 	if quit {
 		t.Fatal("prompt should not quit")
 	}
-	if fp.lastReq.ReasoningEffort == nil {
-		t.Fatal("expected ReasoningEffort override in ChatRequest")
+	if fp.lastReq.ReasoningLevel == nil {
+		t.Fatal("expected ReasoningLevel override in ChatRequest")
 	}
-	if *fp.lastReq.ReasoningEffort != "low" {
-		t.Fatalf("ReasoningEffort = %q, want low", *fp.lastReq.ReasoningEffort)
+	if *fp.lastReq.ReasoningLevel != llm.ReasoningLow {
+		t.Fatalf("ReasoningLevel = %q, want low", *fp.lastReq.ReasoningLevel)
 	}
 	if fp.lastReq.Thinking != nil {
 		t.Errorf("Thinking should be nil, got %+v", fp.lastReq.Thinking)
@@ -1340,8 +1365,29 @@ func TestHandleLinePromptReasoningEffortOverride(t *testing.T) {
 	if quit {
 		t.Fatal("prompt should not quit")
 	}
-	if fp.lastReq.ReasoningEffort == nil || *fp.lastReq.ReasoningEffort != "low" {
-		t.Fatalf("expected persisted ReasoningEffort=low, got %+v", fp.lastReq.ReasoningEffort)
+	if fp.lastReq.ReasoningLevel == nil || *fp.lastReq.ReasoningLevel != llm.ReasoningLow {
+		t.Fatalf("expected persisted ReasoningLevel=low, got %+v", fp.lastReq.ReasoningLevel)
+	}
+}
+
+// TestHandleLinePromptReasoningEffortNumeric checks a numeric reasoning_effort
+// becomes a token budget instead of a level.
+func TestHandleLinePromptReasoningEffortNumeric(t *testing.T) {
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{Content: "ok", StopReason: "END_TURN", Usage: &llm.Usage{}},
+	}
+	st := &state{provider: fp}
+	var w bytes.Buffer
+	_, quit := handleLine(`{"method":"prompt","params":{"text":"hi","reasoning_effort":"4096"}}`, st, &w)
+	if quit {
+		t.Fatal("prompt should not quit")
+	}
+	if fp.lastReq.ThinkingBudget != 4096 {
+		t.Fatalf("ThinkingBudget = %d, want 4096", fp.lastReq.ThinkingBudget)
+	}
+	if fp.lastReq.ReasoningLevel != nil {
+		t.Fatalf("ReasoningLevel = %+v, want nil for a numeric effort", fp.lastReq.ReasoningLevel)
 	}
 }
 
@@ -3200,7 +3246,7 @@ func TestHandleLinePromptWithImagePath(t *testing.T) {
 	}
 	st := &state{provider: fp, cwd: dir}
 	var w bytes.Buffer
-	line := `{"method":"prompt","params":{"text":"what is this?","images":[{"path":"shot.png","detail":"high"}]}}`
+	line := `{"method":"prompt","params":{"text":"what is this?","images":[{"path":"shot.png"}]}}`
 	_, quit := handleLine(line, st, &w)
 	if quit {
 		t.Fatal("prompt should not quit")
@@ -3217,7 +3263,7 @@ func TestHandleLinePromptWithImagePath(t *testing.T) {
 		t.Fatalf("images = %d, want 1", len(m.Images))
 	}
 	im := m.Images[0]
-	if im.MIME != "image/png" || im.Detail != "high" || im.Data != onePixelPNGBase64 {
+	if im.MIME != "image/png" || im.Data != onePixelPNGBase64 {
 		t.Fatalf("unexpected image: %+v", im)
 	}
 }

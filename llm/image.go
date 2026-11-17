@@ -38,9 +38,6 @@ type Image struct {
 	Data string
 	// URL is an external http(s) image, passed through to the provider.
 	URL string
-	// Detail is DeepSeek's image processing hint ("low", "high", "original",
-	// "auto"). Empty leaves it unset.
-	Detail string
 }
 
 // DataURL returns the data:<mime>;base64,<data> form of an inline image, or ""
@@ -100,7 +97,7 @@ func LoadImageFile(path string) (Image, error) {
 
 // NewInlineImage builds an inline image from client data, a data: URL or raw
 // base64. The format comes from the bytes, falling back to the declared type.
-func NewInlineImage(data, mimeType, detail string) (Image, error) {
+func NewInlineImage(data, mimeType string) (Image, error) {
 	data = strings.TrimSpace(data)
 	if data == "" {
 		return Image{}, errors.New("empty image data")
@@ -134,25 +131,20 @@ func NewInlineImage(data, mimeType, detail string) (Image, error) {
 	if !supportedImageMIME(mime) {
 		return Image{}, errors.New("unsupported image format (need PNG, JPEG, GIF or WebP)")
 	}
-	return Image{MIME: mime, Data: base64.StdEncoding.EncodeToString(raw), Detail: detail}, nil
+	return Image{MIME: mime, Data: base64.StdEncoding.EncodeToString(raw)}, nil
 }
 
 // ResolveImage builds an Image from the three origins the protocol supports, in
 // that order of precedence: url, data, path. path is expected to be resolved
 // against the working directory already.
-func ResolveImage(path, rawURL, data, mimeType, detail string) (Image, error) {
+func ResolveImage(path, rawURL, data, mimeType string) (Image, error) {
 	switch {
 	case rawURL != "":
-		return Image{URL: rawURL, MIME: mimeType, Detail: detail}, nil
+		return Image{URL: rawURL, MIME: mimeType}, nil
 	case data != "":
-		return NewInlineImage(data, mimeType, detail)
+		return NewInlineImage(data, mimeType)
 	case path != "":
-		im, err := LoadImageFile(path)
-		if err != nil {
-			return Image{}, err
-		}
-		im.Detail = detail
-		return im, nil
+		return LoadImageFile(path)
 	}
 	return Image{}, errors.New("image requires one of path, url or data")
 }

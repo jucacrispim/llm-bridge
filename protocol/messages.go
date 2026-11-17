@@ -69,8 +69,9 @@ type PromptParams struct {
 	// Thinking overrides thinking mode for the conversation: true →
 	// deepseek-flash, false → deepseek-chat. Omitted keeps the configured mode.
 	Thinking *bool `json:"thinking,omitempty"`
-	// ReasoningEffort overrides reasoning_effort when thinking is on (e.g. "low",
-	// "medium", "high"). "" stops sending the parameter.
+	// ReasoningEffort overrides the reasoning effort when thinking is on: a word
+	// on the common scale ("low", "medium", "high", "xhigh", "max") or a number,
+	// which becomes a token budget. "" stops sending the parameter.
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
 	// System overrides the system prompt, and persists like the other
 	// overrides.
@@ -93,9 +94,6 @@ type ImageParam struct {
 	Data string `json:"data,omitempty"`
 	// MIME declares the media type; otherwise it is detected from the bytes.
 	MIME string `json:"mime_type,omitempty"`
-	// Detail controls image processing for DeepSeek ("low", "high", "original",
-	// "auto"). Ignored elsewhere.
-	Detail string `json:"detail,omitempty"`
 }
 
 type ToolResultParams struct {

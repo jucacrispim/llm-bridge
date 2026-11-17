@@ -51,8 +51,10 @@ Every command has the shape:
     - ``provider`` - switch the active LLM provider (``"deepseek"`` /
       ``"google"``).
     - ``thinking`` - enable or disable thinking mode.
-    - ``reasoning_effort`` - reasoning effort for DeepSeek, or a numeric
-      thinking budget for Google.
+    - ``reasoning_effort`` - the reasoning effort, as one word on the common
+      scale (``low``, ``medium``, ``high``, ``xhigh``, ``max``) or as a number of
+      tokens for the reasoning budget. A level the provider does not know falls
+      back to its default, and an empty string stops sending the parameter.
     - ``system`` / ``system_prompt`` - override the system prompt.
 
     ``images`` attaches one or more images to the prompt (see `Images`_ below).
@@ -74,11 +76,10 @@ this order of precedence:
 - ``path`` - a local file, read by the bridge and embedded inline. A relative
   path resolves against the current cwd.
 
-``mime_type`` optionally declares the media type, and ``detail`` optionally
-controls image processing for DeepSeek (``low`` / ``high`` / ``original`` /
-``auto``). The supported formats are PNG, JPEG, GIF and WebP, detected from the
-bytes and not from the name. An image only attaches to a user message, and the
-active model has to support vision, which on DeepSeek is the Flash model.
+``mime_type`` optionally declares the media type. The supported formats are
+PNG, JPEG, GIF and WebP, detected from the bytes and not from the name. An
+image only attaches to a user message, and the active model has to support
+vision, which on DeepSeek is the Flash model.
 
 .. code-block:: json
 
@@ -86,7 +87,7 @@ active model has to support vision, which on DeepSeek is the Flash model.
      "method": "prompt",
      "params": {
        "text": "What is in this screenshot?",
-       "images": [{"path": "screenshot.png", "detail": "high"}]
+       "images": [{"path": "screenshot.png"}]
      }
    }
 
@@ -221,12 +222,15 @@ Events (bridge → client)
     ``cache_hit_tokens`` / ``cache_miss_tokens`` are the prompt cache accounting
     summed over every provider call of the turn, and a tool-calling turn makes
     several. A provider without cache reporting leaves them at ``0``.
+    ``stop_reason`` is one of ``end_turn``, ``tool_use`` or ``max_tokens``
+    whatever the provider, plus the provider's own word for a stop the common
+    three do not name (a Gemini safety block, for example).
 
     .. code-block:: json
 
        {
          "event": "turn_end",
-         "stop_reason": "stop",
+         "stop_reason": "end_turn",
          "context_pct": 0.42,
          "context_tokens": 420000,
          "context_window": 1000000,

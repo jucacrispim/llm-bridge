@@ -176,11 +176,27 @@ func (p *DeepSeekProvider) resolveModel(req ChatRequest) string {
 	return DefaultModel(p.effectiveThinking(req))
 }
 
+// deepseekEffort maps a level onto the values DeepSeek accepts. It knows
+// low, medium and high only, so the two levels above high go out as high
+// instead of being rejected.
+func deepseekEffort(level ReasoningLevel) string {
+	switch level {
+	case ReasoningLow:
+		return "low"
+	case ReasoningMedium:
+		return "medium"
+	case ReasoningHigh, ReasoningXHigh, ReasoningMax:
+		return "high"
+	}
+	return ""
+}
+
 // effectiveReasoningEffort returns the reasoning_effort for a request and
-// whether to send it. An empty value stops sending the parameter.
+// whether to send it. An empty level stops sending the parameter.
 func (p *DeepSeekProvider) effectiveReasoningEffort(req ChatRequest) (string, bool) {
-	if req.ReasoningEffort != nil {
-		return *req.ReasoningEffort, *req.ReasoningEffort != ""
+	if req.ReasoningLevel != nil {
+		effort := deepseekEffort(*req.ReasoningLevel)
+		return effort, effort != ""
 	}
 	return p.reasoningEffort, p.reasoningEffort != ""
 }
@@ -204,10 +220,10 @@ type openAIContentPart struct {
 	ImageURL *openAIImageURL `json:"image_url,omitempty"`
 }
 
-// openAIImageURL is the image_url payload: a data: URL or an http(s) URL.
+// openAIImageURL is the image_url payload: a data: URL or an http(s) URL. No
+// detail hint is sent, so the API keeps its own default.
 type openAIImageURL struct {
-	URL    string `json:"url"`
-	Detail string `json:"detail,omitempty"`
+	URL string `json:"url"`
 }
 
 type openAIMessage struct {
@@ -250,7 +266,7 @@ func openAIContent(role, content string, images []Image) json.RawMessage {
 		}
 		parts = append(parts, openAIContentPart{
 			Type:     "image_url",
-			ImageURL: &openAIImageURL{URL: u, Detail: im.Detail},
+			ImageURL: &openAIImageURL{URL: u},
 		})
 	}
 	b, err := json.Marshal(parts)
@@ -302,11 +318,40 @@ type openAIResponse struct {
 			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
-	} `json:"usage"`
+	Usage openAIUsage `json:"usage"`
+}
+
+// openAIUsage is the usage object of the OpenAI-compatible wire: the cache
+// counters carry DeepSeek's names, so they stay in this file and the interface
+// keeps the neutral ones.
+type openAIUsage struct {
+	PromptTokens          int `json:"prompt_tokens"`
+	CompletionTokens      int `json:"completion_tokens"`
+	TotalTokens           int `json:"total_tokens"`
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
+}
+
+func (u *openAIUsage) toUsage() *Usage {
+	return &Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+		TotalTokens:      u.TotalTokens,
+		CachedTokens:     u.PromptCacheHitTokens,
+	}
+}
+
+// deepseekStopReason maps finish_reason onto the common vocabulary.
+func deepseekStopReason(reason string) string {
+	switch reason {
+	case "stop":
+		return StopEndTurn
+	case "tool_calls":
+		return StopToolUse
+	case "length":
+		return StopMaxTokens
+	}
+	return reason
 }
 
 type openAIToolCallDelta struct {
@@ -327,7 +372,7 @@ type openAIStreamChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *Usage `json:"usage,omitempty"`
+	Usage *openAIUsage `json:"usage,omitempty"`
 }
 
 type toolCallBuilder struct {
@@ -451,8 +496,8 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 
 	var fullContent strings.Builder
 	var fullReasoning strings.Builder
-	var usage *Usage
-	stopReason := "END_TURN"
+	var usage *openAIUsage
+	stopReason := StopEndTurn
 	toolBuilders := map[int]*toolCallBuilder{}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -506,7 +551,7 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 			}
 
 			if choice.FinishReason != "" {
-				stopReason = choice.FinishReason
+				stopReason = deepseekStopReason(choice.FinishReason)
 			}
 		}
 
@@ -535,13 +580,13 @@ func (p *DeepSeekProvider) Chat(ctx context.Context, req ChatRequest, onChunk fu
 	}
 
 	if usage == nil {
-		usage = &Usage{}
+		usage = &openAIUsage{}
 	}
 
 	return &ChatResponse{
 		Content:    fullContent.String(),
 		StopReason: stopReason,
-		Usage:      usage,
+		Usage:      usage.toUsage(),
 		ToolCalls:  toolCalls,
 		Model:      model,
 		Reasoning:  fullReasoning.String(),

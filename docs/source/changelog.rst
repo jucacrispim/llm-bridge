@@ -54,6 +54,27 @@ Breaking changes
 Changed
 ~~~~~~~
 
+- **The provider interface carries only what providers have in common.**
+  ``ToolCall.ThoughtSignature`` became ``ToolCall.Signature``, and a matching
+  ``Message.Signature`` covers the advice Anthropic signs instead (it rejects a
+  replayed thinking block without it). ``Usage`` lost its DeepSeek-shaped
+  ``CacheHitTokens``/``CacheMissTokens`` and their JSON tags, which moved into a
+  private ``openAIUsage``: the neutral pair is now ``PromptTokens`` and
+  ``CachedTokens``, and the server derives the hit and miss counts that
+  ``turn_end`` reports. ``ChatRequest.ReasoningEffort`` (a string whose meaning
+  depended on which provider read it) became ``ReasoningLevel`` plus
+  ``ThinkingBudget``: a level for DeepSeek and Anthropic, a number for Gemini.
+  ``protocol`` still takes one ``reasoning_effort`` string and the server splits
+  it, so no client changes.
+- **``stop_reason`` is one vocabulary.** ``end_turn``, ``tool_use`` and
+  ``max_tokens`` come out the same whichever provider answered, instead of
+  ``stop`` / ``END_TURN`` / ``STOP`` in the same conversation. A value outside
+  the three (a Gemini ``SAFETY`` block, an Anthropic ``refusal``) goes out as
+  the provider wrote it.
+- **The image ``detail`` hint is gone.** It was DeepSeek's
+  ``image_url.detail`` and only DeepSeek read it, so it did not belong in the
+  shared ``Image``. No client set it, and the API default (``auto``) is what
+  those calls already got. A client that still sends ``detail`` has it ignored.
 - ``~/.llm-bridge`` is now granted **read-write** (it was read-only) and created
   at startup when missing, so a tool call can maintain the context files and add
   a hook. A ``write`` or ``search_replace`` into a ``.llm-bridge`` directory

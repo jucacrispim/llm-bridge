@@ -259,7 +259,7 @@ func TestChatSendsStreamOptionsAndParsesCacheUsage(t *testing.T) {
 	if !strings.Contains(gotBody, `"stream_options":{"include_usage":true}`) {
 		t.Fatalf("expected stream_options include_usage in request body, got %s", gotBody)
 	}
-	if resp.Usage == nil || resp.Usage.CacheHitTokens != 80 || resp.Usage.CacheMissTokens != 20 {
+	if resp.Usage == nil || resp.Usage.CachedTokens != 80 || resp.Usage.PromptTokens != 100 {
 		t.Fatalf("unexpected usage: %+v", resp.Usage)
 	}
 }
@@ -469,10 +469,10 @@ func TestChatReasoningEffortPerRequestWins(t *testing.T) {
 	if p.ReasoningEffort() != DefaultReasoningEffort {
 		t.Fatalf("ReasoningEffort() = %q, want default %q", p.ReasoningEffort(), DefaultReasoningEffort)
 	}
-	effort := "low"
+	effort := ReasoningLow
 	_, err := p.Chat(context.Background(), ChatRequest{
-		Messages:        []Message{{Role: RoleUser, Content: "hello"}},
-		ReasoningEffort: &effort,
+		Messages:       []Message{{Role: RoleUser, Content: "hello"}},
+		ReasoningLevel: &effort,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -495,12 +495,12 @@ func TestChatReasoningEffortPerRequestEmptyDisables(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// provider global is "high"; a per-request empty string must disable it
+	// provider global is "high"; a per-request empty level must disable it
 	p := NewDeepSeekProvider("key", server.URL, "deepseek-reasoner")
-	effort := ""
+	effort := ReasoningLevel("")
 	_, err := p.Chat(context.Background(), ChatRequest{
-		Messages:        []Message{{Role: RoleUser, Content: "hello"}},
-		ReasoningEffort: &effort,
+		Messages:       []Message{{Role: RoleUser, Content: "hello"}},
+		ReasoningLevel: &effort,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -521,10 +521,10 @@ func TestChatReasoningEffortPerRequestIgnoredWhenThinkingOff(t *testing.T) {
 	defer server.Close()
 
 	p := NewDeepSeekProviderWithThinking("key", server.URL, "deepseek-chat", false)
-	effort := "low"
+	effort := ReasoningLow
 	_, err := p.Chat(context.Background(), ChatRequest{
-		Messages:        []Message{{Role: RoleUser, Content: "hello"}},
-		ReasoningEffort: &effort,
+		Messages:       []Message{{Role: RoleUser, Content: "hello"}},
+		ReasoningLevel: &effort,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -593,8 +593,8 @@ func TestChatStreaming(t *testing.T) {
 	if resp.Content != "Hello world" {
 		t.Fatalf("expected 'Hello world', got %q", resp.Content)
 	}
-	if resp.StopReason != "stop" {
-		t.Fatalf("expected stop, got %q", resp.StopReason)
+	if resp.StopReason != StopEndTurn {
+		t.Fatalf("expected end_turn, got %q", resp.StopReason)
 	}
 	if resp.Usage == nil || resp.Usage.TotalTokens != 5 {
 		t.Fatalf("unexpected usage: %+v", resp.Usage)
@@ -672,8 +672,8 @@ func TestChatNoChunks(t *testing.T) {
 	if resp.Content != "" {
 		t.Fatalf("expected empty content, got %q", resp.Content)
 	}
-	if resp.StopReason != "END_TURN" {
-		t.Fatalf("expected END_TURN, got %q", resp.StopReason)
+	if resp.StopReason != StopEndTurn {
+		t.Fatalf("expected end_turn, got %q", resp.StopReason)
 	}
 	if resp.Usage == nil || resp.Usage.TotalTokens != 0 {
 		t.Fatalf("unexpected usage: %+v", resp.Usage)
@@ -789,7 +789,7 @@ func TestChatSendsImageContentParts(t *testing.T) {
 	_, err := p.Chat(context.Background(), ChatRequest{
 		Messages: []Message{
 			{Role: RoleUser, Content: "what is this?", Images: []Image{
-				{MIME: "image/png", Data: "AAAA", Detail: "high"},
+				{MIME: "image/png", Data: "AAAA"},
 				{URL: "https://example.com/x.jpg"},
 			}},
 		},
@@ -799,8 +799,9 @@ func TestChatSendsImageContentParts(t *testing.T) {
 	}
 	// A message with images serializes content as the multimodal parts array:
 	// text first, then one image_url per image (inline data URL / pass-through).
+	// No detail hint goes out, so the API keeps its default.
 	want := `"content":[{"type":"text","text":"what is this?"},` +
-		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA","detail":"high"}},` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}},` +
 		`{"type":"image_url","image_url":{"url":"https://example.com/x.jpg"}}]`
 	if !strings.Contains(gotBody, want) {
 		t.Fatalf("expected multimodal content in request body, got %s", gotBody)

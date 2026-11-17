@@ -19,66 +19,21 @@ package llm
 
 import "strings"
 
-// contextWindows maps a model id, or a prefix of one, to its token window. The
-// providers do not expose it over the API, so the values are static. Keep them
-// in sync with docs/source/hacking/providers.rst; when in doubt prefer the
-// smaller window.
-var contextWindows = map[string]int{
-	// DeepSeek: both current API models have a 1M window. deepseek-chat and
-	// deepseek-reasoner are aliases redirected to deepseek-flash.
-	"deepseek-flash":    1_000_000,
-	"deepseek-chat":     1_000_000,
-	"deepseek-reasoner": 1_000_000,
-	"deepseek-v4-flash": 1_000_000,
-	"deep-v4-pro":       1_000_000,
-
-	// Google Gemini.
-	"gemini-3.8-flash": 1_000_000,
-	"gemini-3.1-pro":   1_000_000,
-	"gemini-3-flash":   200_000,
-	"gemini-2.5-pro":   1_000_000,
-	"gemini-2.5-flash": 1_000_000,
-	"gemini-1.5-pro":   2_000_000,
-	"gemini-1.5-flash": 1_000_000,
-
-	// Gemma (open models): 128K..256K depending on the variant; take the
-	// conservative lower bound.
-	"gemma-4": 128_000,
-
-	// Anthropic Claude: 1M from the 4.6 generation on, 200K before it. A dated
-	// snapshot matches its family by prefix.
-	"claude-fable-5-2":  1_000_000,
-	"claude-fable-5-1":  1_000_000,
-	"claude-fable-5":    1_000_000,
-	"claude-mythos-5-2": 1_000_000,
-	"claude-mythos-5-1": 1_000_000,
-	"claude-mythos-5":   1_000_000,
-	"claude-opus-5-5":   1_000_000,
-	"claude-opus-5":     1_000_000,
-	"claude-opus-4-8":   1_000_000,
-	"claude-opus-4-7":   1_000_000,
-	"claude-opus-4-6":   1_000_000,
-	"claude-opus-4-5":   200_000,
-	"claude-sonnet-5-5": 1_000_000,
-	"claude-sonnet-5":   1_000_000,
-	"claude-sonnet-4-6": 1_000_000,
-	"claude-sonnet-4-5": 200_000,
-	"claude-haiku-5-5":  1_000_000,
-	"claude-haiku-4-5":  200_000,
-}
-
 // ContextWindow returns the token window of a model and whether it is known:
-// exact match first, then the longest matching prefix. An unknown model gives
-// (0, false), so a caller reports a null context_pct instead of a wrong window.
+// exact match first, then the longest matching prefix, so a dated snapshot
+// matches its family. The providers do not expose the window over the API, so
+// it comes from models.json. An unknown model gives (0, false), so a caller
+// reports a null context_pct instead of a wrong window.
 func ContextWindow(model string) (int, bool) {
 	if model == "" {
 		return 0, false
 	}
-	if win, ok := contextWindows[model]; ok {
+	windows := currentModels.Load().windows
+	if win, ok := windows[model]; ok {
 		return win, true
 	}
 	best := ""
-	for prefix := range contextWindows {
+	for prefix := range windows {
 		if strings.HasPrefix(model, prefix) && len(prefix) > len(best) {
 			best = prefix
 		}
@@ -86,5 +41,5 @@ func ContextWindow(model string) (int, bool) {
 	if best == "" {
 		return 0, false
 	}
-	return contextWindows[best], true
+	return windows[best], true
 }

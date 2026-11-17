@@ -1,0 +1,53 @@
+{
+  "providers": {
+    "deepseek": {
+      "levels": ["low", "medium", "high"],
+      "budget": false,
+      "models": [
+        {"id": "deepseek-flash", "window": 1000000},
+        {"id": "deepseek-v4-flash", "window": 1000000},
+        {"id": "deep-v4-pro", "window": 1000000},
+        {"id": "deepseek-chat", "window": 1000000, "alias": "deepseek-flash"},
+        {"id": "deepseek-reasoner", "window": 1000000, "alias": "deepseek-flash"}
+      ]
+    },
+    "google": {
+      "levels": ["low", "medium", "high", "xhigh", "max"],
+      "budget": true,
+      "models": [
+        {"id": "gemini-3.8-flash", "window": 1000000},
+        {"id": "gemini-3.1-pro", "window": 1000000},
+        {"id": "gemini-3-flash", "window": 200000},
+        {"id": "gemini-2.5-pro", "window": 1000000},
+        {"id": "gemini-2.5-flash", "window": 1000000},
+        {"id": "gemini-1.5-pro", "window": 2000000},
+        {"id": "gemini-1.5-flash", "window": 1000000},
+        {"id": "gemma-4", "window": 128000}
+      ]
+    },
+    "anthropic": {
+      "levels": ["low", "medium", "high", "xhigh", "max"],
+      "budget": true,
+      "models": [
+        {"id": "claude-fable-5-2", "window": 1000000},
+        {"id": "claude-fable-5-1", "window": 1000000},
+        {"id": "claude-fable-5", "window": 1000000},
+        {"id": "claude-mythos-5-2", "window": 1000000},
+        {"id": "claude-mythos-5-1", "window": 1000000},
+        {"id": "claude-mythos-5", "window": 1000000},
+        {"id": "claude-opus-5-5", "window": 1000000},
+        {"id": "claude-opus-5", "window": 1000000},
+        {"id": "claude-opus-4-8", "window": 1000000},
+        {"id": "claude-opus-4-7", "window": 1000000},
+        {"id": "claude-opus-4-6", "window": 1000000},
+        {"id": "claude-opus-4-5", "window": 200000},
+        {"id": "claude-sonnet-5-5", "window": 1000000},
+        {"id": "claude-sonnet-5", "window": 1000000},
+        {"id": "claude-sonnet-4-6", "window": 1000000},
+        {"id": "claude-sonnet-4-5", "window": 200000},
+        {"id": "claude-haiku-5-5", "window": 1000000},
+        {"id": "claude-haiku-4-5", "window": 200000}
+      ]
+    }
+  }
+}

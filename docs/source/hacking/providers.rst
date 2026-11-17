@@ -280,44 +280,53 @@ Context window
 --------------
 
 Providers do not expose a model's context window over the API, so the bridge
-keeps a static per-model table in ``llm/contextwindow.go``. The ``turn_end``
+reads it from ``llm/models.json``, embedded in the binary. The ``turn_end``
 event reports ``context_tokens`` (the prompt of the last provider call of the
 turn), ``context_window`` and their ratio ``context_pct``. Lookup is exact
 first, then by the **longest matching prefix**, so versioned ids such as
 ``gemini-2.5-flash-001`` resolve to their base entry. A model absent from the
-table reports ``context_pct: null`` and ``context_window: 0`` instead of a
+file reports ``context_pct: null`` and ``context_window: 0`` instead of a
 guessed window.
 
-The ``ready`` event announces this table split by provider: each provider
-carries the ids it answers for, with the window above. ``llm/models.go`` holds
-the split and the reasoning controls, and ``deepseek-chat`` and
-``deepseek-reasoner`` stay out of it, because they are redirected to
-``deepseek-flash``. A test fails when an id in the table is neither announced
-nor listed as an alias.
+The ``ready`` event announces the same file: each provider carries the ids it
+answers for, with the window, and the reasoning controls it takes.
 
-.. list-table::
-   :header-rows: 1
-   :widths: 60 40
+.. code-block:: json
 
-   * - Model id (or prefix)
-     - Context window
-   * - ``deepseek-flash``, ``deepseek-chat``, ``deepseek-reasoner``
-     - 1,000,000
-   * - ``deepseek-v4-flash``, ``deep-v4-pro``
-     - 1,000,000
-   * - ``gemini-3.8-flash``, ``gemini-3.1-pro``
-     - 1,000,000
-   * - ``gemini-3-flash``
-     - 200,000
-   * - ``gemini-2.5-pro``, ``gemini-2.5-flash``, ``gemini-1.5-flash``
-     - 1,000,000
-   * - ``gemini-1.5-pro``
-     - 2,000,000
-   * - ``gemma-4``
-     - 128,000
-   * - ``claude-sonnet-5-5``, ``claude-opus-5-5``, ``claude-haiku-5-5``
-     - 1,000,000
-   * - ``claude-opus-4-6``, ``claude-sonnet-4-6``, ``claude-opus-4-7``, ``claude-opus-4-8``
-     - 1,000,000
-   * - ``claude-sonnet-4-5``, ``claude-opus-4-5``, ``claude-haiku-4-5``
-     - 200,000
+   {
+     "providers": {
+       "deepseek": {
+         "levels": ["low", "medium", "high"],
+         "budget": false,
+         "models": [
+           {"id": "deepseek-flash", "window": 1000000},
+           {"id": "deepseek-chat", "window": 1000000, "alias": "deepseek-flash"}
+         ]
+       }
+     }
+   }
+
+* ``levels`` - Reasoning levels the provider accepts, ascending on the scale
+  ``low``, ``medium``, ``high``, ``xhigh``, ``max``.
+* ``budget`` - Whether a numeric token budget works instead of a level.
+* ``models`` - Announced in file order, so put the newest first.
+* ``window`` - Token window of the model. Must be above zero.
+* ``alias`` - The model this id redirects to. An alias keeps its window, since
+  a request may still name it, and is not announced.
+
+The bridge refuses a file with an unknown level, levels out of order, a
+missing id, a zero window, an id in two providers or an alias that does not
+point at a model of the same provider.
+
+To change the data without a rebuild, save a file as
+``~/.config/llm-bridge/models.json`` (``$XDG_CONFIG_HOME`` is honored). It
+replaces the embedded file as a whole, so start from a copy of
+``llm/models.json``.
+
+.. code-block:: sh
+
+   $ mkdir -p ~/.config/llm-bridge
+   $ cp llm/models.json ~/.config/llm-bridge/models.json
+
+If the file is invalid the bridge logs ``models file ignored`` and keeps the
+embedded data. The file is read once at startup.

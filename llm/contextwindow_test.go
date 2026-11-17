@@ -113,24 +113,3 @@ func TestContextWindowUnknown(t *testing.T) {
 		})
 	}
 }
-
-func TestContextWindowLongestPrefixWins(t *testing.T) {
-	// Guard the "longest matching prefix" rule directly: temporarily add a
-	// short and a long key sharing a prefix, and assert the longer one wins
-	// for an id that matches both.
-	const short, long = "test-model", "test-model-pro"
-	contextWindows[short] = 100
-	contextWindows[long] = 200
-	t.Cleanup(func() {
-		delete(contextWindows, short)
-		delete(contextWindows, long)
-	})
-
-	got, ok := ContextWindow("test-model-pro-001")
-	if !ok {
-		t.Fatal("ContextWindow(test-model-pro-001) ok = false, want true")
-	}
-	if got != 200 {
-		t.Errorf("ContextWindow(test-model-pro-001) = %d, want 200 (longest prefix)", got)
-	}
-}

@@ -13,10 +13,15 @@ Added
   it takes the reasoning effort (the levels it accepts and whether a token
   budget works instead). A client offers the real names instead of keeping its
   own copy of them, and a model added to the bridge shows up without a client
-  release. The list comes from the context window table in
-  ``llm/contextwindow.go``, and the deepseek aliases (``deepseek-chat``,
+  release. The deepseek aliases (``deepseek-chat``,
   ``deepseek-reasoner``) are left out. A bridge with no provider registry still
   sends the bare ``{"event":"ready"}``.
+- **Model data is a JSON file.** The context windows, the model ids and the
+  reasoning controls of each provider moved out of Go tables into
+  ``llm/models.json``, embedded in the binary. Save a file as
+  ``~/.config/llm-bridge/models.json`` to replace it without a rebuild. The
+  file replaces the embedded data as a whole, and an invalid one is logged and
+  ignored. The format is in :ref:`providers-context-window`.
 - **Anthropic requests ask for prompt caching.** Three ``cache_control``
   breakpoints go out on every request: the last tool of the list, the system
   prompt and the last block of the last message. The tool breakpoint caches the

@@ -104,6 +104,13 @@ func main() {
 		logger.SetOutput(io.Discard)
 	}
 
+	// A broken override keeps the embedded data, so the bridge still boots.
+	if path, err := llm.LoadUserModels(); err != nil {
+		logger.Warningf("models file ignored: %v", err)
+	} else if path != "" {
+		logger.Infof("models loaded from %s", path)
+	}
+
 	// Build a registry of BOTH providers so the bridge can switch provider per
 	// request via the prompt's `provider` field (e.g. deepseek → google and
 	// back). The --provider flag only selects the default/initial active one.

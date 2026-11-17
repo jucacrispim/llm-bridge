@@ -17,10 +17,25 @@
 
 package llm
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
-// TestCatalogKnown covers a known provider: it has models, its levels come
-// ascending and the budget flag is the one the provider parses.
+// useModels loads raw for the test and restores the embedded data after.
+func useModels(t *testing.T, raw string) {
+	t.Helper()
+	prev := currentModels.Load()
+	t.Cleanup(func() { currentModels.Store(prev) })
+	if err := LoadModels([]byte(raw)); err != nil {
+		t.Fatalf("LoadModels: %v", err)
+	}
+}
+
+// TestCatalogKnown covers the embedded data: each provider has models, its
+// levels come ascending and the budget flag is the one the provider parses.
 func TestCatalogKnown(t *testing.T) {
 	cases := map[string]struct {
 		models int
@@ -45,25 +60,7 @@ func TestCatalogKnown(t *testing.T) {
 		if pm.Budget != tc.budget {
 			t.Errorf("Catalog(%q) budget = %v, want %v", name, pm.Budget, tc.budget)
 		}
-		prev := -1
-		for _, level := range pm.Levels {
-			idx := levelIndex(level)
-			if idx <= prev {
-				t.Errorf("Catalog(%q) levels are not ascending: %v", name, pm.Levels)
-			}
-			prev = idx
-		}
 	}
-}
-
-// levelIndex is the position of a level on the common scale, for ordering.
-func levelIndex(level ReasoningLevel) int {
-	for i, l := range allLevels {
-		if l == level {
-			return i
-		}
-	}
-	return -1
 }
 
 func TestCatalogUnknown(t *testing.T) {
@@ -72,44 +69,130 @@ func TestCatalogUnknown(t *testing.T) {
 	}
 }
 
-// TestCatalogHasNoDuplicateModel guards the partition: an id announced twice
-// would show up twice in a client's completion.
-func TestCatalogHasNoDuplicateModel(t *testing.T) {
-	seen := map[string]string{}
-	for provider, pm := range providerModels {
-		for _, id := range pm.Models {
-			if first, ok := seen[id]; ok {
-				t.Errorf("model %q is announced by both %s and %s", id, first, provider)
-			}
-			seen[id] = provider
+// TestAliasKeepsWindowButIsNotAnnounced covers the deepseek aliases.
+func TestAliasKeepsWindowButIsNotAnnounced(t *testing.T) {
+	pm, _ := Catalog("deepseek")
+	for _, id := range pm.Models {
+		if id == "deepseek-chat" || id == "deepseek-reasoner" {
+			t.Errorf("alias %q is announced", id)
 		}
+	}
+	if win, ok := ContextWindow("deepseek-chat"); !ok || win == 0 {
+		t.Errorf("ContextWindow(deepseek-chat) = %d, %v, want a window", win, ok)
 	}
 }
 
-// TestCatalogMatchesContextWindow keeps the two tables in sync: every id the
-// bridge reports a window for is announced by a provider, or is an alias of one
-// it announces.
-func TestCatalogMatchesContextWindow(t *testing.T) {
-	announced := map[string]bool{}
-	for _, pm := range providerModels {
-		for _, id := range pm.Models {
-			announced[id] = true
-			if window, ok := ContextWindow(id); !ok || window == 0 {
-				t.Errorf("announced model %q has no context window", id)
+func TestContextWindowLongestPrefixWins(t *testing.T) {
+	useModels(t, `{"providers":{"p":{"levels":["low"],"models":[
+		{"id":"test-model","window":100},
+		{"id":"test-model-pro","window":200}]}}}`)
+
+	got, ok := ContextWindow("test-model-pro-001")
+	if !ok || got != 200 {
+		t.Errorf("ContextWindow(test-model-pro-001) = %d, %v, want 200 (longest prefix)", got, ok)
+	}
+}
+
+func TestLoadModelsReplacesEverything(t *testing.T) {
+	useModels(t, `{"providers":{"mine":{"levels":["low","high"],"budget":true,
+		"models":[{"id":"m1","window":10}]}}}`)
+
+	if _, ok := Catalog("deepseek"); ok {
+		t.Error("deepseek is still known after the replacement")
+	}
+	if _, ok := ContextWindow("claude-opus-5"); ok {
+		t.Error("an embedded window survived the replacement")
+	}
+	pm, ok := Catalog("mine")
+	if !ok || len(pm.Models) != 1 || pm.Models[0] != "m1" || !pm.Budget {
+		t.Errorf("Catalog(mine) = %+v, %v", pm, ok)
+	}
+}
+
+func TestLoadModelsInvalid(t *testing.T) {
+	cases := map[string]string{
+		"bad json":       `{`,
+		"no providers":   `{"providers":{}}`,
+		"unknown level":  `{"providers":{"p":{"levels":["huge"],"models":[{"id":"a","window":1}]}}}`,
+		"level order":    `{"providers":{"p":{"levels":["high","low"],"models":[{"id":"a","window":1}]}}}`,
+		"empty id":       `{"providers":{"p":{"models":[{"id":"","window":1}]}}}`,
+		"zero window":    `{"providers":{"p":{"models":[{"id":"a","window":0}]}}}`,
+		"alias missing":  `{"providers":{"p":{"models":[{"id":"a","window":1,"alias":"b"}]}}}`,
+		"alias of alias": `{"providers":{"p":{"models":[{"id":"a","window":1},{"id":"b","window":1,"alias":"a"},{"id":"c","window":1,"alias":"b"}]}}}`,
+		"id in two":      `{"providers":{"p":{"models":[{"id":"a","window":1}]},"q":{"models":[{"id":"a","window":1}]}}}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			prev := currentModels.Load()
+			if err := LoadModels([]byte(raw)); err == nil {
+				currentModels.Store(prev)
+				t.Fatal("LoadModels accepted invalid data")
 			}
-		}
+			if currentModels.Load() != prev {
+				t.Error("invalid data replaced the current models")
+			}
+		})
 	}
-	for id, target := range modelAliases {
-		if announced[id] {
-			t.Errorf("alias %q should not be announced", id)
-		}
-		if _, ok := contextWindows[target]; !ok {
-			t.Errorf("alias %q points at %q, which has no context window", id, target)
-		}
+}
+
+func TestLoadUserModels(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	prev := currentModels.Load()
+	t.Cleanup(func() { currentModels.Store(prev) })
+
+	if path, err := LoadUserModels(); path != "" || err != nil {
+		t.Fatalf("without a file got %q, %v", path, err)
 	}
-	for id := range contextWindows {
-		if !announced[id] && modelAliases[id] == "" {
-			t.Errorf("model %q has a context window but no provider announces it", id)
-		}
+
+	cfg := filepath.Join(dir, "llm-bridge")
+	if err := os.MkdirAll(cfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(cfg, "models.json")
+
+	if err := os.WriteFile(file, []byte(`{`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, err := LoadUserModels()
+	if err == nil || path != file || !strings.Contains(err.Error(), file) {
+		t.Fatalf("invalid file got %q, %v", path, err)
+	}
+	if _, ok := Catalog("deepseek"); !ok {
+		t.Error("an invalid file replaced the embedded data")
+	}
+
+	good := `{"providers":{"mine":{"models":[{"id":"m1","window":10}]}}}`
+	if err := os.WriteFile(file, []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if path, err := LoadUserModels(); path != file || err != nil {
+		t.Fatalf("valid file got %q, %v", path, err)
+	}
+	if _, ok := Catalog("mine"); !ok {
+		t.Error("the user file was not loaded")
+	}
+}
+
+func TestLoadUserModelsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	// A directory where the file should be makes ReadFile fail.
+	if err := os.MkdirAll(filepath.Join(dir, "llm-bridge", "models.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadUserModels(); err == nil {
+		t.Fatal("want an error for an unreadable file")
+	}
+}
+
+func TestModelsPathWithoutConfigDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+	if p := ModelsPath(); p != "" {
+		t.Errorf("ModelsPath() = %q, want empty", p)
+	}
+	if path, err := LoadUserModels(); path != "" || err != nil {
+		t.Errorf("LoadUserModels() = %q, %v", path, err)
 	}
 }

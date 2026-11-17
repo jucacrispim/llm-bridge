@@ -250,19 +250,50 @@ func TestAnthropicCacheBreakpointOnToolResult(t *testing.T) {
 }
 
 func TestAnthropicCacheBreakpointSkipsThinking(t *testing.T) {
-	messages := []anthropicMessage{{
-		Role: RoleAssistant,
-		Content: []anthropicBlock{
-			{Type: "thinking", Thinking: "hmm", Signature: "sig"},
-			{Type: "text", Text: "answer"},
+	cases := []struct {
+		name     string
+		messages []anthropicMessage
+		want     []bool
+	}{
+		{
+			name: "no messages",
 		},
-	}}
-	markMessageBreakpoint(messages)
-	if messages[0].Content[0].CacheControl != nil {
-		t.Error("thinking block carries the breakpoint")
+		{
+			name: "only thinking blocks",
+			messages: []anthropicMessage{{
+				Role: RoleAssistant,
+				Content: []anthropicBlock{
+					{Type: "thinking", Thinking: "hmm", Signature: "sig"},
+					{Type: "redacted_thinking", Data: "xyz"},
+				},
+			}},
+			want: []bool{false, false},
+		},
+		{
+			name: "thinking before text",
+			messages: []anthropicMessage{{
+				Role: RoleAssistant,
+				Content: []anthropicBlock{
+					{Type: "thinking", Thinking: "hmm", Signature: "sig"},
+					{Type: "text", Text: "answer"},
+				},
+			}},
+			want: []bool{false, true},
+		},
 	}
-	if messages[0].Content[1].CacheControl == nil {
-		t.Error("text block has no breakpoint")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			markMessageBreakpoint(tc.messages)
+			if len(tc.want) == 0 {
+				return
+			}
+			for i, want := range tc.want {
+				got := tc.messages[0].Content[i].CacheControl != nil
+				if got != want {
+					t.Errorf("block %d marked = %v, want %v", i, got, want)
+				}
+			}
+		})
 	}
 }
 

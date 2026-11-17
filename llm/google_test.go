@@ -838,3 +838,20 @@ func TestDownloadImage(t *testing.T) {
 		t.Error("expected error for unreachable host")
 	}
 }
+
+func TestGoogleStopReason(t *testing.T) {
+	cases := map[string]string{
+		"STOP":       StopEndTurn,
+		"MAX_TOKENS": StopMaxTokens,
+		// A stop the common vocabulary does not name goes out as it came, so
+		// the client can tell a safety block from a recitation block.
+		"SAFETY":     "SAFETY",
+		"RECITATION": "RECITATION",
+		"":           "",
+	}
+	for raw, want := range cases {
+		if got := googleStopReason(raw); got != want {
+			t.Errorf("googleStopReason(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

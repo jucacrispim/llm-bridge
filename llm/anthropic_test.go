@@ -474,3 +474,279 @@ func TestAnthropicStopReasons(t *testing.T) {
 
 // boolPtr is a small helper for the *bool thinking override.
 func boolPtr(v bool) *bool { return &v }
+
+func TestAnthropicSetters(t *testing.T) {
+	p := NewAnthropicProvider("key", "http://x", "claude-sonnet-5-5")
+
+	p.SetThinking(false)
+	if p.Thinking() {
+		t.Error("Thinking() = true after SetThinking(false)")
+	}
+	p.SetThinkingBudget(2048)
+	if p.ThinkingBudget() != 2048 {
+		t.Errorf("ThinkingBudget() = %d, want 2048", p.ThinkingBudget())
+	}
+	p.SetVersion("2030-01-01")
+	if p.Version() != "2030-01-01" {
+		t.Errorf("Version() = %q", p.Version())
+	}
+	p.SetMaxTokens(1024)
+	if p.MaxTokens() != 1024 {
+		t.Errorf("MaxTokens() = %d, want 1024", p.MaxTokens())
+	}
+	p.SetEffort("medium")
+	if p.Effort() != "medium" {
+		t.Errorf("Effort() = %q", p.Effort())
+	}
+
+	// An empty version and a non-positive max_tokens are ignored: both have a
+	// value the API accepts, and clearing either would make every request fail.
+	p.SetVersion("")
+	if p.Version() != "2030-01-01" {
+		t.Errorf("Version() = %q after an empty SetVersion", p.Version())
+	}
+	p.SetMaxTokens(0)
+	p.SetMaxTokens(-1)
+	if p.MaxTokens() != 1024 {
+		t.Errorf("MaxTokens() = %d after a non-positive value", p.MaxTokens())
+	}
+}
+
+func TestAnthropicModelOverride(t *testing.T) {
+	srv, lastBody := anthropicTestServer(t, nil)
+	p := NewAnthropicProvider("key", srv.URL, "claude-sonnet-5-5")
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Model:    "claude-opus-4-6",
+	}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(*lastBody, `"model":"claude-opus-4-6"`) {
+		t.Errorf("expected the per-request model, got %s", *lastBody)
+	}
+}
+
+func TestAnthropicConfiguredEffort(t *testing.T) {
+	srv, lastBody := anthropicTestServer(t, nil)
+	p := NewAnthropicProvider("key", srv.URL, "claude-sonnet-5-5")
+
+	// An effort set on the provider goes out when the request asks for no level.
+	p.SetEffort("medium")
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(*lastBody, `"output_config":{"effort":"medium"}`) {
+		t.Errorf("expected the configured effort, got %s", *lastBody)
+	}
+
+	// A per-request level wins over it.
+	level := ReasoningMax
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages:       []Message{{Role: RoleUser, Content: "hi"}},
+		ReasoningLevel: &level,
+	}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(*lastBody, `"output_config":{"effort":"max"}`) {
+		t.Errorf("expected the per-request effort, got %s", *lastBody)
+	}
+
+	// An empty effort stops sending the parameter.
+	p.SetEffort("")
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if strings.Contains(*lastBody, "output_config") {
+		t.Errorf("expected no output_config, got %s", *lastBody)
+	}
+}
+
+// TestAnthropicThinkingBudgetFloorAndMaxTokens checks the two numbers the API
+// constrains: budget_tokens has a floor, and max_tokens has to stay above it.
+func TestAnthropicThinkingBudgetFloorAndMaxTokens(t *testing.T) {
+	srv, lastBody := anthropicTestServer(t, nil)
+	p := NewAnthropicProvider("key", srv.URL, "claude-sonnet-5-5")
+
+	// Below the floor the budget is raised to it, and 1024 still fits under the
+	// default max_tokens.
+	p.SetThinkingBudget(100)
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(*lastBody, `"budget_tokens":1024`) {
+		t.Errorf("expected the budget raised to the floor, got %s", *lastBody)
+	}
+	if !strings.Contains(*lastBody, `"max_tokens":8192`) {
+		t.Errorf("expected the default max_tokens, got %s", *lastBody)
+	}
+
+	// A budget above max_tokens pushes max_tokens up, because the API requires
+	// the budget to be smaller.
+	p.SetThinkingBudget(20000)
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(*lastBody, `"max_tokens":28192`) {
+		t.Errorf("expected max_tokens raised above the budget, got %s", *lastBody)
+	}
+
+	// A per-request budget wins over the configured one.
+	p.SetThinkingBudget(2048)
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages:       []Message{{Role: RoleUser, Content: "hi"}},
+		ThinkingBudget: 4096,
+	}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !strings.Contains(*lastBody, `"budget_tokens":4096`) {
+		t.Errorf("expected the per-request budget, got %s", *lastBody)
+	}
+}
+
+func TestAnthropicToolJSON(t *testing.T) {
+	cases := map[string]string{
+		"":             "{}",
+		"   ":          "{}",
+		`{"path":"a"}`: `{"path":"a"}`,
+	}
+	for in, want := range cases {
+		if got := string(anthropicToolJSON(in)); got != want {
+			t.Errorf("anthropicToolJSON(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestAnthropicTextContent(t *testing.T) {
+	if got := string(anthropicTextContent("")); got != `""` {
+		t.Errorf(`anthropicTextContent("") = %s, want ""`, got)
+	}
+	// A result with quotes and newlines has to survive as a JSON string.
+	got := string(anthropicTextContent("a \"quoted\"\nline"))
+	var back string
+	if err := json.Unmarshal([]byte(got), &back); err != nil {
+		t.Fatalf("unmarshal %s: %v", got, err)
+	}
+	if back != "a \"quoted\"\nline" {
+		t.Errorf("round trip = %q", back)
+	}
+}
+
+func TestBuildAnthropicMessages(t *testing.T) {
+	p := NewAnthropicProvider("key", "http://x", "claude-sonnet-5-5")
+	msgs := p.buildAnthropicMessages([]Message{
+		{Role: RoleSystem},                       // dropped: no content
+		{Role: RoleSystem, Content: "sys"},       // a user text block
+		{Role: RoleUser},                         // dropped: nothing to send
+		{Role: RoleAssistant},                    // dropped: no blocks
+		{Role: RoleAssistant, Reasoning: "why"},  // a thinking block alone
+		{Role: RoleAssistant, Content: "answer"}, // a text block alone
+		{Role: RoleUser, Content: "go"},
+		// The previous message is a user one but not a tool result, so this
+		// starts a message of its own, and the next one joins it.
+		{Role: "tool", Content: "r1", ToolCallID: "t1"},
+		{Role: "tool", Content: "r2", ToolCallID: "t2"},
+	})
+	if len(msgs) != 5 {
+		t.Fatalf("got %d messages, want 5: %+v", len(msgs), msgs)
+	}
+	if msgs[0].Role != RoleUser || msgs[0].Content[0].Text != "sys" {
+		t.Errorf("system message = %+v", msgs[0])
+	}
+	if msgs[1].Role != RoleAssistant || len(msgs[1].Content) != 1 ||
+		msgs[1].Content[0].Type != "thinking" || msgs[1].Content[0].Thinking != "why" {
+		t.Errorf("thinking message = %+v", msgs[1])
+	}
+	if msgs[2].Role != RoleAssistant || len(msgs[2].Content) != 1 ||
+		msgs[2].Content[0].Type != "text" || msgs[2].Content[0].Text != "answer" {
+		t.Errorf("text message = %+v", msgs[2])
+	}
+	if msgs[3].Role != RoleUser || msgs[3].Content[0].Text != "go" {
+		t.Errorf("user message = %+v", msgs[3])
+	}
+	if len(msgs[4].Content) != 2 {
+		t.Fatalf("tool results = %+v, want two blocks", msgs[4])
+	}
+	for i, want := range []string{"t1", "t2"} {
+		if msgs[4].Content[i].ToolUseID != want {
+			t.Errorf("tool_result %d = %+v", i, msgs[4].Content[i])
+		}
+	}
+
+	// A message with no blocks at all is not a tool result message, and it is
+	// what keeps the grouping above from appending into the wrong message.
+	if isToolResultMessage(anthropicMessage{}) {
+		t.Error("an empty message reported as a tool result message")
+	}
+}
+
+// TestAnthropicStreamEdgeCases feeds the shapes a real stream may carry around
+// the useful events: a comment line, an empty payload, an event that is not
+// JSON, and the deltas the provider has to tolerate without a block of its own.
+func TestAnthropicStreamEdgeCases(t *testing.T) {
+	srv, _ := anthropicTestServer(t, []string{
+		`event: ping`,
+		`data: `,
+		`data: [DONE]`,
+		`data: not-json`,
+		`data: {"type":"message_start","message":null}`,
+		`data: {"type":"content_block_start","index":0}`,
+		`data: {"type":"content_block_delta","index":0}`,
+		`data: {"type":"content_block_delta","index":5,"delta":{"type":"text_delta","text":"hi"}}`,
+		`data: {"type":"content_block_delta","index":5,"delta":{"type":"thinking_delta","thinking":""}}`,
+		`data: {"type":"content_block_delta","index":6,"delta":{"type":"signature_delta","signature":"sg"}}`,
+		`data: {"type":"message_delta"}`,
+		`data: {"type":"message_delta","usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens":7}}`,
+		`data: {"type":"message_stop"}`,
+	})
+	p := NewAnthropicProvider("key", srv.URL, "claude-sonnet-5-5")
+
+	// A nil onChunk is allowed: the content still accumulates.
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Content != "hi" {
+		t.Errorf("Content = %q, want hi", resp.Content)
+	}
+	if resp.Reasoning != "" || resp.Signature != "" {
+		t.Errorf("Reasoning = %q Signature = %q, want both empty", resp.Reasoning, resp.Signature)
+	}
+	if resp.StopReason != StopEndTurn {
+		t.Errorf("StopReason = %q, want end_turn without a stop_reason", resp.StopReason)
+	}
+	if resp.Model != "claude-sonnet-5-5" {
+		t.Errorf("Model = %q, want the requested model", resp.Model)
+	}
+	// No message_start usage: the merge starts from zero, and every counter of
+	// the message_delta is taken as it came. The input and both cache counters
+	// were all billed as prompt tokens.
+	if resp.Usage == nil || resp.Usage.CompletionTokens != 7 ||
+		resp.Usage.PromptTokens != 35 || resp.Usage.CachedTokens != 20 {
+		t.Errorf("Usage = %+v, want completion=7 prompt=35 cached=20", resp.Usage)
+	}
+}
+
+// TestAnthropicErrorWithoutBody checks the error event with no error object is
+// still an error, not a silent end of stream.
+func TestAnthropicErrorWithoutBody(t *testing.T) {
+	srv, _ := anthropicTestServer(t, []string{
+		`data: {"type":"error"}`,
+	})
+	p := NewAnthropicProvider("key", srv.URL, "claude-sonnet-5-5")
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "anthropic api error") {
+		t.Fatalf("expected an api error, got %v", err)
+	}
+}

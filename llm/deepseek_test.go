@@ -993,3 +993,37 @@ func TestChatStreamingCapturesReasoning(t *testing.T) {
 		t.Fatalf("unexpected reasoning chunks: %#v", reasoningChunks)
 	}
 }
+
+func TestDeepSeekEffort(t *testing.T) {
+	cases := map[ReasoningLevel]string{
+		ReasoningLow:    "low",
+		ReasoningMedium: "medium",
+		ReasoningHigh:   "high",
+		// The API lists three values only, so the two levels above high go out
+		// as high instead of being rejected.
+		ReasoningXHigh:          "high",
+		ReasoningMax:            "high",
+		ReasoningLevel(""):      "",
+		ReasoningLevel("turbo"): "",
+	}
+	for level, want := range cases {
+		if got := deepseekEffort(level); got != want {
+			t.Errorf("deepseekEffort(%q) = %q, want %q", level, got, want)
+		}
+	}
+}
+
+func TestDeepSeekStopReason(t *testing.T) {
+	cases := map[string]string{
+		"stop":           StopEndTurn,
+		"tool_calls":     StopToolUse,
+		"length":         StopMaxTokens,
+		"":               "",
+		"content_filter": "content_filter",
+	}
+	for raw, want := range cases {
+		if got := deepseekStopReason(raw); got != want {
+			t.Errorf("deepseekStopReason(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}

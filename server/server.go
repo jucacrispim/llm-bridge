@@ -20,7 +20,6 @@ package server
 import (
 	"bufio"
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,17 +41,6 @@ import (
 	"llm-bridge/sandbox"
 	"llm-bridge/tools"
 )
-
-//go:embed system_prompt.md
-var systemPromptFS embed.FS
-
-var defaultSystemPrompt = func() string {
-	b, err := systemPromptFS.ReadFile("system_prompt.md")
-	if err != nil {
-		panic(fmt.Sprintf("failed to read embedded system_prompt.md: %v", err))
-	}
-	return strings.TrimSpace(string(b))
-}()
 
 // Sandboxes groups the sandboxes the server uses: Tools for the external
 // processes (shell, grep, hooks), Curl for the curl tool, which alone has
@@ -179,7 +167,7 @@ func (st *state) activeProvider() llm.LLMProvider {
 }
 
 // effectiveSystem returns the system prompt of the request: override, server
-// prompt, then the embedded default.
+// prompt, then the prompt of the model in use.
 func (st *state) effectiveSystem() string {
 	if st.systemOverride != "" {
 		return st.systemOverride
@@ -187,7 +175,13 @@ func (st *state) effectiveSystem() string {
 	if st.systemPrompt != "" {
 		return st.systemPrompt
 	}
-	return defaultSystemPrompt
+	model := st.modelOverride
+	if model == "" {
+		if p := st.activeProvider(); p != nil {
+			model = p.Model()
+		}
+	}
+	return modelPrompt(st.providerName, model)
 }
 
 // appendUser appends a user message to the shared conversation history.

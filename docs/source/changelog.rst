@@ -22,6 +22,13 @@ Added
   ``~/.config/llm-bridge/models.json`` to replace it without a rebuild. The
   file replaces the embedded data as a whole, and an invalid one is logged and
   ignored. The format is in :ref:`providers-context-window`.
+- **System prompts per model.** The embedded prompt moved from
+  ``server/system_prompt.md`` to ``server/prompts/default.md``, and a file named
+  after a model, a model prefix or a provider replaces it for those models. A
+  model prompt can hold ``{{base}}`` to include the default. Files in
+  ``~/.config/llm-bridge/prompts/`` win over the embedded ones and are read on
+  every request. The ``system`` field and ``-system-prompt`` still win over
+  both. The lookup is in :ref:`providers-system-prompts`.
 - **Anthropic requests ask for prompt caching.** Three ``cache_control``
   breakpoints go out on every request: the last tool of the list, the system
   prompt and the last block of the last message. The tool breakpoint caches the

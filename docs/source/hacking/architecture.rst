@@ -21,8 +21,8 @@ The bridge is organized into focused packages:
     The core. Contains the ``state`` struct, ``handleLine`` (one command per
     line), ``runToolCycle`` (the tool-calling loop), ``cancelTurn``, the
     ``run`` entry point and the helpers that mutate the shared conversation
-    state. Holds the embedded default system prompt (``system_prompt.md`` via
-    ``//go:embed``).
+    state. Picks the system prompt of each request from
+    ``server/prompts/`` (``//go:embed``), see :doc:`providers`.
 
 ``llm``
     Provider abstraction. Defines the ``LLMProvider`` interface (``Chat``,

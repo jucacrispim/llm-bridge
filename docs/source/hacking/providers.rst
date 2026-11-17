@@ -330,3 +330,47 @@ replaces the embedded file as a whole, so start from a copy of
 
 If the file is invalid the bridge logs ``models file ignored`` and keeps the
 embedded data. The file is read once at startup.
+
+.. _providers-system-prompts:
+
+System prompts
+--------------
+
+Each model can have its own system prompt. The prompts are markdown files in
+``server/prompts/``, embedded in the binary. ``default.md`` is the one every
+model gets unless a more specific file exists. The bridge picks the file on
+each request, so a model override changes the prompt too.
+
+The name of the file is matched in this order:
+
+1. The longest file name that is a prefix of the model id.
+2. The name of the provider.
+3. ``default``.
+
+So, with these files:
+
+.. code-block:: sh
+
+   $ ls ~/.config/llm-bridge/prompts
+   claude.md  claude-opus.md  deepseek.md  default.md
+
+``claude-opus-5-5`` gets ``claude-opus.md``, ``claude-sonnet-5`` gets
+``claude.md`` and ``deepseek-flash`` gets ``deepseek.md``. A model that matches
+nothing gets ``default.md``.
+
+A model prompt replaces the default as a whole. To keep the default and add to
+it, put ``{{base}}`` where the default text should go:
+
+.. code-block:: text
+
+   {{base}}
+
+   Answer without a preamble.
+
+To change a prompt without a rebuild, save a file in
+``~/.config/llm-bridge/prompts/`` (``$XDG_CONFIG_HOME`` is honored). A file
+there wins over the embedded one with the same name, and a new name adds a
+prompt. The files are read on every request, so there is no need to restart.
+
+The ``system`` field of a prompt and the ``-system-prompt`` flag win over all of
+this, in that order.

@@ -54,6 +54,16 @@ Breaking changes
 Changed
 ~~~~~~~
 
+- **Anthropic is a provider.** ``--provider anthropic`` (or a prompt's
+  ``provider: "anthropic"``) talks to ``POST /v1/messages`` with streaming: the
+  API key in ``x-api-key``, the fixed ``anthropic-version`` header, and the
+  ``max_tokens`` the API requires. Model defaults to ``claude-sonnet-5-5``,
+  ``max_tokens`` to ``8192``. The provider maps the three shapes this API has
+  that the others do not: an assistant message is a list of content blocks
+  (thinking, text, ``tool_use``), a tool result is a ``tool_result`` block
+  inside a user message with the consecutive results sharing one message, and
+  thinking is ``adaptive`` by default or ``enabled`` with a
+  ``thinking.budget_tokens``. ``output_config.effort`` carries the level.
 - **The provider interface carries only what providers have in common.**
   ``ToolCall.ThoughtSignature`` became ``ToolCall.Signature``, and a matching
   ``Message.Signature`` covers the advice Anthropic signs instead (it rejects a

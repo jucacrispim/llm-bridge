@@ -44,6 +44,27 @@ var contextWindows = map[string]int{
 	// Gemma (open models): 128K..256K depending on the variant; take the
 	// conservative lower bound.
 	"gemma-4": 128_000,
+
+	// Anthropic Claude: 1M from the 4.6 generation on, 200K before it. A dated
+	// snapshot matches its family by prefix.
+	"claude-fable-5-2":  1_000_000,
+	"claude-fable-5-1":  1_000_000,
+	"claude-fable-5":    1_000_000,
+	"claude-mythos-5-2": 1_000_000,
+	"claude-mythos-5-1": 1_000_000,
+	"claude-mythos-5":   1_000_000,
+	"claude-opus-5-5":   1_000_000,
+	"claude-opus-5":     1_000_000,
+	"claude-opus-4-8":   1_000_000,
+	"claude-opus-4-7":   1_000_000,
+	"claude-opus-4-6":   1_000_000,
+	"claude-opus-4-5":   200_000,
+	"claude-sonnet-5-5": 1_000_000,
+	"claude-sonnet-5":   1_000_000,
+	"claude-sonnet-4-6": 1_000_000,
+	"claude-sonnet-4-5": 200_000,
+	"claude-haiku-5-5":  1_000_000,
+	"claude-haiku-4-5":  200_000,
 }
 
 // ContextWindow returns the token window of a model and whether it is known:

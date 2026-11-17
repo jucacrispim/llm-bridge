@@ -38,10 +38,10 @@ import (
 const defaultLogFile = "/tmp/llm-bridge.log"
 
 func main() {
-	providerName := flag.String("provider", "deepseek", "LLM provider: 'deepseek' or 'google' (Gemini AI Studio)")
-	modelName := flag.String("model", "", "model to use (overrides DEEPSEEK_MODEL / GOOGLE_MODEL)")
-	thinking := flag.Bool("thinking", true, "enable thinking mode (uses deepseek-flash when no explicit model and provider deepseek; pass -thinking=false to disable). For deepseek defaults to DEEPSEEK_THINKING, for google GOOGLE_THINKING")
-	reasoningEffort := flag.String("reasoning-effort", "", "reasoning_effort sent when thinking is on for deepseek (e.g. low/medium/high; default \"high\"); for google, a numeric thinkingConfig.thinkingBudget")
+	providerName := flag.String("provider", "deepseek", "LLM provider: 'deepseek', 'google' (Gemini AI Studio) or 'anthropic' (Claude)")
+	modelName := flag.String("model", "", "model to use (overrides DEEPSEEK_MODEL / GOOGLE_MODEL / ANTHROPIC_MODEL)")
+	thinking := flag.Bool("thinking", true, "enable thinking mode (uses deepseek-flash when no explicit model and provider deepseek; pass -thinking=false to disable). For deepseek defaults to DEEPSEEK_THINKING, for google GOOGLE_THINKING, for anthropic ANTHROPIC_THINKING")
+	reasoningEffort := flag.String("reasoning-effort", "", "reasoning effort sent when thinking is on: for deepseek a level (low/medium/high), for anthropic a level (low/medium/high/xhigh/max) or a numeric thinking budget, for google a numeric thinkingConfig.thinkingBudget")
 	debug := flag.Bool("debug", false, "enable debug logging to the default log file (kept for compatibility)")
 	logFile := flag.String("logfile", "", "path of the log file; if set, all logs go there instead of stdout. Empty (the default) disables logging so the JSON-lines protocol on stdout stays clean")
 	systemPromptFlag := flag.String("system-prompt", "", "path to a file containing the system prompt (or literal system prompt string)")
@@ -80,8 +80,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *providerName != "deepseek" && *providerName != "google" {
-		fmt.Fprintf(os.Stderr, "unsupported provider: %s (supported: deepseek, google)\n", *providerName)
+	if *providerName != "deepseek" && *providerName != "google" && *providerName != "anthropic" {
+		fmt.Fprintf(os.Stderr, "unsupported provider: %s (supported: deepseek, google, anthropic)\n", *providerName)
 		os.Exit(1)
 	}
 
@@ -177,6 +177,44 @@ func main() {
 			gp.SetThinkingBudget(llm.ParseBudget(env, gp.ThinkingBudget()))
 		}
 		providers["google"] = gp
+	}
+
+	// anthropic provider (Claude).
+	{
+		// Resolve the model: an explicit --model flag (when anthropic is the
+		// default) wins, then ANTHROPIC_MODEL, then the claude default. The
+		// thinking mode comes from ANTHROPIC_THINKING / the --thinking flag, and
+		// max_tokens from ANTHROPIC_MAX_TOKENS (the API requires the field).
+		apiKey := os.Getenv("ANTHROPIC_API_KEY")
+		endpoint := os.Getenv("ANTHROPIC_URL")
+		model := ""
+		if *providerName == "anthropic" {
+			model = *modelName
+		}
+		if model == "" {
+			model = os.Getenv("ANTHROPIC_MODEL")
+		}
+		ap := llm.NewAnthropicProviderWithThinking(apiKey, endpoint, model, *thinking)
+		if version := os.Getenv("ANTHROPIC_VERSION"); version != "" {
+			ap.SetVersion(version)
+		}
+		if maxTokens := os.Getenv("ANTHROPIC_MAX_TOKENS"); maxTokens != "" {
+			ap.SetMaxTokens(llm.ParseBudget(maxTokens, ap.MaxTokens()))
+		}
+		// A number is a thinking budget, a word is the default effort. The
+		// --reasoning-effort flag wins over the environment.
+		effort := *reasoningEffort
+		if effort == "" {
+			effort = os.Getenv("ANTHROPIC_THINKING_BUDGET")
+		}
+		if effort != "" {
+			if budget := llm.ParseBudget(effort, -1); budget >= 0 {
+				ap.SetThinkingBudget(budget)
+			} else if llm.ValidReasoningLevel(effort) {
+				ap.SetEffort(effort)
+			}
+		}
+		providers["anthropic"] = ap
 	}
 
 	systemPrompt := ""

@@ -14,9 +14,10 @@ The bridge sits between your client and the provider and gives you one stable
 surface. A plain provider SDK gives you one per provider:
 
 - **Unified API across providers.** ``prompt``, ``tool_confirm``, ``cancel`` and
-  the rest mean the same thing whether the active provider is **DeepSeek** or
-  **Google/Gemini**. The bridge translates the request format, the streaming
-  style, the authentication and the thinking mode for each one.
+  the rest mean the same thing whether the active provider is **DeepSeek**,
+  **Google/Gemini** or **Anthropic/Claude**. The bridge translates the request
+  format, the streaming style, the authentication and the thinking mode for each
+  one.
 - **Tools executed by the bridge.** The models already know how to call tools.
   The bridge advertises the tool schemas and runs the tools itself: ``read``,
   ``write``, ``search_replace``, ``grep``, ``glob``, ``shell`` and ``curl``.
@@ -27,11 +28,11 @@ surface. A plain provider SDK gives you one per provider:
   ``url`` (passed through to the provider) or by ``data`` (inline base64, what a
   clipboard paste sends). The bridge converts it to the provider's format: an
   ``image_url`` content part for DeepSeek, an inline or ``fileData`` part for
-  Gemini.
-- **Provider switching per request.** Both **DeepSeek** and **Google/Gemini**
-  are registered up front. A prompt can switch the provider, the model, the
-  thinking mode, the reasoning effort or the system prompt, and the override
-  persists across the following prompts.
+  Gemini, an ``image`` block with a base64 or URL source for Claude.
+- **Provider switching per request.** **DeepSeek**, **Google/Gemini** and
+  **Anthropic/Claude** are registered up front. A prompt can switch the
+  provider, the model, the thinking mode, the reasoning effort or the system
+  prompt, and the override persists across the following prompts.
 - **Hooks.** A message starting with ``#`` runs a local script instead of the
   LLM, which is handy for project commands. See :doc:`hooks`.
 - **Context and knowledge base.** Markdown context is injected into the

@@ -1,8 +1,8 @@
 Providers
 =========
 
-The bridge supports two LLM providers: **DeepSeek** and **Google/Gemini**.
-Both implement the same ``llm.LLMProvider`` interface:
+The bridge supports three LLM providers: **DeepSeek**, **Google/Gemini** and
+**Anthropic/Claude**. All implement the same ``llm.LLMProvider`` interface:
 
 .. code-block:: go
 
@@ -13,9 +13,10 @@ Both implement the same ``llm.LLMProvider`` interface:
    }
 
 The active provider is selected at startup with ``--provider``
-(``deepseek`` or ``google``). Because both providers are registered up front,
-a single prompt can switch the active provider (and its model, thinking mode,
-reasoning effort or system prompt) through the per-request overrides described
+(``deepseek``, ``google`` or ``anthropic``). Because all providers are
+registered up front, a single prompt can switch the active provider (and its
+model, thinking mode, reasoning effort or system prompt) through the per-request
+overrides described
 in :doc:`/protocol`. An override persists across subsequent prompts.
 
 The shared request/response types (``llm/interface.go``) are:
@@ -45,17 +46,18 @@ once, in provider-neutral words:
     The effort is asked for either as a level (``low``, ``medium``, ``high``,
     ``xhigh``, ``max``) or as a token budget. A provider maps whichever it
     understands and ignores the other: DeepSeek sends the level as
-    ``reasoning_effort`` and Gemini turns it into a ``thinkingBudget``. ``protocol`` still takes one string and the
+    ``reasoning_effort``, Gemini turns it into a ``thinkingBudget``, Anthropic
+    sends the level as ``output_config.effort`` and the budget as
+    ``thinking.budget_tokens``. ``protocol`` still takes one string and the
     server splits it (``parseReasoningEffort``): a word becomes a level and a
     number becomes a budget.
 
 ``Signature``
     Some providers prove the chain-of-thought came from them and refuse a
     replayed history without the proof. Gemini signs the function call, so the
-    proof lives in ``ToolCall.Signature``; a provider that signs the thinking
-    block instead puts it in ``Message.Signature``. DeepSeek signs nothing. The
-    bridge stores it next to the reasoning it belongs to and echoes it back
-    unchanged.
+    proof lives in ``ToolCall.Signature``. Anthropic signs the thinking block,
+    so it lives in ``Message.Signature``. DeepSeek signs nothing. The bridge
+    stores it next to the reasoning it belongs to and echoes it back unchanged.
 
 ``Usage.CachedTokens``
     The one cache counter: prompt tokens a provider served from its cache, with
@@ -192,6 +194,63 @@ Environment variables
     ``GOOGLE_THINKING`` (default ``true``) and ``GOOGLE_THINKING_BUDGET``
     (default ``1024``).
 
+Anthropic / Claude
+------------------
+
+Implemented in ``llm/anthropic.go``. The provider calls ``POST /v1/messages``
+with ``stream: true`` and sends the API key in ``x-api-key`` plus the fixed
+``anthropic-version`` header (``2026-10-21`` unless ``ANTHROPIC_VERSION`` says
+otherwise).
+
+Model and ``max_tokens``
+    Per-request model → provider model (``--model`` when anthropic is the
+    default, then ``ANTHROPIC_MODEL``, then ``claude-sonnet-5-5``).
+    ``max_tokens`` is required by the API and defaults to ``8192``
+    (``ANTHROPIC_MAX_TOKENS``). The provider raises it above the reasoning
+    budget when the budget would not fit under it.
+
+Thinking (``effectiveThinkingConfig``)
+    Three shapes, and which one you get depends on whether a budget was asked
+    for:
+
+    - **off** → ``{"type": "disabled"}``.
+    - **on, no budget** → ``{"type": "adaptive", "display": "summarized"}``, so
+      the model decides how much to think.
+    - **on, with a budget** → ``{"type": "enabled", "budget_tokens": N,
+      "display": "summarized"}``. The API takes 1024 at the lowest, and the
+      budget has to stay under ``max_tokens``.
+
+Effort (``effectiveEffort``)
+    Sent as ``output_config.effort``. Anthropic knows the whole common scale
+    (``low``, ``medium``, ``high``, ``xhigh``, ``max``), so the level goes out
+    as it came.
+
+Messages are blocks
+    An assistant message is a list of content blocks: the ``thinking`` block
+    first (with its signature), then the text, then one ``tool_use`` per call.
+    A tool result is not a message of its own: it is a ``tool_result`` block
+    inside a user message, and the consecutive results of one assistant message
+    share a single user message. Images go as ``image`` blocks, either
+    ``source.type: "base64"`` with the bytes or ``source.type: "url"``.
+
+Thinking signatures
+    Claude signs the thinking block. The signature comes back in a
+    ``signature_delta`` event, is kept in ``Message.Signature``, and has to go
+    back unmodified and in the original position, or the API answers 400 with
+    ``invalid_request_error``.
+
+Usage
+    ``input_tokens``, ``cache_read_input_tokens`` and
+    ``cache_creation_input_tokens`` are all prompt tokens, so all three are
+    summed into ``PromptTokens``. ``CachedTokens`` is the cache read part.
+
+Environment variables
+    ``ANTHROPIC_API_KEY`` (required), ``ANTHROPIC_URL`` (default
+    ``https://api.anthropic.com/v1/messages``), ``ANTHROPIC_VERSION``,
+    ``ANTHROPIC_MODEL``, ``ANTHROPIC_MAX_TOKENS``, ``ANTHROPIC_THINKING``
+    (default ``true``) and ``ANTHROPIC_THINKING_BUDGET``. A budget selects
+    manual extended thinking; leaving it unset keeps adaptive thinking.
+
 .. _providers-context-window:
 
 Context window
@@ -226,3 +285,9 @@ guessed window.
      - 2,000,000
    * - ``gemma-4``
      - 128,000
+   * - ``claude-sonnet-5-5``, ``claude-opus-5-5``, ``claude-haiku-5-5``
+     - 1,000,000
+   * - ``claude-opus-4-6``, ``claude-sonnet-4-6``, ``claude-opus-4-7``, ``claude-opus-4-8``
+     - 1,000,000
+   * - ``claude-sonnet-4-5``, ``claude-opus-4-5``, ``claude-haiku-4-5``
+     - 200,000

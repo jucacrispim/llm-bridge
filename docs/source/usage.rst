@@ -3,7 +3,7 @@ Usage
 
 .. note::
 
-   Only deepseek and google gemini are providers today.
+   deepseek, google gemini and anthropic claude are the providers today.
 
 This page covers how you run the bridge and every way of calling it: as a stdio
 subprocess, through its CLI flags, through prompts and hooks, and in the
@@ -86,14 +86,14 @@ CLI flags
 ---------
 
 ``--provider <name>``
-    The default provider: ``deepseek`` (default) or ``google``. Both are
-    registered up front, so a prompt can still switch provider with the
-    ``provider`` override.
+    The default provider: ``deepseek`` (default), ``google`` or ``anthropic``.
+    All of them are registered up front, so a prompt can still switch provider
+    with the ``provider`` override.
 
 ``--model <name>``
     Force a model. For the default provider it overrides ``DEEPSEEK_MODEL`` /
-    ``GOOGLE_MODEL``. DeepSeek with no explicit model derives it from the
-    thinking mode (``deepseek-flash`` / ``deepseek-chat``).
+    ``GOOGLE_MODEL`` / ``ANTHROPIC_MODEL``. DeepSeek with no explicit model
+    derives it from the thinking mode (``deepseek-flash`` / ``deepseek-chat``).
 
 ``--thinking[=true|false]``
     Enable or disable thinking mode (default ``true``). On DeepSeek with no
@@ -101,8 +101,11 @@ CLI flags
     with ``thinking``.
 
 ``--reasoning-effort <value>``
-    When thinking is on: a reasoning effort for DeepSeek (``low``, ``medium``,
-    ``high``, default ``high``) or a numeric thinking budget for Google.
+    When thinking is on: a level (``low``, ``medium``, ``high``, and on Anthropic
+    also ``xhigh`` and ``max``) or a numeric thinking budget. DeepSeek takes the
+    level as ``reasoning_effort``, Google turns it into a ``thinkingBudget``,
+    and Anthropic sends it as ``output_config.effort`` or
+    ``thinking.budget_tokens``.
 
 ``--system-prompt <path-or-text>``
     Override the system prompt. When the value is the path of an existing file,
@@ -326,6 +329,16 @@ Export these before you start the bridge.
 * ``GEMINI_MODEL`` - alternative explicit model, used when ``GOOGLE_MODEL`` is unset.
 * ``GOOGLE_THINKING`` - enable thinking mode (default ``true``).
 * ``GOOGLE_THINKING_BUDGET`` - thinking token budget when thinking is on (default ``1024``).
+
+**Anthropic / Claude**
+
+* ``ANTHROPIC_API_KEY`` - API key (required).
+* ``ANTHROPIC_URL`` - API endpoint (default ``https://api.anthropic.com/v1/messages``).
+* ``ANTHROPIC_MODEL`` - Explicit model (default ``claude-sonnet-5-5``).
+* ``ANTHROPIC_VERSION`` - the ``anthropic-version`` header value (default ``2026-10-21``).
+* ``ANTHROPIC_MAX_TOKENS`` - ``max_tokens``, which the API requires (default ``8192``).
+* ``ANTHROPIC_THINKING`` - enable thinking mode (default ``true``).
+* ``ANTHROPIC_THINKING_BUDGET`` - a token budget selects manual extended thinking; leaving it unset keeps adaptive thinking.
 
 **Knowledge base**
 

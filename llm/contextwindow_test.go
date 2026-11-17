@@ -41,6 +41,13 @@ func TestContextWindowExact(t *testing.T) {
 		{"gemini-1.5-flash", 1_000_000},
 		// Gemma (open models): conservative lower bound of the 128K..256K range.
 		{"gemma-4", 128_000},
+		// Anthropic Claude: one window for the current lineup, 200K for the
+		// generation before it.
+		{"claude-sonnet-5-5", 1_000_000},
+		{"claude-opus-4-6", 1_000_000},
+		{"claude-sonnet-4-5", 200_000},
+		{"claude-haiku-4-5", 200_000},
+		{"gemma-4", 128_000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {
@@ -66,6 +73,8 @@ func TestContextWindowPrefix(t *testing.T) {
 		{"gemini-1.5-pro-latest", 2_000_000},
 		{"deepseek-v4-flash-preview", 1_000_000},
 		{"gemma-4-27b", 128_000},
+		{"claude-opus-4-5-20251101", 200_000},
+		{"claude-haiku-5-5-latest", 1_000_000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {

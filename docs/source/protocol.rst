@@ -49,7 +49,7 @@ Every command has the shape:
 
     - ``model`` - force a model.
     - ``provider`` - switch the active LLM provider (``"deepseek"`` /
-      ``"google"``).
+      ``"google"`` / ``"anthropic"``).
     - ``thinking`` - enable or disable thinking mode.
     - ``reasoning_effort`` - the reasoning effort, as one word on the common
       scale (``low``, ``medium``, ``high``, ``xhigh``, ``max``) or as a number of

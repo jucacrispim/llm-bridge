@@ -77,10 +77,25 @@ Changed
   also ran late (after the ``caged`` probes and the ``llm-tools`` handshake),
   which made the message look like a sandbox problem; ``flag`` rejects it while
   parsing, before anything is validated.
+- ``scripts/sandbox-e2e.sh`` measures the namespaces against the real ``caged``
+  binary, and ``TestFunctionalToolNamespaces`` covers the same ground from Go:
+  the private ``/tmp`` and ``/dev/shm``, the temp variables, a server and a
+  client in one call, loopback as the only interface, ``ENETUNREACH`` on an
+  external address and ``-sandbox-tmp`` exchanging a file with the host. The
+  test builds its sandbox through ``sandboxConfig.validate`` and ``toolSandbox``,
+  so it measures the policy the bridge uses. The script exits non-zero on a
+  skipped functional test, because a skip on a machine that cannot create a user
+  namespace says nothing about the policy.
 
 Fixed
 ~~~~~
 
+- **The tools can read ``/dev/zero``.** The tool policy granted ``/dev/urandom``
+  read-only and ``/dev/null`` writable, and stopped there, so every ``dd
+  if=/dev/zero``, ``head -c 1M /dev/zero`` or ``mkfs`` aimed at a file under the
+  private ``/tmp`` died with ``EACCES`` on the input. The device hands out zeros,
+  so there is nothing of the host in it. It is now in the read-only list next to
+  ``/dev/urandom``.
 - **The ``shell`` risk label no longer fires on ordinary commands.** The
   markers in ``tools.Risk`` were matched as plain substrings, and most of them
   are two or three letters long: ``nc `` matched inside ``func `` and ``sync ``,

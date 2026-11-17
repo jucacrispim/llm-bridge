@@ -175,7 +175,10 @@ Here is what the bridge spawns and the policy each one gets.
   tools and the hooks) runs under caged with the system trees, the
   knowledge-base locations (``~/.cache/llm-bridge`` read-only,
   ``~/.local/share/llm-bridge`` and ``~/.llm-bridge`` writable) and whatever
-  ``-sandbox-ro`` and ``-sandbox-rw`` added.
+  ``-sandbox-ro`` and ``-sandbox-rw`` added. Of ``/dev``, the policy grants
+  ``/dev/null`` writable (a child with no stdin gets it) and ``/dev/zero`` and
+  ``/dev/urandom`` readable, so ``dd if=/dev/zero`` and programs that draw
+  randomness work.
 
   ``~/.llm-bridge`` is created on startup if it does not exist. The tools get it
   writable so a hook can be added and the context files edited from a tool call,

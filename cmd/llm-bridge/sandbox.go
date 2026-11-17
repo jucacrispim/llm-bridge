@@ -169,8 +169,10 @@ func existing(paths []string) []string {
 func (c *sandboxConfig) toolPaths() (ro, rw []string) {
 	home, _ := os.UserHomeDir()
 	ro = append([]string{}, systemReadOnly...)
-	// Reading a character device needs only read access.
-	ro = append(ro, "/dev/urandom")
+	// Reading a character device needs only read access. /dev/zero is how a
+	// tool writes a file of a fixed size: the device hands out zeros, so there
+	// is nothing of the host in it.
+	ro = append(ro, "/dev/urandom", "/dev/zero")
 	if home != "" {
 		// KB assets (ONNX model, tokenizer, libonnxruntime).
 		ro = append(ro, filepath.Join(home, ".cache", "llm-bridge"))

@@ -3,7 +3,7 @@ Usage
 
 .. note::
 
-   deepseek, google gemini and anthropic claude are the providers today.
+   deepseek, google gemini, anthropic claude and openai are the providers today.
 
 This page covers how you run the bridge and every way of calling it: as a stdio
 subprocess, through its CLI flags, through prompts and hooks, and in the
@@ -88,14 +88,16 @@ CLI flags
 ---------
 
 ``--provider <name>``
-    The default provider: ``deepseek`` (default), ``google`` or ``anthropic``.
+    The default provider: ``deepseek`` (default), ``google``, ``anthropic`` or
+    ``openai``.
     All of them are registered up front, so a prompt can still switch provider
     with the ``provider`` override.
 
 ``--model <name>``
     Force a model. For the default provider it overrides ``DEEPSEEK_MODEL`` /
-    ``GOOGLE_MODEL`` / ``ANTHROPIC_MODEL``. DeepSeek with no explicit model
-    derives it from the thinking mode (``deepseek-flash`` / ``deepseek-chat``).
+    ``GOOGLE_MODEL`` / ``ANTHROPIC_MODEL`` / ``OPENAI_MODEL``. DeepSeek with no
+    explicit model derives it from the thinking mode (``deepseek-flash`` /
+    ``deepseek-chat``).
 
 ``--thinking[=true|false]``
     Enable or disable thinking mode (default ``true``). On DeepSeek with no
@@ -104,10 +106,11 @@ CLI flags
 
 ``--reasoning-effort <value>``
     When thinking is on: a level (``low``, ``medium``, ``high``, and on Anthropic
-    also ``xhigh`` and ``max``) or a numeric thinking budget. DeepSeek takes the
-    level as ``reasoning_effort``, Google turns it into a ``thinkingBudget``,
-    and Anthropic sends it as ``output_config.effort`` or
-    ``thinking.budget_tokens``.
+    and OpenAI also ``xhigh`` and ``max``) or a numeric thinking budget. DeepSeek
+    takes the level as ``reasoning_effort``, Google turns it into a
+    ``thinkingBudget``, and Anthropic sends it as ``output_config.effort`` or
+    ``thinking.budget_tokens``. OpenAI has no numeric budget, so there a number
+    is ignored.
 
 ``--system-prompt <path-or-text>``
     Override the system prompt. When the value is the path of an existing file,
@@ -341,6 +344,16 @@ Export these before you start the bridge.
 * ``ANTHROPIC_MAX_TOKENS`` - ``max_tokens``, which the API requires (default ``8192``).
 * ``ANTHROPIC_THINKING`` - enable thinking mode (default ``true``).
 * ``ANTHROPIC_THINKING_BUDGET`` - a token budget selects manual extended thinking; leaving it unset keeps adaptive thinking.
+
+**OpenAI**
+
+* ``OPENAI_API_KEY`` - API key (required).
+* ``OPENAI_URL`` - API endpoint (default ``https://api.openai.com/v1/responses``).
+* ``OPENAI_MODEL`` - Explicit model (default ``gpt-6.2-sol``).
+* ``OPENAI_THINKING`` - enable thinking mode (default ``true``).
+* ``OPENAI_REASONING_EFFORT`` - reasoning effort when thinking is on (default ``medium``).
+* ``OPENAI_REASONING_SUMMARY`` - ``auto`` makes the reasoning text come back as ``thinking``. Unset keeps it off, because the summarizers can require organization verification.
+* ``OPENAI_MAX_OUTPUT_TOKENS`` - ``max_output_tokens``, reasoning included. Unset lets the API decide.
 
 **Knowledge base**
 

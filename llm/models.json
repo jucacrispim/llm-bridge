@@ -80,6 +80,26 @@
         {"id": "claude-haiku-4-5", "window": 200000,
          "price": {"input": 1, "cached": 0.10, "cache_write": 1.25, "output": 5}}
       ]
+    },
+    "openai": {
+      "levels": ["low", "medium", "high", "xhigh", "max"],
+      "budget": false,
+      "models": [
+        {"id": "gpt-6.2-astra", "window": 1050000,
+         "price": {"input": 8.0, "cached": 0.40, "output": 40.0,
+                   "over": {"above": 272000, "input": 16.0, "cached": 0.80, "output": 60.0}}},
+        {"id": "gpt-6.2-sol", "window": 1050000,
+         "price": {"input": 2.0, "cached": 0.10, "output": 10.0,
+                   "over": {"above": 272000, "input": 4.0, "cached": 0.20, "output": 15.0}}},
+        {"id": "gpt-6.1-terra", "window": 1050000,
+         "price": {"input": 1.0, "cached": 0.05, "output": 5.0,
+                   "over": {"above": 272000, "input": 2.0, "cached": 0.10, "output": 7.5}}},
+        {"id": "gpt-6-luna", "window": 1050000,
+         "price": {"input": 0.10, "cached": 0.01, "output": 0.50,
+                   "over": {"above": 272000, "input": 0.20, "cached": 0.02, "output": 0.75}}},
+        {"id": "gpt-6.1-sol", "window": 1050000},
+        {"id": "gpt-6-sol", "window": 1050000}
+      ]
     }
   }
 }

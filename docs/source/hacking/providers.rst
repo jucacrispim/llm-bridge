@@ -1,8 +1,8 @@
 Providers
 =========
 
-The bridge supports three LLM providers: **DeepSeek**, **Google/Gemini** and
-**Anthropic/Claude**. All implement the same ``llm.LLMProvider`` interface:
+The bridge supports four LLM providers: **DeepSeek**, **Google/Gemini**,
+**Anthropic/Claude** and **OpenAI**. All implement the same ``llm.LLMProvider`` interface:
 
 .. code-block:: go
 
@@ -13,7 +13,7 @@ The bridge supports three LLM providers: **DeepSeek**, **Google/Gemini** and
    }
 
 The active provider is selected at startup with ``--provider``
-(``deepseek``, ``google`` or ``anthropic``). Because all providers are
+(``deepseek``, ``google``, ``anthropic`` or ``openai``). Because all providers are
 registered up front, a single prompt can switch the active provider (and its
 model, thinking mode, reasoning effort or system prompt) through the per-request
 overrides described
@@ -274,6 +274,77 @@ Environment variables
     (default ``true``) and ``ANTHROPIC_THINKING_BUDGET``. A budget selects
     manual extended thinking; leaving it unset keeps adaptive thinking.
 
+OpenAI
+------
+
+Implemented in ``llm/openai.go``. The provider calls ``POST /v1/responses``
+with ``stream: true`` and sends the API key in ``Authorization: Bearer``.
+
+The Responses API is not a stylistic choice. ``/v1/chat/completions`` is not
+enough for the current models: they take tool calls on the Responses API only,
+and the bridge lives on tool calls.
+
+Model
+    Per-request model → provider model (``--model`` when openai is the
+    default, then ``OPENAI_MODEL``, then ``gpt-6.2-sol``).
+
+``store: false``
+    Sent on every request, so the response is not kept on the OpenAI side. A
+    reasoning item then comes back only encrypted, which is why the request
+    also carries ``include: ["reasoning.encrypted_content"]``.
+
+Input is a flat item list
+    ``input`` is not a list of messages. A user turn is a message item, a tool
+    call is a ``function_call`` item of its own, and a tool result is a
+    ``function_call_output`` item. The system prompt does not go in the list at
+    all: it is the top level ``instructions`` field.
+
+The reasoning item
+    A tool-calling turn comes back with a ``reasoning`` item. The API wants it
+    back with the calls it led to, before them, or the calls lose their
+    context. The bridge keeps the item as it came, encrypted content included,
+    in ``Message.Signature``, and replays it first in the assistant turn.
+    Anthropic uses the same field for a different thing, the signature of the
+    thinking block.
+
+Thinking (``effectiveThinking``)
+    Thinking off means the ``reasoning`` parameter is left out of the request.
+    ``effort: "none"`` would be the explicit off switch, and the current models
+    reject it, so there is no explicit off switch to send.
+
+Effort
+    Sent as ``reasoning.effort``. OpenAI knows the whole common scale
+    (``low``, ``medium``, ``high``, ``xhigh``, ``max``), default ``medium``.
+    There is no numeric budget, so ``thinking_budget`` is ignored.
+
+Reasoning summary
+    ``reasoning.summary: "auto"`` makes the reasoning text come back, which is
+    what reaches your client as ``thinking``. It stays off unless
+    ``OPENAI_REASONING_SUMMARY`` says otherwise: the summarizers can require
+    organization verification, and a request that asks for a summary without it
+    fails whole.
+
+Tools
+    ``{"type": "function", "name", "description", "parameters"}``. ``strict``
+    is left out: it demands ``additionalProperties: false`` and every property
+    in ``required``, and the bridge tool schemas do not follow that.
+
+Images
+    ``input_image`` parts with a ``data:`` URL for an inline image or an
+    ``http(s)`` URL for a remote one.
+
+Usage
+    ``input_tokens`` includes the cached prompt, and
+    ``input_tokens_details.cached_tokens`` is the cached part.
+    ``output_tokens`` includes the reasoning.
+
+Environment variables
+    ``OPENAI_API_KEY`` (required), ``OPENAI_URL`` (default
+    ``https://api.openai.com/v1/responses``), ``OPENAI_MODEL``,
+    ``OPENAI_THINKING`` (default ``true``), ``OPENAI_REASONING_EFFORT``
+    (default ``medium``), ``OPENAI_REASONING_SUMMARY`` (unset keeps the summary
+    off) and ``OPENAI_MAX_OUTPUT_TOKENS`` (unset lets the API decide).
+
 .. _providers-context-window:
 
 Context window
@@ -346,10 +417,16 @@ longest prefix. A model without a ``price`` has no cost, and the turn reports
   here.
 * ``over`` - Rates for a prompt above ``above`` tokens, with the same fields.
   Anthropic counts the cache in the prompt. Gemini counts ``promptTokenCount``.
+  OpenAI counts ``input_tokens``. Every OpenAI model with a price has a tier
+  above 272000 tokens.
 * ``off_peak`` - Rates outside the peak hours. The rates around it are then the
   peak ones. Only DeepSeek uses it.
 
 A rate left out is ``0``, so a model that bills a cache read needs ``cached``.
+
+``gpt-6.1-sol`` and ``gpt-6-sol`` are in the catalog without a ``price``, so a
+turn on either reports ``cost_usd: null``. Add a ``price`` to the file when you
+know the rates.
 
 DeepSeek peak hours are Monday to Friday, 01:00-04:00 and 06:00-10:00 UTC. The
 bridge checks the clock when the call ends. Chinese public holidays are

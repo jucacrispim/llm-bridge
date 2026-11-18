@@ -1,6 +1,32 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Added
+~~~~~
+
+- **OpenAI is a provider.** ``--provider openai`` (or a prompt's
+  ``provider: "openai"``) calls ``POST /v1/responses`` with streaming, the
+  Responses API rather than ``/v1/chat/completions``, because the current
+  models take tool calls on the Responses API only. The request carries
+  ``store: false``, the system prompt goes as top level ``instructions``, and
+  ``input`` is a flat item list: a message item per turn, a ``function_call``
+  item per call and a ``function_call_output`` item per result. The reasoning
+  item of a tool-calling turn is kept as it came, encrypted content included,
+  in ``Message.Signature``, and replayed before the calls it led to. Thinking
+  off leaves the ``reasoning`` parameter out, since the models reject
+  ``effort: "none"``. ``reasoning.summary`` stays off unless
+  ``OPENAI_REASONING_SUMMARY`` says otherwise, because the summarizers can
+  require organization verification. See ``hacking/providers``.
+- **Six OpenAI models are in the catalog.** ``gpt-6.2-astra``,
+  ``gpt-6.2-sol`` (the default), ``gpt-6.1-terra``, ``gpt-6-luna``,
+  ``gpt-6.1-sol`` and ``gpt-6-sol``, all with a 1050000 token window and a tier
+  above 272000 tokens. The first four carry their price, so ``turn_end``
+  reports a cost for them. The last two have no price, and a turn on them
+  reports ``cost_usd: null``.
+
 v0.8.0
 ------
 

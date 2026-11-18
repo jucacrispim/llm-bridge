@@ -45,6 +45,7 @@ func TestCatalogKnown(t *testing.T) {
 		"deepseek":  {models: 3, levels: 3, budget: false},
 		"google":    {models: 10, levels: 5, budget: true},
 		"anthropic": {models: 18, levels: 5, budget: true},
+		"openai":    {models: 6, levels: 5, budget: false},
 	}
 	for name, tc := range cases {
 		pm, ok := Catalog(name)

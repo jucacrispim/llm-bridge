@@ -11,7 +11,7 @@ import sphinx_pdj_theme
 project = 'llm-bridge'
 copyright = '2026, Juca Crispim'
 author = 'Juca Crispim'
-release = 'v0.8.0'
+release = 'v0.9.0'
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration

@@ -475,6 +475,110 @@ func TestOpenAIEmptyArgumentsBecomeObject(t *testing.T) {
 	}
 }
 
+func TestOpenAIRequestOverrides(t *testing.T) {
+	srv, body := openaiTestServer(t, []string{`{"type":"response.completed","response":{"status":"completed"}}`})
+	p := NewOpenAIProvider("key", srv.URL, DefaultOpenAIModel)
+	p.SetThinking(false)
+	p.SetReasoningEffort("high")
+	p.SetReasoningSummary("auto")
+	if p.Thinking() {
+		t.Fatal("thinking is enabled")
+	}
+	thinking := true
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Model: "gpt-6.2-astra", Thinking: &thinking,
+		Messages: []Message{{Role: RoleUser}, {Role: RoleUser, Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := openaiRequestBody(t, *body)
+	if payload["model"] != "gpt-6.2-astra" {
+		t.Errorf("model = %v", payload["model"])
+	}
+	reasoning, ok := payload["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "high" || reasoning["summary"] != "auto" {
+		t.Errorf("reasoning = %v, want high effort and auto summary", payload["reasoning"])
+	}
+	input, ok := payload["input"].([]any)
+	if !ok || len(input) != 1 {
+		t.Errorf("input = %v, want one message", payload["input"])
+	}
+}
+
+func TestOpenAICostWithMoreCachedThanInputTokens(t *testing.T) {
+	u := &openaiRespUsage{InputTokens: 5}
+	u.InputTokensDetails.CachedTokens = 10
+	price, ok := LookupPrice(DefaultOpenAIModel)
+	if !ok {
+		t.Fatal("default model has no price")
+	}
+	want := 10 * price.RatesFor(5).Cached / 1e6
+	if got := openaiResponsesCost(DefaultOpenAIModel, u); got == nil || *got != want {
+		t.Fatalf("cost = %v, want %g", got, want)
+	}
+}
+
+func TestOpenAIErrorMessageFallbacks(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		detail *openaiError
+		want   string
+	}{
+		{"message only", &openaiError{Message: "try again"}, "try again"},
+		{"code only", &openaiError{Code: "rate_limit"}, "rate_limit"},
+		{"no details", nil, "no error detail in the event"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := openaiErrorMessage(tt.detail, ""); got != tt.want {
+				t.Errorf("message = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIStreamIgnoresInvalidEvents(t *testing.T) {
+	srv, _ := openaiTestServer(t, []string{
+		"", "[DONE]", `{`,
+		`{"type":"response.output_item.done"}`,
+		`{"type":"response.output_item.done","item":42}`,
+		`{"type":"response.completed"}`,
+		`{"type":"response.output_text.delta","delta":"hi"}`,
+	})
+	p := NewOpenAIProvider("key", srv.URL, DefaultOpenAIModel)
+	resp, err := p.Chat(context.Background(), ChatRequest{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != "hi" || resp.StopReason != StopEndTurn {
+		t.Errorf("content = %q, stop reason = %q, want hi and %q", resp.Content, resp.StopReason, StopEndTurn)
+	}
+}
+
+func TestOpenAIIncompleteContentFilter(t *testing.T) {
+	srv, _ := openaiTestServer(t, []string{
+		`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}`,
+	})
+	p := NewOpenAIProvider("key", srv.URL, DefaultOpenAIModel)
+	resp, err := p.Chat(context.Background(), ChatRequest{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StopReason != "content_filter" {
+		t.Errorf("stop reason = %q, want content_filter", resp.StopReason)
+	}
+}
+
+func TestOpenAIFailedResponseWithoutError(t *testing.T) {
+	event := `{"type":"response.failed","response":{"status":"failed"}}`
+	srv, _ := openaiTestServer(t, []string{event})
+	p := NewOpenAIProvider("key", srv.URL, DefaultOpenAIModel)
+	_, err := p.Chat(context.Background(), ChatRequest{}, nil)
+	if err == nil || err.Error() != "openai api error: "+event {
+		t.Errorf("error = %v, want raw failure event", err)
+	}
+}
+
 func TestOpenAIUsageWithoutPrice(t *testing.T) {
 	// gpt-6.1-sol is in the catalog without a price, so the cost is unknown
 	// instead of zero.

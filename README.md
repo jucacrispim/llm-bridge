@@ -1,17 +1,32 @@
 # llm-bridge
 
 
-**llm-bridge** is a bridge written in Go that mediates between a client (such as
-Emacs) and several LLM providers (**DeepSeek** and **Google/Gemini**), exposing
-them all through a single, unified JSON-lines protocol over stdio.
+Use **llm-bridge** to connect your editor or another client to Anthropic,
+DeepSeek, Google Gemini, or OpenAI. Send prompts and receive streamed replies
+over a JSON Lines protocol on stdin and stdout. To switch providers, keep the
+same client and change the provider in your request.
 
-It reads commands from the client on stdin, forwards the conversation to the
-active provider, and streams the response back on stdout — translating the
-request/response format, streaming style, authentication and thinking mode for
-each provider. Beyond plain chat, the bridge relays client-side tool calls (the
-model calls the tools, the client runs them), carries image attachments, injects
-project context, offers an optional knowledge base (shared across projects by
-default, or per project), and runs hooks.
+## Features
+
+- **Streaming.** Receive replies as they arrive, with separate reasoning events
+  when the provider exposes them.
+- **Image inputs.** Attach screenshots, diagrams, or other images to prompts
+  when the selected model supports them.
+- **Model controls.** Choose a model and adjust its reasoning settings without
+  restarting the bridge.
+- **Sandboxed tools.** Let the model search files, edit code, and run shell
+  commands. The bridge uses `caged` to limit what tools can read or write.
+  Shell commands only have loopback network access. The web fetch tool runs
+  in a separate sandbox without access to your project files. Review file
+  edits, shell commands, and web requests in your client before they run.
+- **Project context.** Load Markdown instructions from your home and project
+  directories.
+- **Local knowledge base.** Enable the optional knowledge base to save and
+  search notes across sessions. Keep notes shared or scoped to a project.
+- **Hooks.** Run a local script with a `#` command instead of sending a prompt
+  to the model.
+- **Usage and cost.** Track tokens and timing per turn. See estimated costs
+  per turn and session when model pricing is available.
 
 ## Documentation
 

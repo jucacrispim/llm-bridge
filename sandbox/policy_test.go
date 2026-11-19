@@ -40,6 +40,11 @@ func TestPolicyArgs(t *testing.T) {
 			want:   []string{"--ro", "/usr", "--ro", "/etc", "--rw", "/tmp/x"},
 		},
 		{
+			name:   "read-only mounts",
+			policy: Policy{MountReadOnly: []string{"/projects/one/.git", "/projects/two/.git"}},
+			want:   []string{"--mount-ro", "/projects/one/.git", "--mount-ro", "/projects/two/.git"},
+		},
+		{
 			name:   "network",
 			policy: Policy{AllowNetworkSockets: true, ConnectPorts: []int{443, 0}},
 			want: []string{

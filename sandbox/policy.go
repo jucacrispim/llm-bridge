@@ -42,6 +42,8 @@ type Policy struct {
 	// ReadWrite holds paths granted read+write access. A single file works
 	// too.
 	ReadWrite []string
+	// MountReadOnly holds paths mounted read-only in the command namespace.
+	MountReadOnly []string
 
 	// PrivateTmp mounts a fresh tmpfs over /tmp in the command's mount
 	// namespace. The filesystem rules are created after the mount, so a
@@ -143,6 +145,9 @@ func (p Policy) Args() []string {
 	}
 	for _, path := range p.ReadWrite {
 		args = append(args, "--rw", path)
+	}
+	for _, path := range p.MountReadOnly {
+		args = append(args, "--mount-ro", path)
 	}
 	if p.PrivateTmpPath != "" {
 		args = append(args, "--private-tmp", p.PrivateTmpPath)

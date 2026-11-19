@@ -30,6 +30,23 @@ import (
 
 // TestEnsureTempDirCreates checks the directory is created with 0700 and that a
 // second call is a no-op (the bridge may run it again on every start).
+func TestGitMountPaths(t *testing.T) {
+	root := t.TempDir()
+	want := filepath.Join(root, "project", ".git")
+	for _, path := range []string{want, filepath.Join(root, "group", "nested", ".git"), filepath.Join(root, "worktree")} {
+		if err := os.MkdirAll(path, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "worktree", ".git"), []byte("gitdir: elsewhere"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := gitMountPaths([]string{root, root})
+	if err != nil || len(paths) != 1 || paths[0] != want {
+		t.Fatalf("gitMountPaths = %v, %v, want [%s]", paths, err, want)
+	}
+}
+
 func TestEnsureTempDirCreates(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "llm-bridge")
 	c := &sandboxConfig{tmpDir: dir}

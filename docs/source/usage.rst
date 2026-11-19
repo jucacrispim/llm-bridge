@@ -255,6 +255,13 @@ the reason. A tool call never has to discover it.
     projects root here: without ``-sandbox-rw ~/mysrc`` the tools cannot read or
     write any project, and a project's knowledge base cannot be stored.
 
+    At startup, the bridge checks the immediate subdirectories of each
+    writable root. It mounts any real ``.git`` directory there read-only
+    for the tools. Run ``git add`` and ``git commit`` on the host.
+    This requires caged v0.8.0 and Linux 5.12 or later when repos are found.
+    Restart the bridge after adding a repo. The scan skips nested repos,
+    symlinks and worktrees with a ``.git`` file.
+
     On a Go project you also pass ``-sandbox-rw ~/.cache/go-build`` (the
     ``GOCACHE``) and ``-sandbox-rw ~/go/pkg/mod`` (the module cache, writable
     really only for ``go get``). Those are what ``go build`` and ``go test``

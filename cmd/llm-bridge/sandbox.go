@@ -79,8 +79,9 @@ type sandboxConfig struct {
 	// $PATH).
 	cagedBin string
 	// ro/rw extend the read-only/read-write lists of the tool policies.
-	ro []string
-	rw []string
+	ro        []string
+	rw        []string
+	gitMounts []string
 	// curl exposes the curl tool.
 	curl bool
 	// curlPorts are the TCP ports the curl tool may connect to (default
@@ -195,6 +196,45 @@ func (c *sandboxConfig) toolPaths() (ro, rw []string) {
 	return ro, rw
 }
 
+func gitMountPaths(roots []string) ([]string, error) {
+	var paths []string
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		info, err := os.Stat(root)
+		if os.IsNotExist(err) || (err == nil && !info.IsDir()) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			path, err := filepath.Abs(filepath.Join(root, entry.Name(), ".git"))
+			if err != nil {
+				return nil, err
+			}
+			info, err := os.Lstat(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if info.IsDir() && !seen[path] {
+				seen[path] = true
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths, nil
+}
+
 // ensureBridgeDir creates ~/.llm-bridge before any policy grants it: caged
 // opens every granted path at setup, and a missing one is exit 125.
 func (c *sandboxConfig) ensureBridgeDir() error {
@@ -256,9 +296,10 @@ func (c *sandboxConfig) toolSandbox() (*sandbox.Sandbox, error) {
 		ro = append(ro, filepath.Dir(c.toolBin))
 	}
 	p := sandbox.Policy{
-		ReadOnly:  existing(ro),
-		ReadWrite: existing(rw),
-		Env:       tempEnv(),
+		ReadOnly:      existing(ro),
+		ReadWrite:     existing(rw),
+		MountReadOnly: c.gitMounts,
+		Env:           tempEnv(),
 		// A fresh tmpfs for /tmp and /dev/shm, or the -sandbox-tmp bind. The
 		// grants above name the private ones.
 		PrivateTmp:     true,
@@ -338,10 +379,11 @@ const namespaceProbeTimeout = 10 * time.Second
 // bridge already inside another cage) and the setup has to write
 // /proc/self/uid_map. The exit status catches an old caged (exit 2), the report
 // descriptor catches a setup that did not apply (exit 125).
-func probeNamespaces(bin string) error {
+func probeNamespaces(bin string, gitMounts []string) error {
 	sb, err := sandbox.New(bin, sandbox.Policy{
-		ReadOnly:  existing(systemReadOnly),
-		ReadWrite: existing([]string{privateTmp, "/dev/shm"}),
+		MountReadOnly: gitMounts,
+		ReadOnly:      existing(systemReadOnly),
+		ReadWrite:     existing([]string{privateTmp, "/dev/shm"}),
 		// The probe exercises the same mounts the tools get, including a
 		// grant that names the private /tmp: a Landlock rule applied before
 		// the mount would fail here instead of on every tool call.
@@ -387,7 +429,11 @@ func (c *sandboxConfig) validate() error {
 		return err
 	}
 	// Checked by running it, not by reading --help: see probeNamespaces.
-	if err := probeNamespaces(bin); err != nil {
+	gitMounts, err := gitMountPaths(c.rw)
+	if err != nil {
+		return fmt.Errorf("scan -sandbox-rw for Git directories: %w", err)
+	}
+	if err := probeNamespaces(bin, gitMounts); err != nil {
 		return err
 	}
 	// Resolved and checked here, at startup, for the same reason as the caged
@@ -402,6 +448,7 @@ func (c *sandboxConfig) validate() error {
 	if err := tools.CheckToolbox(ctx, toolBin); err != nil {
 		return err
 	}
+	c.gitMounts = gitMounts
 	c.toolBin = toolBin
 	for _, port := range c.curlPorts {
 		if port < 1 || port > 65535 {

@@ -41,6 +41,13 @@ no servers.
    shell tool gets, so the server already sees ``/usr``, ``/etc`` and the
    projects root you passed to ``-sandbox-rw``.
 
+``writable_git``
+   Defaults to ``false``, where the bridge mounts the ``.git`` of every
+   repository under the read-write roots read-only, so no tool edits hooks or
+   config. A server that runs ``git add`` or ``git commit`` needs it writable:
+   staging writes ``.git/index`` and committing writes objects and refs. The
+   cost is that this server can write any ``.git`` under those roots.
+
 ``network``
    Defaults to ``false``, where loopback is the only interface, like every
    other tool. Set it to ``true`` for a server that reaches other hosts.

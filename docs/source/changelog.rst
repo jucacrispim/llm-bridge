@@ -1,6 +1,20 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Added
+~~~~~
+
+- **Writable ``.git`` for an MCP server.** The bridge mounts the ``.git`` of
+  every repository under the read-write roots read-only, so no tool edits hooks
+  or config behind your back. A server that runs ``git add`` or ``git commit``
+  needs it writable: staging writes ``.git/index`` and committing writes
+  objects and refs. Set ``writable_git`` to ``true`` in that server's entry and
+  it gets the mount without the protection. The cost is that the server can
+  write any ``.git`` under those roots. See :doc:`mcp`.
+
 v0.10.0
 -------
 

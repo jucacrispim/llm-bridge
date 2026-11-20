@@ -142,10 +142,17 @@ func (c *sandboxConfig) mcpSandbox(s mcp.ServerConfig, bin string) (*sandbox.San
 	// caged opens every granted path before restricting itself, and execs the
 	// binary from inside the policy.
 	ro = append(ro, filepath.Dir(bin))
+	// Every .git under the RW roots is mounted read-only, so no tool edits
+	// hooks or config behind the human's back. A server that runs git needs
+	// them writable, and only it gets that: the mount is per server.
+	mounts := c.gitMounts
+	if s.WritableGit {
+		mounts = nil
+	}
 	p := sandbox.Policy{
 		ReadOnly:            existing(ro),
 		ReadWrite:           existing(rw),
-		MountReadOnly:       c.gitMounts,
+		MountReadOnly:       mounts,
 		Env:                 tempEnv(),
 		PrivateTmp:          true,
 		PrivateShm:          true,

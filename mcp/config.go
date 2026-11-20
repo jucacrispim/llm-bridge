@@ -68,6 +68,12 @@ type ServerConfig struct {
 	// the shell tool gets.
 	RO []string `json:"ro,omitempty"`
 	RW []string `json:"rw,omitempty"`
+	// WritableGit keeps the .git of the repositories under the RW roots
+	// writable for this server. The bridge mounts them read-only for the other
+	// tools, and a git tool cannot stage or commit against that: staging
+	// writes .git/index, committing writes objects and refs. The cost is that
+	// this server can then write any .git under those roots.
+	WritableGit bool `json:"writable_git,omitempty"`
 	// Network lets the server reach hosts other than loopback. Off means the
 	// network namespace has nowhere to go, like every other tool.
 	Network bool `json:"network,omitempty"`

@@ -341,3 +341,25 @@ func TestLimitsRejectsBadTotal(t *testing.T) {
 		t.Fatal("expected an error for an unparsable total")
 	}
 }
+
+// TestConfigWritableGit: a git server asks for a writable .git, and the field
+// has to survive the trip from the file, where the sandbox reads it.
+func TestConfigWritableGit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp.json")
+	content := `{"servers":{"git":{"command":"extra-tools","writable_git":true},
+		"plain":{"command":"extra-tools"}}}`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Servers["git"].WritableGit {
+		t.Error("writable_git was not read")
+	}
+	if cfg.Servers["plain"].WritableGit {
+		t.Error("writable_git defaults to false")
+	}
+}

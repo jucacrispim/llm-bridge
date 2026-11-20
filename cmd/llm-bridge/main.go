@@ -54,6 +54,7 @@ func main() {
 	populateKB := flag.String("populate-project-kb", "", "populate a knowledge base from a seed directory and exit (standalone mode; requires the ONNX embedder). Mutually exclusive with running the server.")
 	projectName := flag.String("project", "", "knowledge base key used with -populate-project-kb: a project name, or _global for the shared KB")
 	sbCfg := registerSandboxFlags()
+	mcpCfg := registerMCPFlags()
 	flag.Parse()
 
 	// Standalone mode: populate a project's knowledge base from a seed dir and
@@ -72,6 +73,13 @@ func main() {
 
 	if err := sbCfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// MCP servers are resolved after the sandbox, which sets the base policy
+	// and the git mounts every server inherits.
+	if err := mcpCfg.validate(sbCfg); err != nil {
+		fmt.Fprintf(os.Stderr, "mcp setup failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -343,7 +351,8 @@ func main() {
 
 	if err := server.RunWithKnowledgeBase(os.Stdin, os.Stdout, providers, *providerName,
 		systemPrompt, *aggressivePrune, *prune, kbBaseDir, *kbScope, kbEmbed,
-		server.Sandboxes{Tools: sb, Curl: curlSb, ToolBin: sbCfg.toolBin, CurlHosts: sbCfg.curlHosts}); err != nil {
+		server.Sandboxes{Tools: sb, Curl: curlSb, ToolBin: sbCfg.toolBin, CurlHosts: sbCfg.curlHosts,
+			MCP: mcpCfg.manager()}); err != nil {
 		os.Exit(1)
 	}
 }

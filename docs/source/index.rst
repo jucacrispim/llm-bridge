@@ -26,6 +26,8 @@ Features
   search notes across sessions. Keep notes shared or scoped to a project.
 - **Hooks.** Run a local script with a ``#`` command instead of sending a prompt
   to the model.
+- **MCP servers.** Add tools from local commands you configure, with the same
+  sandbox and the same confirmation step as the built-in tools.
 - **Usage and cost.** Track tokens and timing per turn. See estimated costs
   per turn and session when model pricing is available.
 
@@ -53,6 +55,7 @@ Features
 
    knowledge
    hooks
+   mcp
 
 .. toctree::
    :maxdepth: 2

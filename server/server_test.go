@@ -35,6 +35,7 @@ import (
 	"llm-bridge/knowledge"
 	"llm-bridge/llm"
 	"llm-bridge/logger"
+	"llm-bridge/mcp"
 	"llm-bridge/sandbox"
 	"llm-bridge/tools"
 )
@@ -2729,6 +2730,68 @@ func TestAvailableToolsCurlOnlyWithSandbox(t *testing.T) {
 	}
 }
 
+// fakeMCPServer writes a script that answers tools/list with two tools and
+// tools/call with two text fragments.
+func fakeMCPServer(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "server")
+	script := `#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *tools/list*) printf '{"tools":[{"name":"look","description":"Look"},{"name":"do"}]}\n' ;;
+    *tools/call*) printf '{"text":"a"}\n{"text":"b"}\n' ;;
+  esac
+done
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestMCPToolsOfferedAndConfirmed checks the two places the server has to know
+// about MCP: the tool list and the confirmation split.
+func TestMCPToolsOfferedAndConfirmed(t *testing.T) {
+	m := mcp.NewManager([]*mcp.Server{{
+		Name:     "fake",
+		Bin:      fakeMCPServer(t),
+		ReadOnly: map[string]bool{"look": true},
+	}})
+	st := &state{}
+	st.sandboxes.MCP = m
+	names := map[string]bool{}
+	for _, tool := range st.availableTools() {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"mcp__fake__look", "mcp__fake__do"} {
+		if !names[want] {
+			t.Errorf("tool %s not offered: %v", want, names)
+		}
+	}
+	if st.mutatesCall("mcp__fake__look", "{}") {
+		t.Error("look is read_only in the config, so it must run inline")
+	}
+	if !st.mutatesCall("mcp__fake__do", "{}") {
+		t.Error("a tool with no read_only entry must be confirmed")
+	}
+}
+
+// TestExecuteMCPToolStreamsOutput checks that each fragment goes to the client
+// as a tool_output event and the history gets the whole text at once.
+func TestExecuteMCPToolStreamsOutput(t *testing.T) {
+	st := &state{}
+	st.sandboxes.MCP = mcp.NewManager([]*mcp.Server{{Name: "fake", Bin: fakeMCPServer(t)}})
+	var out bytes.Buffer
+	st.executeTool(llm.ToolCall{ID: "t1", Name: "mcp__fake__do", Arguments: "{}"}, &out)
+	events := strings.Count(out.String(), `"event":"tool_output"`)
+	if events != 2 {
+		t.Errorf("tool_output events: got %d in %q", events, out.String())
+	}
+	if len(st.history) != 1 || st.history[0].Content != "ab" {
+		t.Errorf("history: %+v", st.history)
+	}
+}
+
 // TestRunWithSandboxLogsToolSandbox exercises the run() branch that reports the
 // tool sandbox at startup (covers the sb != nil logging path), and confirms a
 // turn still completes normally with a sandbox attached: a prompt without tool
@@ -3380,7 +3443,7 @@ func TestResolvePromptImagesNoParams(t *testing.T) {
 func TestExecuteToolCancelledSkipsResult(t *testing.T) {
 	st := &state{cwd: t.TempDir()}
 	st.setCancelled(true)
-	st.executeTool(llm.ToolCall{ID: "c1", Name: "glob", Arguments: `{"pattern":"*.go"}`})
+	st.executeTool(llm.ToolCall{ID: "c1", Name: "glob", Arguments: `{"pattern":"*.go"}`}, io.Discard)
 	if st.historyLen() != 0 {
 		t.Fatalf("cancelled tool appended a result: %+v", st.history)
 	}

@@ -182,6 +182,22 @@ func NewToolCall(id, name string, input any) ([]byte, error) {
 	return json.Marshal(evt)
 }
 
+// ToolOutput is one fragment of a tool that streams its result.
+type ToolOutput struct {
+	Event Event  `json:"event"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Text  string `json:"text"`
+}
+
+// NewToolOutput serializes a `tool_output` event: the fragment a running tool
+// printed, already accumulated in the history by the time the turn ends.
+func NewToolOutput(id, name, text string) []byte {
+	evt := ToolOutput{Event: EventToolOutput, ID: id, Name: name, Text: text}
+	b, _ := json.Marshal(evt)
+	return b
+}
+
 // ConfirmMeta carries the detail a mutating call is offered with: the commands
 // a one-liner runs, a coarse risk label and whether the arguments quote content
 // fetched earlier. All three are advisory and optional on the wire.

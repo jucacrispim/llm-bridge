@@ -231,6 +231,17 @@ Events (bridge → client)
         "segments": ["go build ./...", "rm -rf /tmp/x", "sh"],
         "risk": "high", "tainted": true}
 
+``tool_output``
+    One fragment of a running tool's output. Only MCP tools send it today: the
+    result streams while the call runs, and a client may append each ``text`` to
+    what it already shows for the ``id``. The history gets the joined text when
+    the call ends, so a client that ignores the event loses nothing but the live
+    display. See :doc:`mcp`.
+
+    .. code-block:: json
+
+       {"event": "tool_output", "id": "call_123", "name": "mcp__tupi__search", "text": "cmd/tupi/index.go:42: findIndex\n"}
+
 ``turn_end``
     End of a turn, with the stop reason, the model used and token counts.
     ``context_tokens`` is the size of the context actually sent on the **last**

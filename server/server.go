@@ -37,6 +37,7 @@ import (
 	"llm-bridge/knowledge"
 	"llm-bridge/llm"
 	"llm-bridge/logger"
+	"llm-bridge/mcp"
 	"llm-bridge/protocol"
 	"llm-bridge/sandbox"
 	"llm-bridge/tools"
@@ -54,6 +55,9 @@ type Sandboxes struct {
 	// off: a process boundary without a policy buys nothing.
 	ToolBin   string
 	CurlHosts []string
+	// MCP holds the tools of the configured MCP servers. Nil means none, and
+	// with none the tool list is the built-in one.
+	MCP *mcp.Manager
 }
 
 type state struct {
@@ -243,20 +247,28 @@ func (st *state) resolveKnowledge(id, args string) {
 }
 
 // availableTools returns the tools offered to the model. curl is left out when
-// its sandbox is nil, because nobody could run it.
+// its sandbox is nil, because nobody could run it. The MCP tools come last,
+// already sorted by name.
 func (st *state) availableTools() []llm.Tool {
 	all := tools.All()
-	if st.sandboxes.Curl != nil {
-		return all
-	}
 	out := make([]llm.Tool, 0, len(all))
 	for _, tool := range all {
-		if tool.Name == "curl" {
+		if tool.Name == "curl" && st.sandboxes.Curl == nil {
 			continue
 		}
 		out = append(out, tool)
 	}
-	return out
+	return append(out, st.sandboxes.MCP.Tools()...)
+}
+
+// mutatesCall reports whether a call has to be confirmed. An MCP tool follows
+// the read_only list of its server, which is a decision in the config; every
+// other tool keeps its static classification.
+func (st *state) mutatesCall(name, args string) bool {
+	if st.sandboxes.MCP.Has(name) {
+		return st.sandboxes.MCP.Mutates(name)
+	}
+	return tools.MutatesCall(name, args)
 }
 
 // fetchedTailLimit bounds what the taint check keeps: a page body fits, and a
@@ -309,11 +321,15 @@ var now = time.Now
 // be cancelled, which interrupts a running shell/grep process; a result is not
 // appended for a cancelled turn, because the assistant message was already
 // sanitized away and the result would be an orphan.
-func (st *state) executeTool(tc llm.ToolCall) {
+func (st *state) executeTool(tc llm.ToolCall, w io.Writer) {
 	start := now()
 	defer func() { st.turnTool += now().Sub(start) }()
 	if tc.Name == "knowledge" {
 		st.resolveKnowledge(tc.ID, tc.Arguments)
+		return
+	}
+	if st.sandboxes.MCP.Has(tc.Name) {
+		st.executeMCPTool(tc, w)
 		return
 	}
 	exec := tools.NewExecutorWithToolbox(st.cwd, st.sandboxes.Tools, st.sandboxes.Curl, st.sandboxes.CurlHosts, st.sandboxes.ToolBin)
@@ -339,6 +355,36 @@ func (st *state) executeTool(tc llm.ToolCall) {
 		// flagged as tainted. Recorded before the result is appended: the
 		// taint check runs when the *next* confirmation is built.
 		st.rememberFetched(out)
+	}
+	st.appendToolResult(tc.ID, out)
+}
+
+// executeMCPTool runs an MCP call and streams each fragment to the client as a
+// tool_output event. The history gets the whole text at the end, because every
+// provider takes a tool result as one message.
+func (st *state) executeMCPTool(tc llm.ToolCall, w io.Writer) {
+	ctx, cancel := context.WithCancel(context.Background())
+	st.setCancel(cancel)
+	out, err := st.sandboxes.MCP.Call(ctx, tc.Name, json.RawMessage(tc.Arguments), func(text string) error {
+		if st.isCancelled() {
+			return context.Canceled
+		}
+		_, werr := w.Write([]byte(string(protocol.NewToolOutput(tc.ID, tc.Name, text)) + "\n"))
+		return werr
+	})
+	st.setCancel(nil)
+	cancel()
+	// Audit line, like curl: the call went to another process, and the log is
+	// where a misbehaving server shows up.
+	logger.Infof("mcp tool=%s bytes=%d ok=%t cancelled=%t", tc.Name, len(out), err == nil, st.isCancelled())
+	if err != nil {
+		if out != "" {
+			out += "\n"
+		}
+		out += "error: " + err.Error()
+	}
+	if st.isCancelled() {
+		return
 	}
 	st.appendToolResult(tc.ID, out)
 }
@@ -1049,7 +1095,7 @@ func handleLine(line string, st *state, w io.Writer) (string, bool) {
 			return "", false
 		}
 		delete(st.pendingApprovals, p.ID)
-		st.executeTool(tc)
+		st.executeTool(tc, w)
 		if st.isCancelled() {
 			return "", false
 		}
@@ -1208,14 +1254,14 @@ func runToolCycle(st *state, w io.Writer) (string, bool) {
 			if tc.Arguments != "" {
 				input = json.RawMessage(tc.Arguments)
 			}
-			if !tools.MutatesCall(tc.Name, tc.Arguments) {
+			if !st.mutatesCall(tc.Name, tc.Arguments) {
 				evt, err := protocol.NewToolCall(tc.ID, tc.Name, input)
 				if err == nil {
 					_ = st.write(w, string(evt)+"\n")
 				}
 				// Execute the read-only tool now and append its real result so
 				// the turn keeps moving without a client round-trip.
-				st.executeTool(tc)
+				st.executeTool(tc, w)
 				continue
 			}
 			// One keystroke approves a whole one-liner, so past the segment

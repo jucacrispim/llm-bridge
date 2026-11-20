@@ -1,6 +1,18 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Added
+~~~~~
+
+- **MCP servers as tools.** Configure local commands in
+  ``~/.config/llm-bridge/mcp.json`` and the bridge offers their tools to the
+  model as ``mcp__<server>__<tool>``. Each call runs in its own process, under
+  the tool sandbox and the same confirmation step as the built-in tools. The
+  output streams to the client as ``tool_output`` events. See :doc:`mcp`.
+
 v0.9.0
 ------
 

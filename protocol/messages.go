@@ -42,7 +42,10 @@ const (
 	EventToolCall Event = "tool_call"
 	// EventToolConfirm asks the client to approve a mutating call before the
 	// bridge runs it. Read-only tools come as `tool_call`, already executed.
-	EventToolConfirm  Event = "tool_confirm"
+	EventToolConfirm Event = "tool_confirm"
+	// EventToolOutput carries a fragment of a running tool's output, so the
+	// client can show it as it arrives.
+	EventToolOutput   Event = "tool_output"
 	EventTurnEnd      Event = "turn_end"
 	EventError        Event = "error"
 	EventCancelled    Event = "cancelled"

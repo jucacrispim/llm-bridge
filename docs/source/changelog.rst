@@ -1,8 +1,22 @@
 Changelog
 =========
 
-Unreleased
-----------
+v0.11.0
+-------
+
+An MCP call now runs in the directory of the prompt, and the server that runs
+git can write the ``.git`` it needs.
+
+Added
+~~~~~
+
+- **A writable git directory for the server that runs git.** The bridge mounts
+  the ``.git`` of every repository under the read-write roots read-only, so no
+  tool edits hooks or config behind your back. A server that runs ``git add``
+  or ``git commit`` needs it writable: staging writes ``.git/index`` and
+  committing writes objects and refs. Set ``writable_git`` to ``true`` in that
+  server's entry and it gets the mount without the protection. The cost is
+  that the server can write any ``.git`` under those roots. See :doc:`mcp`.
 
 Changed
 ~~~~~~~
@@ -11,18 +25,11 @@ Changed
   server started from the bridge's own directory saw no repository and
   answered ``fatal: not a git repository``. The ``cwd`` of the server config
   still wins when it is set, so a server pinned to a directory stays there.
-
-Added
-~~~~~
-
-- **A writable git directory for the server that runs git.** The bridge mounts
-  the ``.git`` of
-  every repository under the read-write roots read-only, so no tool edits hooks
-  or config behind your back. A server that runs ``git add`` or ``git commit``
-  needs it writable: staging writes ``.git/index`` and committing writes
-  objects and refs. Set ``writable_git`` to ``true`` in that server's entry and
-  it gets the mount without the protection. The cost is that the server can
-  write any ``.git`` under those roots. See :doc:`mcp`.
+- **The default prompt asks for the knowledge base on its own.** It lists when
+  to search (a why, a past decision, a project untouched in the session) and
+  when to record, with the ``<project>/<theme>`` label and the note that
+  ``add`` waits for the client to confirm. Before, one line told the model to
+  consult the knowledge base before reasoning from scratch.
 
 v0.10.0
 -------

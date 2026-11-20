@@ -191,6 +191,11 @@ func TestPathRisk(t *testing.T) {
 		{"/home/u/proj", ".llm-bridge-backup.md", ""},
 		// .. is resolved before the check, so it cannot walk out of the name.
 		{"/home/u/proj", "sub/../.llm-bridge/context.md", "high"},
+		// The KB and seed root is read-write for the tools and steers the next
+		// session through `reset`, but it is not the sensitive dir: this stays
+		// low unless PathRisk learns about it. See llm-bridge/kb-write-path.
+		{"/home/u/proj", "~/.local/share/llm-bridge/seeds/llm-bridge/README.md", ""},
+		{"/home/u/proj", "/home/u/.local/share/llm-bridge/knowledge_bases/llm-bridge/data.json", ""},
 	}
 	for _, c := range cases {
 		if got := PathRisk(c.cwd, c.path); got != c.want {

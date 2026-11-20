@@ -1,17 +1,30 @@
 Changelog
 =========
 
-Unreleased
-----------
+v0.10.0
+-------
+
+The bridge runs local commands that speak the MCP tool protocol and offers
+their tools to the model, with the same sandbox and the same confirmation step
+as the built-in ones.
 
 Added
 ~~~~~
 
-- **MCP servers as tools.** Configure local commands in
-  ``~/.config/llm-bridge/mcp.json`` and the bridge offers their tools to the
-  model as ``mcp__<server>__<tool>``. Each call runs in its own process, under
-  the tool sandbox and the same confirmation step as the built-in tools. The
-  output streams to the client as ``tool_output`` events. See :doc:`mcp`.
+- **MCP servers as tools.** List your commands in
+  ``~/.config/llm-bridge/mcp.json`` and the bridge offers their tools as
+  ``mcp__<server>__<tool>``. Each call runs the command in its own process,
+  under the policy the config asks for: read-only and read-write paths, private
+  ``/tmp`` and ``/dev/shm``, and no network unless the entry says otherwise.
+  Tools the config does not list as ``read_only`` go to the client as
+  ``tool_confirm`` first. ``-mcp-config`` names another file and ``-mcp=false``
+  turns the feature off. A server that fails to answer at startup is left out
+  with a warning in the log file. See :doc:`mcp`.
+- **The tool_output event.** A tool that answers in pieces streams each one to
+  the client while it runs; MCP calls are the only ones today. The history gets
+  the joined text when the call ends, so a client that ignores the event loses
+  the live display and nothing else. A call stopped by a limit keeps what
+  arrived and a line saying why it stopped. See :doc:`protocol`.
 
 v0.9.0
 ------
@@ -233,13 +246,13 @@ Fixed
   ``/dev/urandom``.
 - **The shell risk label no longer fires on ordinary commands.** The
   markers in ``tools.Risk`` were matched as plain substrings, and most of them
-  are two or three letters long: ``nc `` matched inside ``func `` and ``sync ``,
-  so ``go test -run TestFunc`` was reported as **high** risk, and ``| sh``
-  matched inside ``| shellcheck``. They are now pre-compiled regular expressions
-  anchored on word boundaries (``\bnc\b``, ``\bsu\s+-``, …), flag clusters are
-  written as ``-[a-z]*r`` so ``rm -rf``/``rm -fr``/``rm -rfv`` all match without
-  enumerating orderings, and the pipe-to-shell shape is a single expression
-  whose trailing ``\b`` keeps ``| shellcheck`` and ``| ssh`` out. The label
+  are two or three letters long: the marker for ``nc`` matched inside ``func``
+  and ``sync``, so ``go test -run TestFunc`` was reported as **high** risk, and
+  ``| sh`` matched inside ``| shellcheck``. They are now pre-compiled regular
+  expressions anchored on word boundaries (``\bnc\b``, ``\bsu\s+-``, …), flag
+  clusters are written as ``-[a-z]*r`` so ``rm -rf``/``rm -fr``/``rm -rfv`` all
+  match without enumerating orderings, and the pipe-to-shell shape is a single
+  expression whose trailing ``\b`` keeps ``| shellcheck`` and ``| ssh`` out. The label
   stays advisory — it never blocks a call — but a false positive now costs
   nothing instead of drowning the real ones.
 

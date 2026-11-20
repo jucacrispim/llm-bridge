@@ -90,7 +90,7 @@ func TestEmptyManager(t *testing.T) {
 	if !m.Mutates("anything") {
 		t.Error("an unknown tool must be treated as mutating")
 	}
-	if _, err := m.Call(context.Background(), "anything", nil, nil); err == nil {
+	if _, err := m.Call(context.Background(), "anything", nil, "", nil); err == nil {
 		t.Fatal("expected an error for an unknown tool")
 	}
 	var nilManager *Manager
@@ -143,7 +143,7 @@ func TestServerCallAcceptsLooseShapes(t *testing.T) {
 printf '[1,2]\n'
 printf '{"content":[{"type":"text","text":""}],"text":"ok"}\n'`)}
 	var got strings.Builder
-	if err := srv.Call(context.Background(), "x", nil, func(s string) error {
+	if err := srv.Call(context.Background(), "x", nil, "", func(s string) error {
 		got.WriteString(s)
 		return nil
 	}); err != nil {
@@ -191,6 +191,46 @@ func TestServerDir(t *testing.T) {
 	}
 }
 
+// TestServerCallDir: a call runs where the prompt is, and a cwd written in the
+// config still wins over it.
+func TestServerCallDir(t *testing.T) {
+	promptDir := t.TempDir()
+	configDir := t.TempDir()
+	realPrompt, err := filepath.EvalSymlinks(promptDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realConfig, err := filepath.EvalSymlinks(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := fakeServer(t, `while IFS= read -r line; do
+  case "$line" in
+    *tools/call*) printf '{"text":"%s"}\n' "$(pwd -P)" ;;
+  esac
+done`)
+	call := func(srv *Server, dir string) string {
+		t.Helper()
+		var got strings.Builder
+		if err := srv.Call(context.Background(), "x", nil, dir, func(s string) error {
+			got.WriteString(s)
+			return nil
+		}); err != nil {
+			t.Fatalf("call: %v", err)
+		}
+		return got.String()
+	}
+
+	srv := &Server{Name: "fake", Bin: bin}
+	if got := call(srv, promptDir); got != realPrompt {
+		t.Errorf("without a config cwd: got %q want %q", got, realPrompt)
+	}
+	srv.Dir = configDir
+	if got := call(srv, promptDir); got != realConfig {
+		t.Errorf("config cwd should win: got %q want %q", got, realConfig)
+	}
+}
+
 // TestManagerCallStopsOnTotal: a server that keeps the call open past the total
 // deadline is cut, and an empty result still says why.
 func TestManagerCallStopsOnTotal(t *testing.T) {
@@ -205,7 +245,7 @@ done`),
 		Limits: sandbox.StreamLimits{Idle: 30 * time.Second, Total: 200 * time.Millisecond},
 	}
 	m := NewManager([]*Server{srv})
-	out, err := m.Call(context.Background(), "mcp__slow__x", nil, nil)
+	out, err := m.Call(context.Background(), "mcp__slow__x", nil, "", nil)
 	if err != nil {
 		t.Fatalf("a stopped stream is not a failure: %v", err)
 	}
@@ -229,7 +269,7 @@ done`),
 		Limits: sandbox.StreamLimits{MaxBytes: 40},
 	}
 	m := NewManager([]*Server{srv})
-	out, err := m.Call(context.Background(), "mcp__loud__x", nil, nil)
+	out, err := m.Call(context.Background(), "mcp__loud__x", nil, "", nil)
 	if err != nil {
 		t.Fatalf("a stopped stream is not a failure: %v", err)
 	}
@@ -248,7 +288,7 @@ func TestManagerCallToolError(t *testing.T) {
   esac
 done`)}
 	m := NewManager([]*Server{withText})
-	out, err := m.Call(context.Background(), "mcp__bad__x", nil, nil)
+	out, err := m.Call(context.Background(), "mcp__bad__x", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +303,7 @@ done`)}
   esac
 done`)}
 	m = NewManager([]*Server{silent})
-	out, err = m.Call(context.Background(), "mcp__bad__x", nil, nil)
+	out, err = m.Call(context.Background(), "mcp__bad__x", nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +316,7 @@ done`)}
 // model's mistake, reported as such instead of being sent to the server.
 func TestManagerCallRejectsBadArguments(t *testing.T) {
 	m := NewManager([]*Server{{Name: "fake", Bin: fakeServer(t, echoServer)}})
-	if _, err := m.Call(context.Background(), "mcp__fake__echo", json.RawMessage("{bad"), nil); err == nil {
+	if _, err := m.Call(context.Background(), "mcp__fake__echo", json.RawMessage("{bad"), "", nil); err == nil {
 		t.Fatal("expected an error for malformed arguments")
 	}
 }
@@ -295,7 +335,7 @@ func TestServerListUnreadableAnswer(t *testing.T) {
 func TestServerCallConsumerError(t *testing.T) {
 	srv := &Server{Name: "fake", Bin: fakeServer(t, `printf '{"content":[{"type":"text","text":"x"}]}\n'`)}
 	stop := errors.New("enough")
-	err := srv.Call(context.Background(), "x", nil, func(string) error { return stop })
+	err := srv.Call(context.Background(), "x", nil, "", func(string) error { return stop })
 	if !errors.Is(err, stop) {
 		t.Fatalf("expected the consumer error, got %v", err)
 	}

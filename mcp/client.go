@@ -87,7 +87,7 @@ type chunk struct {
 func (s *Server) List(ctx context.Context) ([]Tool, error) {
 	var listed []toolWire
 	req := []byte(`{"method":"tools/list"}` + "\n")
-	err := s.run(ctx, s.listLimits(), req, func(raw json.RawMessage) error {
+	err := s.run(ctx, s.listLimits(), req, "", func(raw json.RawMessage) error {
 		var resp struct {
 			Tools *[]toolWire `json:"tools"`
 		}
@@ -121,7 +121,10 @@ func (s *Server) List(ctx context.Context) ([]Tool, error) {
 // Call runs tools/call for name and hands every text fragment to onText. The
 // text is delivered as it arrives; the return value is the outcome of the
 // whole call, not of the last fragment.
-func (s *Server) Call(ctx context.Context, name string, args json.RawMessage, onText func(string) error) error {
+//
+// dir is where the model thinks it is. The cwd of the config wins when it is
+// set, so a server pinned to a directory stays there.
+func (s *Server) Call(ctx context.Context, name string, args json.RawMessage, dir string, onText func(string) error) error {
 	args, err := callArguments(args)
 	if err != nil {
 		return err
@@ -134,7 +137,7 @@ func (s *Server) Call(ctx context.Context, name string, args json.RawMessage, on
 	// checked just above.
 	req, _ := json.Marshal(map[string]any{"method": "tools/call", "params": params})
 	failed := false
-	err = s.run(ctx, s.Limits, append(req, '\n'), func(raw json.RawMessage) error {
+	err = s.run(ctx, s.Limits, append(req, '\n'), dir, func(raw json.RawMessage) error {
 		var c chunk
 		if err := json.Unmarshal(raw, &c); err != nil {
 			// Not the object shape: whatever the value is, its text is the
@@ -176,15 +179,27 @@ func emitText(text string, onText func(string) error) error {
 }
 
 // run executes the command with stdin and feeds each printed value to onValue.
-func (s *Server) run(ctx context.Context, limits sandbox.StreamLimits, stdin []byte, onValue func(json.RawMessage) error) error {
+func (s *Server) run(ctx context.Context, limits sandbox.StreamLimits, stdin []byte, dir string, onValue func(json.RawMessage) error) error {
+	dir = s.workDir(dir)
 	if s.Sandbox != nil {
-		return s.Sandbox.RunStream(ctx, s.Dir, s.Bin, stdin, limits, onValue, s.Args...)
+		return s.Sandbox.RunStream(ctx, dir, s.Bin, stdin, limits, onValue, s.Args...)
 	}
 	cmd := exec.CommandContext(ctx, s.Bin, s.Args...)
-	if s.Dir != "" {
-		cmd.Dir = s.Dir
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	return sandbox.Stream(ctx, cmd, stdin, limits, onValue)
+}
+
+// workDir picks where the server process starts. The cwd of the config wins,
+// because that is the one place the server was pinned on purpose. Without it
+// the server runs where the model thinks it is, not where the bridge was
+// started.
+func (s *Server) workDir(dir string) string {
+	if s.Dir != "" {
+		return s.Dir
+	}
+	return dir
 }
 
 // listLimits bounds the startup listing: a server that hangs there must not

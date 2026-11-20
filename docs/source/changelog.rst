@@ -4,10 +4,19 @@ Changelog
 Unreleased
 ----------
 
+Changed
+~~~~~~~
+
+- An MCP call runs in the directory of the prompt, like every other tool. A
+  server started from the bridge's own directory saw no repository and
+  answered ``fatal: not a git repository``. The ``cwd`` of the server config
+  still wins when it is set, so a server pinned to a directory stays there.
+
 Added
 ~~~~~
 
-- **Writable ``.git`` for an MCP server.** The bridge mounts the ``.git`` of
+- **A writable git directory for the server that runs git.** The bridge mounts
+  the ``.git`` of
   every repository under the read-write roots read-only, so no tool edits hooks
   or config behind your back. A server that runs ``git add`` or ``git commit``
   needs it writable: staging writes ``.git/index`` and committing writes

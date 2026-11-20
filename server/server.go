@@ -365,7 +365,9 @@ func (st *state) executeTool(tc llm.ToolCall, w io.Writer) {
 func (st *state) executeMCPTool(tc llm.ToolCall, w io.Writer) {
 	ctx, cancel := context.WithCancel(context.Background())
 	st.setCancel(cancel)
-	out, err := st.sandboxes.MCP.Call(ctx, tc.Name, json.RawMessage(tc.Arguments), func(text string) error {
+	// The server runs in the cwd the model was given, so a git tool works on
+	// the repository the prompt is about. A cwd in the server config wins.
+	out, err := st.sandboxes.MCP.Call(ctx, tc.Name, json.RawMessage(tc.Arguments), st.cwd, func(text string) error {
 		if st.isCancelled() {
 			return context.Canceled
 		}

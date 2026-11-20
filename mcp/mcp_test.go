@@ -148,7 +148,7 @@ func TestServerListAndCall(t *testing.T) {
 	}
 
 	var fragments []string
-	if err := srv.Call(ctx, "echo", json.RawMessage(`{"q":"x"}`), func(s string) error {
+	if err := srv.Call(ctx, "echo", json.RawMessage(`{"q":"x"}`), "", func(s string) error {
 		fragments = append(fragments, s)
 		return nil
 	}); err != nil {
@@ -164,7 +164,7 @@ func TestServerCallToolError(t *testing.T) {
   printf '{"isError":true,"text":"boom"}\n'
 done`)}
 	var got string
-	err := srv.Call(context.Background(), "x", nil, func(s string) error {
+	err := srv.Call(context.Background(), "x", nil, "", func(s string) error {
 		got += s
 		return nil
 	})
@@ -206,7 +206,7 @@ func TestNewManagerToolsAndClassification(t *testing.T) {
 func TestManagerCallJoinsFragments(t *testing.T) {
 	m := NewManager([]*Server{{Name: "fake", Bin: fakeServer(t, echoServer)}})
 	var streamed []string
-	out, err := m.Call(context.Background(), "mcp__fake__echo", nil, func(s string) error {
+	out, err := m.Call(context.Background(), "mcp__fake__echo", nil, "", func(s string) error {
 		streamed = append(streamed, s)
 		return nil
 	})
@@ -233,7 +233,7 @@ done`),
 		Limits: sandbox.StreamLimits{Idle: 200 * time.Millisecond, Total: 30 * time.Second},
 	}
 	m := NewManager([]*Server{srv})
-	out, err := m.Call(context.Background(), "mcp__slow__x", nil, nil)
+	out, err := m.Call(context.Background(), "mcp__slow__x", nil, "", nil)
 	if err != nil {
 		t.Fatalf("a stopped stream is not a failure: %v", err)
 	}
@@ -256,7 +256,7 @@ done`)}
 		cancel()
 	}()
 	start := time.Now()
-	_, err := m.Call(ctx, "mcp__slow__x", nil, nil)
+	_, err := m.Call(ctx, "mcp__slow__x", nil, "", nil)
 	if err == nil {
 		t.Fatal("expected an error from a cancelled call")
 	}

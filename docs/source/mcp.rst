@@ -34,7 +34,9 @@ no servers.
    Arguments passed to the binary.
 
 ``cwd``
-   Working directory of the server process.
+   Working directory of the server process. The default is the directory of
+   the prompt, so a server that runs ``git`` works on the repository you are
+   in. A value here pins the server to that directory on every turn.
 
 ``ro`` and ``rw``
    Extra read-only and read-write paths. The base policy is the same one the

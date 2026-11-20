@@ -137,11 +137,12 @@ func (m *Manager) Mutates(name string) bool {
 }
 
 // Call runs a tool and returns its text. The fragments go to onText as they
-// arrive; the result is what the history gets.
+// arrive; the result is what the history gets. dir is the working directory of
+// the prompt, which the server uses when the config does not pin one.
 //
 // A stream cut by a limit is not a failure: the text carries a line saying why
 // it stopped, and the turn moves on.
-func (m *Manager) Call(ctx context.Context, exposed string, args json.RawMessage, onText func(string) error) (string, error) {
+func (m *Manager) Call(ctx context.Context, exposed string, args json.RawMessage, dir string, onText func(string) error) (string, error) {
 	ref, ok := m.tools[exposed]
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %s", exposed)
@@ -154,7 +155,7 @@ func (m *Manager) Call(ctx context.Context, exposed string, args json.RawMessage
 		}
 		return onText(text)
 	}
-	err := ref.server.Call(ctx, ref.name, args, emit)
+	err := ref.server.Call(ctx, ref.name, args, dir, emit)
 	text := b.String()
 	switch {
 	case err == nil:

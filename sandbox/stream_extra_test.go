@@ -226,3 +226,36 @@ func TestRunStreamOnValueError(t *testing.T) {
 		t.Fatalf("expected the consumer error, got %v", err)
 	}
 }
+
+// TestRunStreamReportAfterEOF covers the other order of the same two endings:
+// the stream closes first and the report descriptor closes after it.
+//
+// caged keeps the descriptor until it exits, so a command that closes stdout
+// and lives a moment longer delivers the EOF before the empty report. The call
+// has to end on that report instead of waiting out the grace, which is the
+// order a loaded CI machine gets and a fast one usually does not.
+func TestRunStreamReportAfterEOF(t *testing.T) {
+	sb, err := New(fakeCaged(t, `exec "$@"`), Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `printf '{"text":"x"}\n'
+exec 1>&-
+sleep 0.3`
+	var got []string
+	start := time.Now()
+	err = sb.RunStream(context.Background(), "", "bash", nil,
+		StreamLimits{Idle: 30 * time.Second, Total: 60 * time.Second, ExitGrace: 10 * time.Second},
+		collect(t, &got), "-c", script)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// The grace is ten seconds and the command lives 300ms, so a call that
+	// waited for the grace instead of the report would show it here.
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("the empty report did not end the call, took %v", elapsed)
+	}
+	if len(got) != 1 || got[0] != "x" {
+		t.Errorf("values: got %v", got)
+	}
+}

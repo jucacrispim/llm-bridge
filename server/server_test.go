@@ -3327,6 +3327,59 @@ func TestRunToolCycleSanitizesOrphanBeforeSend(t *testing.T) {
 	}
 }
 
+// cancelOnWrite flips the turn as cancelled the first time anything is
+// written, which is how a client `cancel` lands in the middle of the
+// tool-call loop: the reader goroutine sets the flag while this one runs.
+type cancelOnWrite struct {
+	w  bytes.Buffer
+	st *state
+}
+
+func (c *cancelOnWrite) Write(p []byte) (int, error) {
+	c.st.setCancelled(true)
+	return c.w.Write(p)
+}
+
+// TestRunToolCycleStopsOnCancelBetweenCalls covers the guard at the top of the
+// tool-call loop. A `cancel` that arrives after the provider answered must stop
+// the calls that were not offered yet, instead of executing or confirming them.
+func TestRunToolCycleStopsOnCancelBetweenCalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args := `{"path":"` + path + `"}`
+	fp := &fakeProvider{
+		name: "fake",
+		resp: &llm.ChatResponse{
+			StopReason: "tool_use",
+			Usage:      &llm.Usage{},
+			ToolCalls: []llm.ToolCall{
+				{ID: "c1", Name: "read", Arguments: args},
+				{ID: "c2", Name: "read", Arguments: args},
+			},
+		},
+	}
+	st := &state{provider: fp}
+	w := &cancelOnWrite{st: st}
+	out, quit := runToolCycle(st, w)
+	if quit {
+		t.Fatal("a cancelled turn must not quit")
+	}
+	if out != "" {
+		t.Errorf("returned %q", out)
+	}
+	// The first call was already offered when the cancel arrived, and running
+	// it is fine: its result is dropped afterwards. The second must never be
+	// reached.
+	if n := strings.Count(w.w.String(), `"event":"tool_call"`); n != 1 {
+		t.Errorf("offered %d calls, want 1: %q", n, w.w.String())
+	}
+	if strings.Contains(w.w.String(), `"id":"c2"`) {
+		t.Errorf("the second call was offered after the cancel: %q", w.w.String())
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Image attachments (prompt `images`)
 // ---------------------------------------------------------------------------
